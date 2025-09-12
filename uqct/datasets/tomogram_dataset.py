@@ -3,7 +3,7 @@ import torch
 import os
 
 
-from uqct.datasets.base_dataset import BaseImageDataset, PairedTransform
+from uqct.datasets.base_dataset import BaseImageDataset
 
 
 class h5_wrapper():

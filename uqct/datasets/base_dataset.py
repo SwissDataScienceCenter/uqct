@@ -1,68 +1,13 @@
-import h5py
 import torch
-import os
 
 from torch.utils.data import Dataset
 from torchvision.transforms.functional import resize, InterpolationMode
 from torchvision import transforms
 
-from chip.utils.fourier import fft_2D, ifft_2D
-from chip.utils import add_defects
+
 import torch.nn.functional as F
-from chip.utils.utils import create_gaussian_filter
 
 
-class PairedTransform:
-    """Applies the same transform to a pair of images."""
-
-    def __init__(self, transform):
-        self.transform = transform
-
-    def __call__(self, img1, img2, seed=None):
-        if seed is None:
-            seed = torch.randint(0, 2 ** 32, ())
-        torch.manual_seed(seed)
-        img1 = self.transform(img1)
-        torch.manual_seed(seed)
-        img2 = self.transform(img2)
-        return img1, img2
-
-
-def contrast_transform(target, scale=10):
-    cont_target = torch.sigmoid((target - 0.5) * scale)
-    cont_target -= torch.min(cont_target)
-    cont_target /= torch.max(cont_target)
-    return cont_target
-
-
-def add_gray_background(img, mask=None):
-    if mask is None:
-        w = img.shape[1]
-        cp = torch.meshgrid(torch.arange(w, device=img.device), torch.arange(w, device=img.device))
-        mask = (cp[0] - w / 2) ** 2 + (cp[1] - w / 2) ** 2 <= (w / 2) ** 2
-    return img + 0.5 * mask * (1. - img)
-
-
-def transform_to_gray(image):
-    alpha = 0.15
-    gaussian_filter = create_gaussian_filter(size=image.shape[-1], sigma=70)
-    gaussian_filter /= torch.max(gaussian_filter)
-    gray = alpha + (1 - alpha) * (image + 0.1)
-    gray /= torch.max(gray)
-    fft_gray = fft_2D(gray, ortho=True)
-    fft_gray += 0.1 * torch.randn_like(fft_gray)
-    gray = ifft_2D(fft_gray * gaussian_filter, ortho=True).real
-    return gray
-
-
-def to_synthetic(target):
-    size = target.shape[-2:]
-    target = F.interpolate(target.unsqueeze(0).unsqueeze(0), size=size, mode='bilinear', align_corners=True)[0, 0]
-    target /= torch.max(target)
-    cont_target = torch.sigmoid((target - 0.5) * 20)
-    cont_target -= torch.min(cont_target)
-    cont_target /= torch.max(cont_target)
-    return cont_target
 
 def get_circle(x, rescale):
     w = rescale if rescale is not None else x.shape[-1]
@@ -98,11 +43,6 @@ class BaseImageDataset(Dataset):
         self.transforms.append(
             transforms.RandomAffine((angle, angle), (0, 0), (1., 1.), interpolation=InterpolationMode.BILINEAR))
 
-    def add_to_synthetic(self):
-        self.transforms.append(to_synthetic)
-
-    def add_to_gray(self):
-        self.transforms.append(transform_to_gray)
 
     def add_contrast(self, scale=10):
         def contrast(image):
