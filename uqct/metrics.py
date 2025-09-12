@@ -1,7 +1,12 @@
 from skimage.metrics import structural_similarity as SS
 import torch
-from chip.utils.utils import apply_circle_mask
 
+
+def apply_circle_mask(img):
+    W, H = img.shape[-2:]
+    cp = torch.cartesian_prod(torch.arange(W, device=img.device), torch.arange(H, device=img.device))
+    circle_mask = (cp[:, 0] - W / 2) ** 2 + (cp[:, 1] - W / 2) ** 2 <= (W / 2) ** 2
+    return img * circle_mask.reshape(img.shape[-2:])
 
 def PSNR(original, compressed, max_pixel=None):
     if max_pixel is None:
