@@ -1,36 +1,62 @@
-import torch
-from skimage.transform import iradon, radon
-import torch
 import numpy as np
+import torch
 import torch.nn.functional as F
 import tqdm
+from skimage.transform import iradon, radon
 
-def batched_sinogram(images, sinogram_angles=None, interpolation:str='bilinear'):
+
+def batched_sinogram(images, sinogram_angles=None, interpolation: str = "bilinear"):
     assert len(images.shape) == 3
-    
+
     device = images.device
     sinogram_angles = sinogram_angles.to(device)
 
-    rotation_matrix = torch.stack([
-        torch.stack([torch.cos(torch.deg2rad(sinogram_angles)), -torch.sin(torch.deg2rad(sinogram_angles)),
-                     torch.zeros_like(sinogram_angles)], 1).to(device),
-        torch.stack([torch.sin(torch.deg2rad(sinogram_angles)), torch.cos(torch.deg2rad(sinogram_angles)),
-                     torch.zeros_like(sinogram_angles)], 1).to(device)
-    ], 1)
-    current_grid = F.affine_grid(rotation_matrix.to(images.device),
-                                 images.repeat(len(sinogram_angles), 1, 1, 1).size(), align_corners=False)
+    rotation_matrix = torch.stack(
+        [
+            torch.stack(
+                [
+                    torch.cos(torch.deg2rad(sinogram_angles)),
+                    -torch.sin(torch.deg2rad(sinogram_angles)),
+                    torch.zeros_like(sinogram_angles),
+                ],
+                1,
+            ).to(device),
+            torch.stack(
+                [
+                    torch.sin(torch.deg2rad(sinogram_angles)),
+                    torch.cos(torch.deg2rad(sinogram_angles)),
+                    torch.zeros_like(sinogram_angles),
+                ],
+                1,
+            ).to(device),
+        ],
+        1,
+    )
+    current_grid = F.affine_grid(
+        rotation_matrix.to(images.device),
+        images.repeat(len(sinogram_angles), 1, 1, 1).size(),
+        align_corners=False,
+    )
 
-    rotated = F.grid_sample(images.repeat(len(sinogram_angles), 1, 1, 1).float(), current_grid.repeat(1, 1, 1, 1), align_corners=False, mode=interpolation)
+    rotated = F.grid_sample(
+        images.repeat(len(sinogram_angles), 1, 1, 1).float(),
+        current_grid.repeat(1, 1, 1, 1),
+        align_corners=False,
+        mode=interpolation,
+    )
     rotated = rotated.transpose(0, 1)
     # Sum over one of the dimensions to compute the projection
     sinogram = rotated.sum(axis=-2).squeeze(2)
     return sinogram
 
-def compute_sinogram(images, angles, interpolation:str='bilinear'):
+
+def compute_sinogram(images, angles, interpolation: str = "bilinear"):
     batch_dims = images.size()[:-2]
     img_shape = images.size()[-2:]
     images = images.view(-1, *img_shape)
-    sinogram = batched_sinogram(images, sinogram_angles=angles, interpolation=interpolation)
+    sinogram = batched_sinogram(
+        images, sinogram_angles=angles, interpolation=interpolation
+    )
     return sinogram.view(*batch_dims, len(angles), img_shape[0])
 
 
@@ -46,10 +72,18 @@ def linspace(start, end, steps, endpoint=True, device=None, dtype=None):
             return torch.tensor([start], device=device, dtype=dtype)
         step_size = (end - start) / steps
         return torch.arange(steps, device=device, dtype=dtype) * step_size + start
-    
+
 
 class Tomogram(torch.nn.Module):
-    def __init__(self, prior, use_sigmoid: bool, sigmoid_alpha: float = 5., beta_factor=0, delta_factor=1e-5, circle=False):
+    def __init__(
+        self,
+        prior,
+        use_sigmoid: bool,
+        sigmoid_alpha: float = 5.0,
+        beta_factor=0,
+        delta_factor=1e-5,
+        circle=False,
+    ):
         super().__init__()
         self.use_sigmoid = use_sigmoid
         self.sigmoid_alpha = sigmoid_alpha
@@ -61,29 +95,31 @@ class Tomogram(torch.nn.Module):
 
     def forward(self):
         if self.use_sigmoid:
-            image =  torch.sigmoid(self.sigmoid_alpha * (self.prior - 0.5 + self.image))
+            image = torch.sigmoid(self.sigmoid_alpha * (self.prior - 0.5 + self.image))
         else:
             # image = self.prior + self.image
             image = self.image
 
         if self.circle:
             # Create a circular mask
-            y, x = torch.meshgrid(torch.linspace(-1, 1, image.shape[-2], device=image.device),
-                                  torch.linspace(-1, 1, image.shape[-1], device=image.device))
+            y, x = torch.meshgrid(
+                torch.linspace(-1, 1, image.shape[-2], device=image.device),
+                torch.linspace(-1, 1, image.shape[-1], device=image.device),
+            )
             mask = x**2 + y**2 <= 1
             image = image * mask
         return image
-  
+
 
 def anscombe_transform(x):
     """
     Anscombe transform for Poisson noise.
     x: input tensor
     """
-    return torch.sqrt(x + 3/8)
+    return torch.sqrt(x + 3 / 8)
 
 
-def fbp(sinogram, angles, filter_name='ramp'):
+def fbp(sinogram, angles, filter_name="ramp"):
     """
     Filtered back projection using sklearn's implementation.
     Accepts batched sinograms of shape (batch, n_angles, n_detectors).
@@ -99,7 +135,10 @@ def fbp(sinogram, angles, filter_name='ramp'):
     for i in range(batch_size):
         recon = iradon(sinogram_np[i].T, theta=-angles_np, filter_name=filter_name)
         recon_list.append(torch.tensor(recon, device=sinogram.device))
-    return torch.stack(recon_list).view(*batch_dims, sinogram_size[-1], sinogram_size[-1])
+    return torch.stack(recon_list).view(
+        *batch_dims, sinogram_size[-1], sinogram_size[-1]
+    )
+
 
 def radon_sklearn(images, angles):
     """
@@ -114,23 +153,23 @@ def radon_sklearn(images, angles):
         sinograms.append(torch.tensor(sinogram, device=images.device))
     return torch.stack(sinograms)
 
+
 def poisson(input):
     """
     Sample from a Poisson distribution with the given input.
     If the input is too large, it will sample on CPU to avoid overflow issues.
     """
-    if torch.max(input) > 1e9 and input.device.type != 'cpu':
+    if torch.max(input) > 1e9 and input.device.type != "cpu":
         # https://github.com/pytorch/pytorch/issues/86782
         # print(f"Warning: Sampling from poisson distribution with max value {torch.max(input):.2e}, sampling on cpu to avoid incorrect results")
         return torch.poisson(input.cpu()).to(input.device)
     return torch.poisson(input)
 
 
-
 # def finetune(image, measurements, angles, exposure, num_steps=100, verbose=False):
 #     # if not isinstance(image, Tomogram):
 #     #     image = Tomogram(prior=image, use_sigmoid=False, sigmoid_alpha=5.0).to(device)
-    
+
 #     image.train()
 #     optimizer = torch.optim.Adam(image.parameters(), lr=1e-3)
 #     losses = []
@@ -152,44 +191,46 @@ def poisson(input):
 #     return image, losses
 
 
-    
-def forward_ct(images, angles, exposure, l=5., sinogram_fct=None):
+def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
     """
     forward model
     """
     # batch_dims = images.shape[:-2]
-    projections = sinogram_fct(images, angles.flatten()) if sinogram_fct else compute_sinogram(images, angles.flatten())
-    
-    
-    scale = l/images.shape[-1]  # Normalize by the image size
+    projections = (
+        sinogram_fct(images, angles.flatten())
+        if sinogram_fct
+        else compute_sinogram(images, angles.flatten())
+    )
+
+    scale = l / images.shape[-1]  # Normalize by the image size
 
     # scale_projection = scale * projections
     # print(f"min/max of projections: {scale_projection.min().item()}/{scale_projection.max().item()}")
 
-    return poisson( exposure * torch.exp(- scale * projections) )
+    return poisson(exposure * torch.exp(-scale * projections))
 
 
-def nll_ct(images, measurements, angles, exposure, l=5.):
+def nll_ct(images, measurements, angles, exposure, l=5.0):
     """
     Computes the negative log-likelihood for Poisson distributed measurements.
     """
     sinogram = compute_sinogram(images, angles.flatten())
     scale = l / images.shape[-1]
-    
+
     # The log of the expected photon count (lambda) is log(exposure * exp(-scale * sinogram))
     # which expands to log(exposure) - scale * sinogram
     log_lambda = torch.log(exposure + 1e-9) - scale * sinogram
-    
+
     # The expected photon count (lambda)
     lambda_ = exposure * torch.exp(-scale * sinogram)
-    
+
     # The Poisson negative log-likelihood is -(k * log(lambda) - lambda)
     nll = -(measurements * log_lambda - lambda_)
-    
+
     return nll.sum(dim=(-1, -2, -3))  # Mean over all measurements
 
-    
-def sinogram_ct(measurements, exposure, l=5.):
+
+def sinogram_ct(measurements, exposure, l=5.0):
     """
     Computes the sinogram from the measurements.
     """
@@ -198,19 +239,23 @@ def sinogram_ct(measurements, exposure, l=5.):
     return sinogram
 
 
-def fbp_ct(measurements, angles, exposure, l=5., weighted=False, clip=True):
+def fbp_ct(measurements, angles, exposure, l=5.0, weighted=False, clip=True):
     scale = l / measurements.shape[-1]  # Normalize by the image size
     sinogram = measurements / exposure
     sinogram = torch.log(sinogram + 1e-6) / -scale
 
     if weighted:
-        weights = exposure / exposure.sum(dim=-2, keepdim=True) #* np.pi  # Normalize exposure to sum to 1
+        weights = exposure / exposure.sum(
+            dim=-2, keepdim=True
+        )  # * np.pi  # Normalize exposure to sum to 1
         # print(f"min/max of weights: {weights.min().item()}/{weights.max().item()}")
         sinogram_weighted = sinogram * weights
         recon_weighted = fbp(sinogram_weighted, angles)
-        recon_weighted *= len(angles) 
+        recon_weighted *= len(angles)
 
-        recon = recon_weighted #if nll_weighted < nll_unweighted  else recon_unweighted
+        recon = (
+            recon_weighted  # if nll_weighted < nll_unweighted  else recon_unweighted
+        )
     else:
         recon = fbp(sinogram, angles)
     if clip:
@@ -219,10 +264,12 @@ def fbp_ct(measurements, angles, exposure, l=5., weighted=False, clip=True):
     return recon
 
 
-def finetune_ct(image, measurements, angles, exposure, num_steps=100, verbose=False, l=5.):
+def finetune_ct(
+    image, measurements, angles, exposure, num_steps=100, verbose=False, l=5.0
+):
     # if not isinstance(image, Tomogram):
     #     image = Tomogram(prior=image, use_sigmoid=False, sigmoid_alpha=5.0).to(device)
-    
+
     image.train()
     optimizer = torch.optim.Adam(image.parameters(), lr=1e-3)
     losses = []
@@ -253,34 +300,37 @@ def uniform_allocation(num_angles=360, exposure=1e5, device=None):
     allocation = torch.ones(num_angles, device=device) * exposure / num_angles
     return allocation.unsqueeze(-1), angles
 
+
 def random_allocation(num_angles=360, exposure=1e5, device=None):
     angles = linspace(0, 180, num_angles, endpoint=False, device=device)
-    allocation = torch.distributions.Dirichlet(torch.ones(num_angles, device=device)).sample().unsqueeze(-1)  # Dirichlet distribution for exposure
+    allocation = (
+        torch.distributions.Dirichlet(torch.ones(num_angles, device=device))
+        .sample()
+        .unsqueeze(-1)
+    )  # Dirichlet distribution for exposure
     return allocation * exposure, angles
 
 
-class Experiment():
+class Experiment:
 
-    def __init__(self, allocation, measurements, angles):
+    def __init__(self, exposure, measurements, angles):
         self.angles = angles
-        self.allocation = allocation
+        self.exposure = exposure  # 'allocation' before
         self.measurements = measurements
-        self.exposure = allocation.sum()
+        self.total_exposure = exposure.sum()  # 'exposure' before
 
-    def aggregate(self, measurements, allocation):
+    def aggregate(self, measurements, exposure):
         self.measurements += measurements
-        self.allocation += allocation
-        self.exposure += allocation.sum()
+        self.exposure += exposure
+        self.total_exposure += exposure.sum()
 
     def clone(self):
         return Experiment(
-            self.allocation.clone(),
-            self.measurements.clone(),
-            self.angles.clone()
+            self.exposure.clone(), self.measurements.clone(), self.angles.clone()
         )
 
 
-def mse_ct(images, measurements, angles, exposure, vst=None, l=5.):
+def mse_ct(images, measurements, angles, exposure, vst=None, l=5.0):
     """
     Mean Squared Error loss function.
     predictions: predicted intensity values
@@ -288,12 +338,12 @@ def mse_ct(images, measurements, angles, exposure, vst=None, l=5.):
     exposure: exposure time or dose
     """
     projections = compute_sinogram(images, angles.flatten())
-    scale = l/images.shape[-1]  # Normalize by the image size
+    scale = l / images.shape[-1]  # Normalize by the image size
 
     # scale_projection = scale * projections
     # print(f"min/max of projections: {scale_projection.min().item()}/{scale_projection.max().item()}")
 
-    predictions = torch.exp(- scale * projections)
+    predictions = torch.exp(-scale * projections)
     # predictions = torch.clamp(predictions, min=1e-6)  # Ensure predictions are positive
     if vst is not None:
         # predictions_exposure = predictions * exposure
@@ -301,14 +351,13 @@ def mse_ct(images, measurements, angles, exposure, vst=None, l=5.):
         # predictions_exposure = vst(predictions_exposure)
         # measurements = vst(measurements)
         # total_exposure = torch.sum(exposure, dim=(-1, -2), keepdim=True)
-        mse_loss = torch.mean((vst(measurements / exposure) - vst(predictions))**2)
+        mse_loss = torch.mean((vst(measurements / exposure) - vst(predictions)) ** 2)
     else:
         # Calculate MSE
-        mse_loss = torch.mean((measurements / exposure - predictions)**2)
+        mse_loss = torch.mean((measurements / exposure - predictions) ** 2)
     return mse_loss
 
 
-  
 # def nll_poisson(predictions, measurements, exposure, mixture=False, include_constant_term=False):
 #     """
 #     Negative log-likelihood for Poisson distribution.
@@ -320,7 +369,7 @@ def mse_ct(images, measurements, angles, exposure, vst=None, l=5.):
 #     predictions = torch.clamp(predictions, min=1e-6)
 
 #     # Scale predictions by exposure
-#     predictions = predictions * exposure  
+#     predictions = predictions * exposure
 
 #     if mixture:
 #         n_mixture = predictions.shape[-4]
@@ -359,3 +408,4 @@ def mse_ct(images, measurements, angles, exposure, vst=None, l=5.):
 #         return projections
 
 #     return poisson(projections * exposure)
+

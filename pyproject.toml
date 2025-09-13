@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uqct"
+version = "0.0.1"
+description = "Uncertainty Quantification for Computed Tomography"
+authors = [
+  { name = "Matteo Gätzner" },
+  { name = "Johannes Kirschner" },
+]
+dependencies = []
