@@ -72,7 +72,7 @@ def load_unet(ckpt_path: Path) -> UNet2DModel:
     )
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
-    sd = ckpt["state_dict"]
+    sd = ckpt["unet"]
     if any(k.startswith("_orig_mod.") for k in sd.keys()):
         sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
     unet.load_state_dict(sd, strict=True)
@@ -86,7 +86,7 @@ def load_unet(ckpt_path: Path) -> UNet2DModel:
 def main(**kwargs):
     unet = load_unet(kwargs["ckpt_path"])
     scheduler = DDPMScheduler(num_train_timesteps=1000, beta_schedule="linear")
-    samples = generate_samples(unet, 4, scheduler).cpu().numpy()
+    samples = generate_samples(unet, 4, scheduler, n_steps=1000).cpu().numpy()
     samples = ((samples + 1.0) / 2).clip(0.0, 1.0)
     import matplotlib.pyplot as plt
 

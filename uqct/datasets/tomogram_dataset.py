@@ -102,7 +102,6 @@ class TomogramDataset(BaseImageDataset):
             self.lr_tomogram = H5Wrapper(lr_path)
 
     def __getitem__(self, idx):  # type: ignore
-        breakpoint()
         hr_image = torch.Tensor(self.hr_tomogram[idx])
         if len(hr_image.shape) == 2:
             hr_image = hr_image.unsqueeze(0)

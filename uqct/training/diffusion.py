@@ -84,7 +84,7 @@ def maybe_resume(
 
     if ckpt_path.is_file():
         ckpt = torch.load(ckpt_path, map_location=device)
-        sd = ckpt["state_dict"]
+        sd = ckpt["unet"]
 
         target = unet._orig_mod if hasattr(unet, "_orig_mod") else unet
         target.load_state_dict(sd, strict=True)
@@ -160,6 +160,7 @@ def main(**kwargs):
     train_set, test_set = get_dataset(
         settings[kwargs["dataset"]]["kwargs"], settings[kwargs["dataset"]]["filetype"]
     )
+    breakpoint()
 
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
