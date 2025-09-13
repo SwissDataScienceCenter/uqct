@@ -160,7 +160,6 @@ def main(**kwargs):
     train_set, test_set = get_dataset(
         settings[kwargs["dataset"]]["kwargs"], settings[kwargs["dataset"]]["filetype"]
     )
-    breakpoint()
 
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
@@ -205,7 +204,8 @@ def main(**kwargs):
         up_block_types=up_block_types,
     )
     unet = unet.to(device)  # type: ignore
-    unet.enable_gradient_checkpointing()
+    if not on_cluster:
+        unet.enable_gradient_checkpointing()
     try:
         unet: UNet2DModel = torch.compile(unet)  # type: ignore
     except Exception:
@@ -324,19 +324,6 @@ def main(**kwargs):
                 False,
                 pbar,
             )
-        save_ckpt(
-            unet,
-            epoch,
-            mean_val_loss,
-            run_dir,
-            optimizer,
-            lr_scheduler,
-            scaler,
-            best_val,
-            global_step,
-            True,
-            pbar,
-        )
 
 
 if __name__ == "__main__":

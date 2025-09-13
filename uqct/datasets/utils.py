@@ -7,13 +7,14 @@ from uqct.datasets.nii_tomogram_dataset import NiiDataset
 from uqct.datasets.tiff_tomogram_dataset import TIFFDataset
 from uqct.datasets.tomogram_dataset import TomogramDataset
 
-DATA_DIR_CANDIDATES = (
-    Path(x) for x in ("/mydata/chip/shared/data", "../data", "./data")
-)
-try:
-    while not (DATA_DIR := next(DATA_DIR_CANDIDATES)).exists():
-        pass
-except:
+DATA_DIR_CANDIDATES = [
+    Path(x) for x in ("/mydata/chip/shared/data", "../data", "./data", "/cluster/scratch/mgaetzner/data")
+]
+DATA_DIR = None
+for x in DATA_DIR_CANDIDATES:
+    if x.is_dir():
+        DATA_DIR = x
+if DATA_DIR is None:
     raise FileNotFoundError(
         f"Couldn't find data directory. Checked {DATA_DIR_CANDIDATES}"
     )
