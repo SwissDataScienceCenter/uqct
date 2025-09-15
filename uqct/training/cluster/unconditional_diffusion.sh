@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=diffusion-training       # name of the job
+#SBATCH --job-name=unc-diffusion-training       # name of the job
 #SBATCH --output=logs/%x_%A_%a.out          # stdout (%x=job name, %A=job ID, %a=array index)
 #SBATCH --error=logs/%x_%A_%a.err           # stderr
 #SBATCH --cpus-per-task=12
@@ -26,8 +26,7 @@ DATASETS=(composite lung lamino)
 DATASET=${DATASETS[$SLURM_ARRAY_TASK_ID]}
 
 # run the actual job
-"$PYTHONBIN" "${GITROOT}/training/diffusion.py" \
+"$PYTHONBIN" "${GITROOT}/training/unconditional_diffusion.py" \
 	--dataset "$DATASET" \
 	--batch-size 64 \
 	--learning-rate 0.0001
-
