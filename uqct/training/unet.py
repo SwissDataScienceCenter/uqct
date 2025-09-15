@@ -55,19 +55,12 @@ def save_ckpt(
 
 
 def loss_fn(
-    x_0: torch.Tensor, unet: UNet2DModel, noise_scheduler: DDPMScheduler
+    x_0: torch.Tensor, fbp: torch.Tensor, exposure: torch.Tensor, unet: UNet2DModel
 ) -> torch.Tensor:
     x_0 = x_0.to(unet.device)
-    noise = torch.randn_like(x_0).to(unet.device)
-    timesteps = torch.randint(
-        0,
-        noise_scheduler.config.num_train_timesteps,  # type: ignore
-        (x_0.shape[0],),
-        device=x_0.device,
-    ).long()
-    x_t = noise_scheduler.add_noise(x_0, noise, timesteps)  # type: ignore
-    noise_pred = unet(x_t, timestep=timesteps, return_dict=False)[0]
-    return F.mse_loss(noise_pred, noise)
+    exposure_norm = (exposure - 1e4) / 1e5 * 999  # [0, 999]
+    pred = unet(fbp, timestep=exposure_norm, return_dict=False)[0]
+    return F.mse_loss(pred, fbp)
 
 
 def maybe_resume(
@@ -205,7 +198,8 @@ def main(**kwargs):
         up_block_types=up_block_types,
     )
     unet = unet.to(device)  # type: ignore
-    unet.enable_gradient_checkpointing()
+    if not on_cluster:
+        unet.enable_gradient_checkpointing()
     try:
         unet: UNet2DModel = torch.compile(unet)  # type: ignore
     except Exception:
@@ -239,7 +233,6 @@ def main(**kwargs):
     )
 
     # Set up training
-    noise_scheduler = DDPMScheduler(num_train_timesteps=1000, beta_schedule="linear")
     optimizer = torch.optim.AdamW(
         unet.parameters(),
         lr=kwargs["learning_rate"],
@@ -272,7 +265,7 @@ def main(**kwargs):
                 dtype=torch.float16,
                 enabled=(device.type == "cuda"),
             ):
-                loss = loss_fn(x_0, unet, noise_scheduler)
+                loss = loss_fn(x_0, fbp, exposure, unet)
 
             if not torch.isfinite(loss):
                 print("Non-finite loss, skipping batch.")
@@ -304,7 +297,7 @@ def main(**kwargs):
                     dtype=torch.float16,
                     enabled=(device.type == "cuda"),
                 ):
-                    vloss = loss_fn(x_0, unet, noise_scheduler)
+                    vloss = loss_fn(x_0, fbp, exposure, unet)
                 val_losses.append(vloss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))
         writer.add_scalar("val/loss_epoch", mean_val_loss, epoch)
@@ -324,19 +317,6 @@ def main(**kwargs):
                 False,
                 pbar,
             )
-        save_ckpt(
-            unet,
-            epoch,
-            mean_val_loss,
-            run_dir,
-            optimizer,
-            lr_scheduler,
-            scaler,
-            best_val,
-            global_step,
-            True,
-            pbar,
-        )
 
 
 if __name__ == "__main__":

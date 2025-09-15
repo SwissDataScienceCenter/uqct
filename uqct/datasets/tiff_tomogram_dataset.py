@@ -92,23 +92,25 @@ class TIFFDataset(BaseImageDataset):
         rescale=None,
         clip_range=None,
         normalize_range=False,
+        normalize_range_global=False,
         rotation_angle=None,
         contrast=None,
         train_transform=False,
         crop=None,
     ):
+        self.im_size = im_size
+        self.images = TIFFWrapper(path, im_size)
         super().__init__(
             path,
             rescale=rescale,
             clip_range=clip_range,
             normalize_range=normalize_range,
+            normalize_range_global=normalize_range_global,
             rotation_angle=rotation_angle,
             contrast=contrast,
             train_transform=train_transform,
             crop=crop,
         )
-        self.im_size = im_size
-        self.images = TIFFWrapper(path, im_size)
 
     def __getitem__(self, idx):
         image = torch.tensor(np.array(self.images[idx])).float()

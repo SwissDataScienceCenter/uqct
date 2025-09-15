@@ -1,7 +1,6 @@
 import math
 
 import nibabel as nib
-import numpy as np
 import torch
 from PIL import Image
 
@@ -10,7 +9,7 @@ from uqct.datasets.base_dataset import BaseImageDataset
 Image.MAX_IMAGE_PIXELS = None
 
 
-class nii_wrapper:
+class NIIWrapper:
     def __init__(self, path, im_size=512, file_range=[0, -1]):
         self.path = path
         self.im_size = im_size
@@ -61,24 +60,26 @@ class NiiDataset(BaseImageDataset):
         rescale=None,
         clip_range=None,
         normalize_range=False,
+        normalize_range_global=False,
         rotation_angle=None,
         contrast=None,
         train_transform=False,
         crop=None,
         file_range=[0, -1],
     ):
+        self.im_size = im_size
+        self.images = NIIWrapper(path, im_size, file_range)
         super().__init__(
             path,
             rescale=rescale,
             clip_range=clip_range,
             normalize_range=normalize_range,
+            normalize_range_global=normalize_range_global,
             rotation_angle=rotation_angle,
             contrast=contrast,
             train_transform=train_transform,
             crop=crop,
         )
-        self.im_size = im_size
-        self.images = nii_wrapper(path, im_size, file_range)
 
     def __getitem__(self, idx):
         image = torch.tensor(self.images[idx]).float()

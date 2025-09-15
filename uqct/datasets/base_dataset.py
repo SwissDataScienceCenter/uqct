@@ -1,3 +1,6 @@
+from abc import abstractmethod
+
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
@@ -18,6 +21,7 @@ class BaseImageDataset(Dataset):
         rescale=None,
         clip_range=None,
         normalize_range=False,
+        normalize_range_global=False,
         rotation_angle=None,
         contrast=None,
         train_transform=False,
@@ -45,10 +49,25 @@ class BaseImageDataset(Dataset):
             self.transforms.append(
                 lambda x: x * get_circle(x, rescale).view(x.shape[-2:])
             )
+
+        if normalize_range_global:
+            min_val, max_val = float("inf"), float("-inf")
+            for i in range(self.__len__()):
+                x = self.__getitem__(i)
+                if isinstance(x, np.ndarray):
+                    min_val, max_val = min(x.min(), min_val), max(x.max(), max_val)
+                else:
+                    min_val, max_val = min(x.min().item(), min_val), max(
+                        x.max().item(), max_val
+                    )
+            print(f"Min val: {min_val}, Max val: {max_val}")
+            self.transforms.append(lambda x: (x - min_val) / (max_val - min_val))
+
         if normalize_range:
             self.add_normalize_range()
 
-    def __getitem__(self, idx):
+    @abstractmethod
+    def __getitem__(self, idx: int) -> torch.Tensor | np.ndarray:
         pass
 
     @property
@@ -105,6 +124,6 @@ class BaseImageDataset(Dataset):
             )
         )
 
-    def __len__(self):
+    @abstractmethod
+    def __len__(self) -> int:
         pass
-
