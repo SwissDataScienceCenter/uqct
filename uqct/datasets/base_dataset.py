@@ -20,8 +20,7 @@ class BaseImageDataset(Dataset):
         path,
         rescale=None,
         clip_range=None,
-        normalize_range=False,
-        normalize_range_global=False,
+        val_range: tuple[float, float] | None = None,
         rotation_angle=None,
         contrast=None,
         train_transform=False,
@@ -50,21 +49,8 @@ class BaseImageDataset(Dataset):
                 lambda x: x * get_circle(x, rescale).view(x.shape[-2:])
             )
 
-        if normalize_range_global:
-            min_val, max_val = float("inf"), float("-inf")
-            for i in range(self.__len__()):
-                x = self.__getitem__(i)
-                if isinstance(x, np.ndarray):
-                    min_val, max_val = min(x.min(), min_val), max(x.max(), max_val)
-                else:
-                    min_val, max_val = min(x.min().item(), min_val), max(
-                        x.max().item(), max_val
-                    )
-            print(f"Min val: {min_val}, Max val: {max_val}")
-            self.transforms.append(lambda x: (x - min_val) / (max_val - min_val))
-
-        if normalize_range:
-            self.add_normalize_range()
+        if val_range:
+            self.add_normalize_range(val_range[0], val_range[1])
 
     @abstractmethod
     def __getitem__(self, idx: int) -> torch.Tensor | np.ndarray:
@@ -96,10 +82,10 @@ class BaseImageDataset(Dataset):
 
         self.transforms.append(scale)
 
-    def add_normalize_range(self):
+    def add_normalize_range(self, min: float, max: float):
         def normalize_range(image):
-            image -= image.min()
-            image /= torch.max(image) + 1e-20
+            image -= min
+            image /= max - min
             return image
 
         self.transforms.append(normalize_range)

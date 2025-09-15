@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import Subset
 
@@ -29,33 +30,28 @@ KWARGS_LAMINO = {
     "path": DATA_DIR / "lamino_tiff",
     "rescale": 128,
     "im_size": 256,
+    "val_range": (0.0, 234.59),
     "train_transform": False,
     "rotation_angle": 30,
-    "normalize_range": False,
-    "normalize_range_global": True,
 }
 
 KWARGS_LUNG = {
-    "path": DATA_DIR / "ground_truth_train",
+    "path": DATA_DIR / "lung/ground_truth_train",
     "rescale": 128,
-    # 'im_size': 256,
+    "val_range": (0.0, 1.0),
     "train_transform": False,
     "rotation_angle": 30,
-    "normalize_range": False,
-    "normalize_range_global": True,
 }
 
 KWARGS_COMPOSITE = {
     "path": DATA_DIR / "composite/SampleG-FBI22-Stitch-0-1-2.txm.nii",
     "rescale": 128,
     "im_size": 256,
-    "range": (0.0, 10646.63),
+    "val_range": (0.0, 10646.63),
     "train_transform": False,
     "file_range": [20, 360],
     "clip_range": [3e4, 5e4],
     "rotation_angle": 30,
-    "normalize_range": False,
-    "normalize_range_global": True,
 }
 
 
@@ -76,3 +72,7 @@ def get_dataset(kwargs: dict, dataset_type: str) -> tuple[Subset, Subset]:
     trainSet = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
     testSet = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore
     return trainSet, testSet
+
+
+if __name__ == "__main__":
+    get_dataset(KWARGS_LAMINO, "tiff")

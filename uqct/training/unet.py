@@ -9,14 +9,44 @@ import torch
 import torch.nn.functional as F
 from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.optimization import get_cosine_schedule_with_warmup
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
+from uqct.ct import (AstraParallelOp3D, get_astra_geometry_3d, iradon_astra,
+                     sinogram_ct)
 from uqct.datasets.utils import (KWARGS_COMPOSITE, KWARGS_LAMINO, KWARGS_LUNG,
                                  get_dataset)
+from uqct.debugging import plot_img
+
+L = 5
+N_ANGLES = 200
+MIN_EXPOSURE = 1e4
+MAX_EXPOSURE = 1e9
+
+
+def sample_exposure(
+    n: int,
+    low: float = MIN_EXPOSURE,
+    high: float = MAX_EXPOSURE,
+    device: torch.device = torch.device("cpu"),
+) -> torch.Tensor:
+    u = torch.rand(n, device=device)
+    return torch.exp(
+        u * (torch.log(torch.as_tensor(high)) - torch.log(torch.as_tensor(low)))
+        + torch.log(torch.as_tensor(low))
+    )
+
+
+def sample_fbp(x: torch.Tensor, op: AstraParallelOp3D, device: torch.device):
+    I_0 = sample_exposure(op.nx, device=device).view(-1, 1, 1) / N_ANGLES
+    scale = L / x.shape[-1]
+    radon = op.forward(x.squeeze(1))
+    counts = torch.poisson(I_0 * torch.exp(-scale * radon))
+    sino = sinogram_ct(counts, I_0, L).clip(0)
+    fbp = iradon_astra(sino.transpose(1, 2), op.vol_geom, op.proj_geom).clip(0, 1)
+    return fbp[: x.shape[0]], I_0[: x.shape[0]]
 
 
 def save_ckpt(
@@ -55,11 +85,17 @@ def save_ckpt(
 
 
 def loss_fn(
-    x_0: torch.Tensor, fbp: torch.Tensor, exposure: torch.Tensor, unet: UNet2DModel
+    x: torch.Tensor, fbp: torch.Tensor, I_0: torch.Tensor, unet: UNet2DModel
 ) -> torch.Tensor:
-    x_0 = x_0.to(unet.device)
-    exposure_norm = (exposure - 1e4) / 1e5 * 999  # [0, 999]
-    pred = unet(fbp, timestep=exposure_norm, return_dict=False)[0]
+    x = x.to(unet.device)
+    x = x * 2.0 - 1.0
+    fbp = fbp * 2.0 - 1.0
+    if len(fbp.shape) == 3:
+        fbp = fbp.unsqueeze(1)
+    exposure_norm = (
+        (I_0 * N_ANGLES - MIN_EXPOSURE) / (MAX_EXPOSURE - MIN_EXPOSURE) * 999
+    )  # [0, 999]
+    pred = unet(fbp, timestep=exposure_norm.flatten(), return_dict=False)[0]
     return F.mse_loss(pred, fbp)
 
 
@@ -131,11 +167,17 @@ def maybe_resume(
     type=click.Path(path_type=Path),
     help="Path to a checkpoint to resume from.",
 )
+@click.option(
+    "--seed",
+    default=0,
+    type=int,
+    help="Random seed",
+)
 def main(**kwargs):
     # Seeding
-    torch.random.manual_seed(0)
-    np.random.seed(0)
-    random.seed(0)
+    torch.random.manual_seed(kwargs["seed"])
+    np.random.seed(kwargs["seed"])
+    random.seed(kwargs["seed"])
 
     # Device & perf
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -150,10 +192,17 @@ def main(**kwargs):
         "lamino": {"kwargs": KWARGS_LAMINO, "filetype": "tiff"},
         "lung": {"kwargs": KWARGS_LUNG, "filetype": "h5"},
     }
-    train_set, test_set = get_dataset(
+    train_set, _ = get_dataset(
         settings[kwargs["dataset"]]["kwargs"], settings[kwargs["dataset"]]["filetype"]
     )
-    breakpoint()
+
+    # Create forward projector
+    angles = torch.from_numpy(np.linspace(0, 180, N_ANGLES, endpoint=False))
+    side_length = train_set[0].shape[-1]
+    proj_geom, vol_geom = get_astra_geometry_3d(
+        angles, side_length, kwargs["batch_size"]
+    )
+    op = AstraParallelOp3D(proj_geom, vol_geom)
 
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
@@ -163,8 +212,8 @@ def main(**kwargs):
     run_dir = (
         root_dir
         / "runs"
-        / "diffusion"
-        / f"{ts}_{kwargs['dataset']}_{kwargs['batch_size']}_{kwargs['epochs']}_{kwargs['learning_rate']}_{kwargs['dropout']}_{kwargs['weight_decay']}"
+        / "unet"
+        / f"{ts}_{kwargs['dataset']}_{kwargs['batch_size']}_{kwargs['epochs']}_{kwargs['learning_rate']}_{kwargs['dropout']}_{kwargs['weight_decay']}_{kwargs['seed']}"
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run directory: '{run_dir}'")
@@ -198,8 +247,8 @@ def main(**kwargs):
         up_block_types=up_block_types,
     )
     unet = unet.to(device)  # type: ignore
-    if not on_cluster:
-        unet.enable_gradient_checkpointing()
+    # if not on_cluster:
+    #     unet.enable_gradient_checkpointing()
     try:
         unet: UNet2DModel = torch.compile(unet)  # type: ignore
     except Exception:
@@ -255,17 +304,18 @@ def main(**kwargs):
     # Run training
     for epoch in (pbar := tqdm(range(start_epoch, kwargs["epochs"]))):
         unet.train()
-        for x_0 in tqdm(train_loader, desc=f"Epoch {epoch} [Train]", leave=False):
+        for x in tqdm(train_loader, desc=f"Epoch {epoch} [Train]", leave=False):
             optimizer.zero_grad(set_to_none=True)
-            x_0 = x_0.to(device, non_blocking=True) * 2.0 - 1.0
+            x: torch.Tensor = x.to(device, non_blocking=True)
             if device.type == "cuda":
-                x_0 = x_0.to(memory_format=torch.channels_last)
+                x = x.to(memory_format=torch.channels_last)
             with torch.autocast(
                 device_type=device.type,
                 dtype=torch.float16,
                 enabled=(device.type == "cuda"),
             ):
-                loss = loss_fn(x_0, fbp, exposure, unet)
+                fbp, I_0 = sample_fbp(x, op, device)
+                loss = loss_fn(x, fbp, I_0, unet)
 
             if not torch.isfinite(loss):
                 print("Non-finite loss, skipping batch.")
@@ -288,16 +338,17 @@ def main(**kwargs):
         unet.eval()
         val_losses = []
         with torch.no_grad():
-            for x_0 in tqdm(val_loader, desc=f"Epoch {epoch} [Val]", leave=False):
-                x_0 = x_0.to(device, non_blocking=True) * 2.0 - 1.0
+            for x in tqdm(val_loader, desc=f"Epoch {epoch} [Val]", leave=False):
+                x = x.to(device, non_blocking=True) * 2.0 - 1.0
                 if device.type == "cuda":
-                    x_0 = x_0.to(memory_format=torch.channels_last)
+                    x = x.to(memory_format=torch.channels_last)
                 with torch.autocast(
                     device_type=device.type,
                     dtype=torch.float16,
                     enabled=(device.type == "cuda"),
                 ):
-                    vloss = loss_fn(x_0, fbp, exposure, unet)
+                    fbp, I_0 = sample_fbp(x, op, device)
+                    vloss = loss_fn(x, fbp, I_0, unet)
                 val_losses.append(vloss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))
         writer.add_scalar("val/loss_epoch", mean_val_loss, epoch)
