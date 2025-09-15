@@ -8,6 +8,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from tqdm.auto import tqdm
 
 
+@torch.inference_mode()
 def generate_samples(
     unet: UNet2DModel,
     num_samples: int,
@@ -15,31 +16,36 @@ def generate_samples(
     n_steps: Optional[int] = None,
 ) -> torch.Tensor:
     unet.eval()
+    device = unet.device
     channels = unet.config["in_channels"]
     size = unet.config["sample_size"]
-    sample = torch.randn((num_samples, channels, size, size), device=unet.device)
+    sample = torch.randn(
+        (num_samples, channels, size, size),
+        device=unet.device,
+        dtype=next(unet.parameters()).dtype,
+    )
 
     if n_steps is None:
-        timesteps = list(reversed(range(noise_scheduler.config["num_train_timesteps"])))
-    else:
-        timesteps = (
-            torch.linspace(
-                0, noise_scheduler.config["num_train_timesteps"] - 1, n_steps
-            )
-            .flip(0)
-            .int()
-            .tolist()
-        )
-        noise_scheduler.set_timesteps(timesteps=timesteps)
+        n_steps = noise_scheduler.config["num_train_timesteps"]  # 1000
+    noise_scheduler.set_timesteps(n_steps, device=device)
 
-    for t in tqdm(timesteps, total=len(timesteps), desc="denoising"):
-        t_ten = torch.full((num_samples,), t, device=unet.device, dtype=torch.long)
-        with torch.no_grad():
-            noise_pred = unet(sample, t_ten, return_dict=False)[0]
-        step = noise_scheduler.step(noise_pred, t, sample)
-        sample = step.prev_sample  # type: ignore
+    for t in tqdm(
+        noise_scheduler.timesteps,
+        total=len(noise_scheduler.timesteps),
+        desc="denoising",
+    ):
+        # t is an int64 timestep compatible with the scheduler
+        # Use autocast on CUDA for speed
+        with torch.autocast(
+            device_type=device.type,
+            dtype=torch.float16,
+            enabled=(device.type == "cuda"),
+        ):
+            noise_pred = unet(sample, t, return_dict=False)[0]
+        out = noise_scheduler.step(model_output=noise_pred, timestep=t, sample=sample)
+        sample = out.prev_sample
 
-    return sample.clip(0, 1)
+    return sample
 
 
 def load_unet(ckpt_path: Path) -> UNet2DModel:
