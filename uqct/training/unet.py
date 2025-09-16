@@ -60,6 +60,37 @@ def sample_fbp(
     return fbp[: x.shape[0]], I_0_lr[: x.shape[0]]
 
 
+def build_unet(dropout: float = 0.37) -> UNet2DModel:
+    # Same architecture as training (uqct.training.unet: main)
+    channels = (128, 128, 256, 256, 512, 512)
+    down_block_types = (
+        "DownBlock2D",
+        "DownBlock2D",
+        "DownBlock2D",
+        "DownBlock2D",
+        "AttnDownBlock2D",
+        "DownBlock2D",
+    )
+    up_block_types = (
+        "UpBlock2D",
+        "AttnUpBlock2D",
+        "UpBlock2D",
+        "UpBlock2D",
+        "UpBlock2D",
+        "UpBlock2D",
+    )
+    return UNet2DModel(
+        sample_size=128,
+        in_channels=1,
+        out_channels=1,
+        layers_per_block=2,
+        dropout=dropout,
+        block_out_channels=channels,
+        down_block_types=down_block_types,
+        up_block_types=up_block_types,
+    )
+
+
 def save_ckpt(
     unet: UNet2DModel,
     epoch: int,
@@ -236,33 +267,7 @@ def main(**kwargs):
     print(f"Run directory: '{run_dir}'")
 
     # Create U-Net
-    channels = (128, 128, 256, 256, 512, 512)
-    down_block_types = (
-        "DownBlock2D",
-        "DownBlock2D",
-        "DownBlock2D",
-        "DownBlock2D",
-        "AttnDownBlock2D",
-        "DownBlock2D",
-    )
-    up_block_types = (
-        "UpBlock2D",
-        "AttnUpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-    )
-    unet = UNet2DModel(
-        sample_size=128,
-        in_channels=1,
-        out_channels=1,
-        layers_per_block=2,
-        dropout=kwargs["dropout"],
-        block_out_channels=channels,
-        down_block_types=down_block_types,
-        up_block_types=up_block_types,
-    )
+    unet = build_unet(kwargs["dropout"])
     unet = unet.to(device)  # type: ignore
     try:
         unet: UNet2DModel = torch.compile(unet)  # type: ignore
