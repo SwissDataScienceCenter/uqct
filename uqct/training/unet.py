@@ -15,8 +15,8 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
-from uqct.ct import (AstraParallelOp3D, get_astra_geometry_3d, iradon_astra,
-                     poisson, sinogram_ct)
+from uqct.ct import (AstraParallelOp3D, forward_and_fbp_2d,
+                     get_astra_geometry_3d, iradon_astra, poisson, sinogram_ct)
 from uqct.datasets.utils import (KWARGS_COMPOSITE, KWARGS_LAMINO, KWARGS_LUNG,
                                  get_dataset)
 from uqct.debugging import plot_img
@@ -60,7 +60,23 @@ def sample_fbp(
     return fbp[: x.shape[0]], I_0_lr[: x.shape[0]]
 
 
-def build_unet(dropout: float = 0.37) -> UNet2DModel:
+def sample_fbp_sparse(
+    images: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    exposures = sample_exposure(len(images))
+    n_angles = np.random.randint(1, N_ANGLES + 1, (len(images),))
+    split_indices = np.cumsum(n_angles[:-1])
+    total = int(n_angles.sum())
+    angle_sets = np.split(np.random.rand(total) * 360, split_indices)
+    fbp, I_0 = forward_and_fbp_2d(images, angle_sets, exposures.tolist(), l=L)
+    return (
+        fbp,
+        I_0,
+        torch.tensor(n_angles, device=images.device),
+    )
+
+
+def build_unet(sparse: bool = False, dropout: float = 0.37) -> UNet2DModel:
     # Same architecture as training (uqct.training.unet: main)
     channels = (128, 128, 256, 256, 512, 512)
     down_block_types = (
@@ -88,6 +104,8 @@ def build_unet(dropout: float = 0.37) -> UNet2DModel:
         block_out_channels=channels,
         down_block_types=down_block_types,
         up_block_types=up_block_types,
+        class_embed_type="timestep" if sparse else None,
+        num_class_embeds=200 if sparse else None,
     )
 
 
@@ -127,16 +145,32 @@ def save_ckpt(
 
 
 def loss_fn(
-    x: torch.Tensor, fbp: torch.Tensor, I_0: torch.Tensor, unet: UNet2DModel
+    x: torch.Tensor,
+    fbp: torch.Tensor,
+    I_0: torch.Tensor,
+    unet: UNet2DModel,
+    n_angles: torch.Tensor | None = None,
 ) -> torch.Tensor:
     x = x * 2.0 - 1.0
     fbp = fbp * 2.0 - 1.0
-    if len(fbp.shape) == 3:
-        fbp = fbp.unsqueeze(1)
+    if fbp.ndim == 3:
+        fbp.unsqueeze_(1)
+    if x.ndim == 3:
+        x.unsqueeze_(1)
+
+    _n_angles = n_angles if n_angles is not None else N_ANGLES
     exposure_norm = (
-        (I_0 * N_ANGLES - MIN_EXPOSURE) / (MAX_EXPOSURE - MIN_EXPOSURE) * 999
+        (I_0 * _n_angles - MIN_EXPOSURE) / (MAX_EXPOSURE - MIN_EXPOSURE) * 999
     )  # [0, 999]
-    pred = unet(fbp, timestep=exposure_norm.flatten(), return_dict=False)[0]
+
+    if n_angles is None:
+        pred = unet(
+            fbp,
+            timestep=exposure_norm.flatten(),
+            return_dict=False,
+        )[0]
+    else:
+        pred = unet(fbp, exposure_norm, class_labels=_n_angles - 1)[0]
     x_lr = F.interpolate(x, size=pred.shape[-2:], mode="area")  # 256x256 -> 128x128
     return F.mse_loss(pred, x_lr)
 
@@ -158,7 +192,7 @@ def maybe_resume(
         sd = ckpt["unet"]
 
         target = unet._orig_mod if hasattr(unet, "_orig_mod") else unet
-        target.load_state_dict(sd, strict=True)
+        target.load_state_dict(sd, strict=True)  # type: ignore
 
         if "optimizer" in ckpt:
             optimizer.load_state_dict(ckpt["optimizer"])
@@ -215,6 +249,13 @@ def maybe_resume(
     type=int,
     help="Random seed",
 )
+@click.option(
+    "--sparse",
+    default=False,
+    type=bool,
+    is_flag=True,
+    help="Whether we train for the sparse or dense setting",
+)
 def main(**kwargs):
     # Seeding
     torch.random.manual_seed(kwargs["seed"])
@@ -257,22 +298,23 @@ def main(**kwargs):
 
     on_cluster = Path("/cluster").exists()
     root_dir = Path("/cluster/scratch/mgaetzner/uqct") if on_cluster else Path(".")
+    sparse_or_dense = "sparse" if kwargs["sparse"] else "dense"
     run_dir = (
         root_dir
         / "runs"
-        / "unet"
+        / f"unet_{sparse_or_dense}"
         / f"{ts}_{kwargs['dataset']}_{kwargs['batch_size']}_{kwargs['epochs']}_{kwargs['learning_rate']}_{kwargs['dropout']}_{kwargs['weight_decay']}_{kwargs['seed']}"
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run directory: '{run_dir}'")
 
     # Create U-Net
-    unet = build_unet(kwargs["dropout"])
+    unet = build_unet(kwargs["sparse"], kwargs["dropout"])
     unet = unet.to(device)  # type: ignore
     try:
         unet: UNet2DModel = torch.compile(unet)  # type: ignore
     except Exception:
-        pass
+        print(f"Failed to compile U-Net")
 
     # Split train set into training and validation subset
     dataset_size = len(train_set)
@@ -334,8 +376,12 @@ def main(**kwargs):
                 dtype=torch.float16,
                 enabled=(device.type == "cuda"),
             ):
-                fbp, I_0 = sample_fbp(x, op, proj_geom_lr, vol_geom_lr, device)
-                loss = loss_fn(x, fbp, I_0, unet)
+                if kwargs["sparse"]:
+                    fbp, I_0, n_angles = sample_fbp_sparse(x)
+                    loss = loss_fn(x, fbp, I_0, unet, n_angles)
+                else:
+                    fbp, I_0 = sample_fbp(x, op, proj_geom_lr, vol_geom_lr, device)
+                    loss = loss_fn(x, fbp, I_0, unet)
 
             if not torch.isfinite(loss):
                 print("Non-finite loss, skipping batch.")
@@ -367,7 +413,13 @@ def main(**kwargs):
                     dtype=torch.float16,
                     enabled=(device.type == "cuda"),
                 ):
-                    fbp, I_0 = sample_fbp(x, op, proj_geom_lr, vol_geom_lr, device)
+                    if kwargs["sparse"]:
+                        fbp, I_0, n_angles = sample_fbp_sparse(x)
+                        loss = loss_fn(x, fbp, I_0, unet, n_angles)
+                    else:
+                        fbp, I_0 = sample_fbp(x, op, proj_geom_lr, vol_geom_lr, device)
+                        loss = loss_fn(x, fbp, I_0, unet)
+
                     vloss = loss_fn(x, fbp, I_0, unet)
                 val_losses.append(vloss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))

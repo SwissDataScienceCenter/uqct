@@ -9,20 +9,26 @@ def _to_numpy(img: torch.Tensor | np.ndarray) -> np.ndarray:
     return img
 
 
-def plot_img(*images, name=None):
+def plot_img(*images, name=None, max_cols=5):
     n = len(images)
-    cols = 5
-    rows = n // cols
-    _, axes = plt.subplots(rows, cols)
-    if n == 1:
-        axes.imshow(_to_numpy(images[0]))
-    else:
-        for i in range(n):
-            row = i // cols
-            col = i - cols * row
-            axes[row, col].imshow(_to_numpy(images[i]))
+    if n == 0:
+        return
+    cols = min(max_cols, n)  # shrink cols if fewer images
+    rows = (n + cols - 1) // cols  # ceil division
+
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
+    axes = np.atleast_1d(axes).ravel()
+
+    for i, img in enumerate(images):
+        axes[i].imshow(_to_numpy(img), cmap="gray")
+        axes[i].axis("off")
+
+    # hide unused axes
+    for j in range(i + 1, len(axes)):
+        axes[j].axis("off")
+
     if name is not None:
-        plt.savefig(f"/tmp/{name}.png")
+        plt.savefig(f"/tmp/{name}.png", bbox_inches="tight")
     else:
         plt.show()
-    plt.close()
+    plt.close(fig)

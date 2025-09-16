@@ -7,6 +7,8 @@ import torch.nn.functional as F
 import tqdm
 from skimage.transform import iradon, radon
 
+from uqct.debugging import plot_img
+
 
 def batched_sinogram(images, sinogram_angles=None, interpolation: str = "bilinear"):
     assert len(images.shape) == 3
@@ -661,3 +663,169 @@ def iradon_astra(
         vol *= mask.unsqueeze(0)
 
     return vol[0] if single else vol
+
+
+def _proj_and_vol_geom_2d(
+    angles_deg: np.ndarray, im_size: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    Build ASTRA 2D parallel-beam geometries for a given (variable-length) angle set.
+    angles_deg: 1D tensor with degrees in [0, 360]
+    im_size: number of detector bins and image width/height (square)
+    """
+    angles_rad = -np.deg2rad(angles_deg)
+    det_spacing = 1.0
+    n_det = int(im_size)
+
+    proj_geom = astra.create_proj_geom("parallel", det_spacing, n_det, angles_rad)
+    vol_geom = astra.create_vol_geom(im_size, im_size)
+    return proj_geom, vol_geom
+
+
+@torch.no_grad()
+def forward_angle_sets_2d(
+    img_t: torch.Tensor,
+    angle_sets: list[np.ndarray],
+) -> list[torch.Tensor]:
+    if img_t.ndim == 2:
+        ny, nx = img_t.shape
+        batch = False
+    elif img_t.ndim == 3:
+        B, ny, nx = img_t.shape
+        batch = True
+        assert len(angle_sets) == B, "len(angle_sets) must match batch size."
+    else:
+        raise ValueError("img_t must be (ny, nx) or (B, ny, nx).")
+
+    results = []
+    out_device = img_t.device
+
+    for i, angles_deg in enumerate(angle_sets):
+        assert angles_deg.ndim == 1, "Each angle set must be a 1D tensor (degrees)."
+        img_i = img_t if not batch else img_t[i]
+        assert img_i.shape == (ny, nx)
+
+        proj_geom, vol_geom = _proj_and_vol_geom_2d(angles_deg, img_t.shape[-1])
+
+        n_angles_i = int(proj_geom["ProjectionAngles"].shape[0])
+        n_det = int(proj_geom["DetectorCount"])
+
+        # --- link CPU arrays to ASTRA ---
+        img_np = img_i.detach().contiguous().cpu().to(torch.float32).numpy()
+        sino_np = np.empty((n_angles_i, n_det), dtype=np.float32)
+
+        vol_id = astra.data2d.link("-vol", vol_geom, img_np)
+        sino_id = astra.data2d.link("-sino", proj_geom, sino_np)
+
+        try:
+            try:
+                cfg = astra.astra_dict("FP_CUDA")
+            except Exception:
+                cfg = astra.astra_dict("FP")
+            cfg["VolumeDataId"] = vol_id
+            cfg["ProjectionDataId"] = sino_id
+            alg_id = astra.algorithm.create(cfg)
+            astra.algorithm.run(alg_id, 1)
+            astra.algorithm.delete(alg_id)
+        finally:
+            astra.data2d.delete([sino_id, vol_id])
+
+        # <-- now move the *filled* sinogram back to torch on the original device
+        sino_t = torch.from_numpy(sino_np).to(out_device)
+        results.append(sino_t)
+
+    return results
+
+
+@torch.no_grad()
+def fbp_single_from_forward(
+    vol_geom: dict[str, Any],
+    proj_geom: dict[str, Any],
+    sino_t: torch.Tensor,  # (n_angles, n_det) on any device
+    filter_name: str = "ramp",
+    circle: bool = True,
+) -> torch.Tensor:
+    """
+    Filtered Backprojection for **one** angle set, matching your FP.
+    - Filters along detector axis
+    - ASTRA 2D BP
+    - Scales by number of angles (π/(2·Nθ))
+    Returns: (im_size, im_size) on the SAME device as sino_t.
+    """
+    if sino_t.ndim != 2:
+        raise ValueError("sino_t must be (n_angles, n_det)")
+
+    out_device = sino_t.device
+    n_angles, im_size = sino_t.shape
+
+    # 1) Filter along detector axis (torch)
+    sino_filt = _apply_filter_batch(sino_t.T, filter_name).T
+
+    # 2) ASTRA 2D backprojection (link CPU numpy)
+    sino_np = sino_filt.detach().contiguous().cpu().to(torch.float32).numpy()
+    vol_np = np.zeros((im_size, im_size), dtype=np.float32)
+
+    sino_id = astra.data2d.link("-sino", proj_geom, sino_np)
+    vol_id = astra.data2d.link("-vol", vol_geom, vol_np)
+
+    try:
+        try:
+            cfg = astra.astra_dict("BP_CUDA")
+        except Exception:
+            cfg = astra.astra_dict("BP")
+        cfg["ProjectionDataId"] = sino_id
+        cfg["ReconstructionDataId"] = vol_id
+        alg_id = astra.algorithm.create(cfg)
+        astra.algorithm.run(alg_id, 1)
+        astra.algorithm.delete(alg_id)
+    finally:
+        astra.data2d.delete([sino_id, vol_id])
+
+    # 3) Correct scaling for parallel-beam: scale by number of angles
+    vol_np *= np.pi / (2.0 * float(n_angles))
+
+    vol_t = torch.from_numpy(vol_np).to(out_device)
+    if circle:
+        vol_t *= _circular_mask(im_size, device=vol_t.device, dtype=vol_t.dtype).bool()
+    return vol_t
+
+
+@torch.no_grad()
+def forward_and_fbp_2d(
+    img_t: torch.Tensor,
+    angle_sets: list[np.ndarray],
+    exposures: list[float],
+    filter_name: str = "ramp",
+    circle: bool = True,
+    l: int = 5,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    img_t.squeeze_(1)
+    radons = forward_angle_sets_2d(img_t, angle_sets)
+    fbps = []
+    I_0s = []
+    for i, radon in enumerate(radons):
+        n_angles = len(angle_sets[i])
+        I_0 = exposures[i] / n_angles
+        I_0s.append(I_0)
+        scale = l / img_t.shape[-1]
+
+        counts = poisson(I_0 * torch.exp(-scale * radon))  # (n_angles, 256)
+        counts_lr = counts.view(n_angles, img_t.shape[-1] // 2, 2).sum(
+            -1
+        )  # (n_angles, 128)
+        I_0_lr = I_0 * 2
+        sino = sinogram_ct(counts_lr, I_0_lr, l).clamp_min_(0)  # (n_angles, 128)
+
+        proj_geom_lr, vol_geom_lr = _proj_and_vol_geom_2d(
+            angle_sets[i], counts_lr.shape[-1]
+        )
+
+        fbp = fbp_single_from_forward(
+            vol_geom=vol_geom_lr,
+            proj_geom=proj_geom_lr,
+            sino_t=sino,
+            filter_name=filter_name,
+            circle=circle,
+        ).clip(0, 1)
+        fbps.append(fbp)
+    return torch.stack(fbps).to(img_t.device), torch.tensor(I_0s, device=img_t.device)
