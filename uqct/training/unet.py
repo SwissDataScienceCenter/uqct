@@ -2,6 +2,7 @@ import os
 import random
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import click
 import numpy as np
@@ -15,7 +16,7 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
 from uqct.ct import (AstraParallelOp3D, get_astra_geometry_3d, iradon_astra,
-                     sinogram_ct)
+                     poisson, sinogram_ct)
 from uqct.datasets.utils import (KWARGS_COMPOSITE, KWARGS_LAMINO, KWARGS_LUNG,
                                  get_dataset)
 from uqct.debugging import plot_img
@@ -39,14 +40,24 @@ def sample_exposure(
     )
 
 
-def sample_fbp(x: torch.Tensor, op: AstraParallelOp3D, device: torch.device):
+def sample_fbp(
+    x: torch.Tensor,
+    op: AstraParallelOp3D,
+    proj_geom_lr: dict[str, Any],
+    vol_geom_lr: dict[str, dict],
+    device: torch.device,
+):
     I_0 = sample_exposure(op.nx, device=device).view(-1, 1, 1) / N_ANGLES
     scale = L / x.shape[-1]
     radon = op.forward(x.squeeze(1))
-    counts = torch.poisson(I_0 * torch.exp(-scale * radon))
-    sino = sinogram_ct(counts, I_0, L).clip(0)
-    fbp = iradon_astra(sino.transpose(1, 2), op.vol_geom, op.proj_geom).clip(0, 1)
-    return fbp[: x.shape[0]], I_0[: x.shape[0]]
+    counts = poisson(I_0 * torch.exp(-scale * radon))  # (B, 200, 256)
+    counts_lr = counts.view(counts.shape[0], counts.shape[1], 128, 2).sum(
+        -1
+    )  # (B, 200, 128)
+    I_0_lr = I_0 * 2
+    sino = sinogram_ct(counts_lr, I_0_lr, L).clip(0)
+    fbp = iradon_astra(sino.transpose(1, 2), vol_geom_lr, proj_geom_lr).clip(0, 1)
+    return fbp[: x.shape[0]], I_0_lr[: x.shape[0]]
 
 
 def save_ckpt(
@@ -87,7 +98,6 @@ def save_ckpt(
 def loss_fn(
     x: torch.Tensor, fbp: torch.Tensor, I_0: torch.Tensor, unet: UNet2DModel
 ) -> torch.Tensor:
-    x = x.to(unet.device)
     x = x * 2.0 - 1.0
     fbp = fbp * 2.0 - 1.0
     if len(fbp.shape) == 3:
@@ -96,7 +106,8 @@ def loss_fn(
         (I_0 * N_ANGLES - MIN_EXPOSURE) / (MAX_EXPOSURE - MIN_EXPOSURE) * 999
     )  # [0, 999]
     pred = unet(fbp, timestep=exposure_norm.flatten(), return_dict=False)[0]
-    return F.mse_loss(pred, fbp)
+    x_lr = F.interpolate(x, size=pred.shape[-2:], mode="area")  # 256x256 -> 128x128
+    return F.mse_loss(pred, x_lr)
 
 
 def maybe_resume(
@@ -152,7 +163,7 @@ def maybe_resume(
 )
 @click.option("--epochs", default=50, type=int, help="Total number of training epochs.")
 @click.option(
-    "--learning-rate", default=0.0025, type=float, help="Initial learning rate."
+    "--learning-rate", default=0.0001, type=float, help="Initial learning rate."
 )
 @click.option("--dropout", default=0.37, type=float, help="Dropout")
 @click.option(
@@ -192,6 +203,11 @@ def main(**kwargs):
         "lamino": {"kwargs": KWARGS_LAMINO, "filetype": "tiff"},
         "lung": {"kwargs": KWARGS_LUNG, "filetype": "h5"},
     }
+
+    # We need 256x256 to mitigate 'inverse crime problem'
+    for v in settings.values():
+        v["kwargs"]["rescale"] = 256
+
     train_set, _ = get_dataset(
         settings[kwargs["dataset"]]["kwargs"], settings[kwargs["dataset"]]["filetype"]
     )
@@ -199,10 +215,11 @@ def main(**kwargs):
     # Create forward projector
     angles = torch.from_numpy(np.linspace(0, 180, N_ANGLES, endpoint=False))
     side_length = train_set[0].shape[-1]
-    proj_geom, vol_geom = get_astra_geometry_3d(
+    proj_geom_hr, vol_geom_hr = get_astra_geometry_3d(
         angles, side_length, kwargs["batch_size"]
     )
-    op = AstraParallelOp3D(proj_geom, vol_geom)
+    proj_geom_lr, vol_geom_lr = get_astra_geometry_3d(angles, 128, kwargs["batch_size"])
+    op = AstraParallelOp3D(proj_geom_hr, vol_geom_hr)
 
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
@@ -247,8 +264,6 @@ def main(**kwargs):
         up_block_types=up_block_types,
     )
     unet = unet.to(device)  # type: ignore
-    # if not on_cluster:
-    #     unet.enable_gradient_checkpointing()
     try:
         unet: UNet2DModel = torch.compile(unet)  # type: ignore
     except Exception:
@@ -314,7 +329,7 @@ def main(**kwargs):
                 dtype=torch.float16,
                 enabled=(device.type == "cuda"),
             ):
-                fbp, I_0 = sample_fbp(x, op, device)
+                fbp, I_0 = sample_fbp(x, op, proj_geom_lr, vol_geom_lr, device)
                 loss = loss_fn(x, fbp, I_0, unet)
 
             if not torch.isfinite(loss):
@@ -339,7 +354,7 @@ def main(**kwargs):
         val_losses = []
         with torch.no_grad():
             for x in tqdm(val_loader, desc=f"Epoch {epoch} [Val]", leave=False):
-                x = x.to(device, non_blocking=True) * 2.0 - 1.0
+                x = x.to(device, non_blocking=True)
                 if device.type == "cuda":
                     x = x.to(memory_format=torch.channels_last)
                 with torch.autocast(
@@ -347,7 +362,7 @@ def main(**kwargs):
                     dtype=torch.float16,
                     enabled=(device.type == "cuda"),
                 ):
-                    fbp, I_0 = sample_fbp(x, op, device)
+                    fbp, I_0 = sample_fbp(x, op, proj_geom_lr, vol_geom_lr, device)
                     vloss = loss_fn(x, fbp, I_0, unet)
                 val_losses.append(vloss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))
