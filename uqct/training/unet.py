@@ -415,12 +415,10 @@ def main(**kwargs):
                 ):
                     if kwargs["sparse"]:
                         fbp, I_0, n_angles = sample_fbp_sparse(x)
-                        loss = loss_fn(x, fbp, I_0, unet, n_angles)
+                        vloss = loss_fn(x, fbp, I_0, unet, n_angles)
                     else:
                         fbp, I_0 = sample_fbp(x, op, proj_geom_lr, vol_geom_lr, device)
-                        loss = loss_fn(x, fbp, I_0, unet)
-
-                    vloss = loss_fn(x, fbp, I_0, unet)
+                        vloss = loss_fn(x, fbp, I_0, unet)
                 val_losses.append(vloss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))
         writer.add_scalar("val/loss_epoch", mean_val_loss, epoch)
