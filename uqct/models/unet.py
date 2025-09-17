@@ -16,10 +16,10 @@ from uqct.datasets.utils import (KWARGS_COMPOSITE, KWARGS_LAMINO, KWARGS_LUNG,
 # Metrics
 from uqct.metrics import get_metrics
 # Reuse from training:
-from uqct.training.unet import N_ANGLES  # shared geometry/exposure constants
 from uqct.training.unet import \
     sample_fbp  # forward -> Poisson -> bin -> FBP (LR)
-from uqct.training.unet import MAX_EXPOSURE, MIN_EXPOSURE, build_unet
+from uqct.training.unet import (  # shared geometry/exposure constants
+    MAX_EXPOSURE, MIN_EXPOSURE, N_ANGLES, build_unet, sample_fbp_sparse)
 
 
 def load_unet(ckpt_path: Path, sparse: bool) -> UNet2DModel:
@@ -127,17 +127,18 @@ def main(ckpt_path: Path, dataset: str, num_examples: int, sparse: bool):
     unet.eval()
 
     # Build LR FBP and predict
-    fbp_lr, I0_lr = sample_fbp(
-        xs, op, proj_geom_lr, vol_geom_lr, device
-    )  # (N,128,128), (N,1,1)
-    class_labels = None
+    n_angles = None
     if sparse:
-        class_labels = torch.ones(len(fbp_lr), device=device) * N_ANGLES - 1
+        fbp_lr, I0_lr, n_angles = sample_fbp_sparse(xs)  # (N,128,128), (N,1,1)
+    else:
+        fbp_lr, I0_lr = sample_fbp(
+            xs, op, proj_geom_lr, vol_geom_lr, device
+        )  # (N,128,128), (N,1,1)
     preds_lr = predict(
         unet,
         fbp_lr,
         I0_lr,
-        class_labels=class_labels,
+        class_labels=n_angles,
     )  # (N,128,128)
 
     # Prepare for plotting (uniform 256×256 display)
