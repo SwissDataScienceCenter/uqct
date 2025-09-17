@@ -7,6 +7,7 @@
 #SBATCH --gpus=1
 #SBATCH --gres=gpumem:20g
 #SBATCH --time=96:00:00
+#SBATCH --array=0-29
 
 module eth_proxy load
 
@@ -21,8 +22,11 @@ export PYTHONPATH="${GITROOT}"
 cd "${GITROOT}"
 
 # Experiment settings
-DATASET="lung"
-SEED=7
+DATASETS=(composite lung lamino)
+dataset_idx=$((SLURM_ARRAY_TASK_ID / 10))
+seed=$((SLURM_ARRAY_TASK_ID % 10))
+DATASET=${DATASETS[$dataset_idx]}
+SEED=$seed
 
 # Run
 "${PYTHONBIN}" "${GITROOT}/uqct/training/unet.py" \
@@ -30,4 +34,5 @@ SEED=7
 	--epochs 500 \
 	--batch-size 64 \
 	--learning-rate 0.0001 \
-	--seed "${SEED}"
+	--seed "${SEED}" \
+	--sparse

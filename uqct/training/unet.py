@@ -251,12 +251,16 @@ def maybe_resume(
 )
 @click.option(
     "--sparse",
-    default=False,
-    type=bool,
     is_flag=True,
-    help="Whether we train for the sparse or dense setting",
+    default=False,
+    help="Train for the sparse setting (dense if omitted).",
 )
 def main(**kwargs):
+    if kwargs['sparse']:
+        print(f"Running SPARSE training")
+    else:
+        print(f"Running DENSE training")
+
     # Seeding
     torch.random.manual_seed(kwargs["seed"])
     np.random.seed(kwargs["seed"])
