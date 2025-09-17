@@ -22,9 +22,9 @@ from uqct.training.unet import \
 from uqct.training.unet import MAX_EXPOSURE, MIN_EXPOSURE, build_unet
 
 
-def load_unet(ckpt_path: Path) -> UNet2DModel:
+def load_unet(ckpt_path: Path, sparse: bool) -> UNet2DModel:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    unet = build_unet().to(device)  # type: ignore
+    unet = build_unet(sparse).to(device)  # type: ignore
     ckpt = torch.load(ckpt_path, map_location="cpu")
     sd = ckpt["unet"]
     # Handle potential _orig_mod prefix
@@ -39,7 +39,10 @@ def load_unet(ckpt_path: Path) -> UNet2DModel:
 
 @torch.inference_mode()
 def predict(
-    unet: UNet2DModel, fbp_lr: torch.Tensor, I0_lr: torch.Tensor
+    unet: UNet2DModel,
+    fbp_lr: torch.Tensor,
+    I0_lr: torch.Tensor,
+    class_labels: torch.Tensor | None,
 ) -> torch.Tensor:
     """
     fbp_lr: (B,128,128) in [0,1]
@@ -54,7 +57,12 @@ def predict(
     with torch.autocast(
         device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")
     ):
-        y = unet(x_in, timestep=exposure_norm.flatten(), return_dict=False)[
+        y = unet(
+            x_in,
+            timestep=exposure_norm.flatten(),
+            class_labels=class_labels,
+            return_dict=False,
+        )[
             0
         ]  # (B,1,128,128)
     y = ((y + 1.0) / 2.0).clamp(0.0, 1.0).squeeze(1)  # (B,128,128)
@@ -77,7 +85,14 @@ def predict(
 @click.option(
     "--num-examples", default=5, type=int, help="How many examples to visualize"
 )
-def main(ckpt_path: Path, dataset: str, num_examples: int):
+@click.option(
+    "--sparse",
+    default=False,
+    type=bool,
+    is_flag=True,
+    help="Whether its as 'sparsely trained' U-Net",
+)
+def main(ckpt_path: Path, dataset: str, num_examples: int, sparse: bool):
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
@@ -108,14 +123,22 @@ def main(ckpt_path: Path, dataset: str, num_examples: int):
     op = AstraParallelOp3D(proj_geom_hr, vol_geom_hr)
 
     # Load model
-    unet = load_unet(ckpt_path).to(device)  # type: ignore
+    unet = load_unet(ckpt_path, sparse).to(device)  # type: ignore
     unet.eval()
 
     # Build LR FBP and predict
     fbp_lr, I0_lr = sample_fbp(
         xs, op, proj_geom_lr, vol_geom_lr, device
     )  # (N,128,128), (N,1,1)
-    preds_lr = predict(unet, fbp_lr, I0_lr)  # (N,128,128)
+    class_labels = None
+    if sparse:
+        class_labels = torch.ones(len(fbp_lr), device=device) * N_ANGLES - 1
+    preds_lr = predict(
+        unet,
+        fbp_lr,
+        I0_lr,
+        class_labels=class_labels,
+    )  # (N,128,128)
 
     # Prepare for plotting (uniform 256×256 display)
     gt = xs.squeeze(1).clamp(0, 1).detach().cpu()  # (N,256,256)
