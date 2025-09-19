@@ -86,13 +86,26 @@ def predict(
     "--num-examples", default=5, type=int, help="How many examples to visualize"
 )
 @click.option(
-    "--sparse",
+    "--sparse-model",
     default=False,
     type=bool,
     is_flag=True,
     help="Whether its as 'sparsely trained' U-Net",
 )
-def main(ckpt_path: Path, dataset: str, num_examples: int, sparse: bool):
+@click.option(
+    "--sparse-data",
+    default=False,
+    type=bool,
+    is_flag=True,
+    help="Whether to use the 'sparse' data distribution",
+)
+def main(
+    ckpt_path: Path,
+    dataset: str,
+    num_examples: int,
+    sparse_model: bool,
+    sparse_data: bool,
+):
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
@@ -123,12 +136,12 @@ def main(ckpt_path: Path, dataset: str, num_examples: int, sparse: bool):
     op = AstraParallelOp3D(proj_geom_hr, vol_geom_hr)
 
     # Load model
-    unet = load_unet(ckpt_path, sparse).to(device)  # type: ignore
+    unet = load_unet(ckpt_path, sparse_model).to(device)  # type: ignore
     unet.eval()
 
     # Build LR FBP and predict
-    n_angles = None
-    if sparse:
+    n_angles = torch.ones(num_examples, device=device) * 200
+    if sparse_data:
         fbp_lr, I0_lr, n_angles = sample_fbp_sparse(xs)  # (N,128,128), (N,1,1)
     else:
         fbp_lr, I0_lr = sample_fbp(

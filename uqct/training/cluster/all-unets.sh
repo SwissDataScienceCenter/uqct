@@ -28,11 +28,19 @@ seed=$((SLURM_ARRAY_TASK_ID % 10))
 DATASET=${DATASETS[$dataset_idx]}
 SEED=$seed
 
+# Base directory for checkpoints
+CKPT_BASE=/cluster/scratch/mgaetzner/uqct/runs/unet_sparse
+
+# (Optional) Construct checkpoint folder path
+CKPT="${CKPT_BASE}/2025-09-17_17-37_${DATASET}_64_500_0.0001_0.37_0.0043_${SEED}/"
+# CKPT=""
+
 # Run
 "${PYTHONBIN}" "${GITROOT}/uqct/training/unet.py" \
 	--dataset "${DATASET}" \
 	--epochs 500 \
 	--batch-size 64 \
-	--learning-rate 0.0001 \
+	--learning-rate 3e-5 \
 	--seed "${SEED}" \
-	--sparse
+	--sparse \
+	--load-model-ckpt "${CKPT}"

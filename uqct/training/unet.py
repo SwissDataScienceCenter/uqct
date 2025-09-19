@@ -175,14 +175,11 @@ def loss_fn(
     return F.mse_loss(pred, x_lr)
 
 
-def maybe_resume(
+def load_model_ckpt(
     ckpt_path: Path,
     unet: UNet2DModel,
-    optimizer: torch.optim.Optimizer,
-    lr_scheduler,
-    scaler: torch.GradScaler,
     device: torch.device,
-):
+) -> None:
     start_epoch = 0
     best_val = float("inf")
     global_step = 0
@@ -194,26 +191,9 @@ def maybe_resume(
         target = unet._orig_mod if hasattr(unet, "_orig_mod") else unet
         target.load_state_dict(sd, strict=True)  # type: ignore
 
-        if "optimizer" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer"])
-        if "lr_scheduler" in ckpt:
-            lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
-        if "scaler" in ckpt and isinstance(scaler, torch.GradScaler):
-            scaler.load_state_dict(ckpt["scaler"])
-
-        start_epoch = int(ckpt.get("epoch", 0)) + 1
-        best_val = float(ckpt.get("best_val", ckpt.get("val_loss", float("inf"))))
-        global_step = int(
-            ckpt.get(
-                "global_step", start_epoch * len(lr_scheduler.optimizer.param_groups)
-            )
-        )  # fallback
-
         print(
             f"Resumed from '{ckpt_path}': epoch={start_epoch}, best_val={best_val:.6f}, global_step={global_step}"
         )
-
-    return start_epoch, best_val, global_step
 
 
 @click.command()
@@ -256,7 +236,7 @@ def maybe_resume(
     help="Train for the sparse setting (dense if omitted).",
 )
 def main(**kwargs):
-    if kwargs['sparse']:
+    if kwargs["sparse"]:
         print(f"Running SPARSE training")
     else:
         print(f"Running DENSE training")
@@ -356,19 +336,24 @@ def main(**kwargs):
     )
     num_update_steps_per_epoch = len(train_loader)
     num_train_steps = num_update_steps_per_epoch * kwargs["epochs"]
+    if kwargs["load_model_ckpt"].is_file():
+        num_warmup_steps = 0
+    else:
+        num_warmup_steps = int(0.1 * num_train_steps)
+
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
-        num_warmup_steps=int(0.1 * num_train_steps),
+        num_warmup_steps=num_warmup_steps,
         num_training_steps=num_train_steps,
     )
     writer = SummaryWriter(log_dir=run_dir / "tb")
 
-    start_epoch, best_val, global_step = maybe_resume(
-        kwargs["load_model_ckpt"], unet, optimizer, lr_scheduler, scaler, device
-    )
+    load_model_ckpt(kwargs["load_model_ckpt"], unet, device)
+    global_step = 0
+    best_val = float("inf")
 
     # Run training
-    for epoch in (pbar := tqdm(range(start_epoch, kwargs["epochs"]))):
+    for epoch in (pbar := tqdm(range(kwargs["epochs"]))):
         unet.train()
         for x in tqdm(train_loader, desc=f"Epoch {epoch} [Train]", leave=False):
             optimizer.zero_grad(set_to_none=True)
