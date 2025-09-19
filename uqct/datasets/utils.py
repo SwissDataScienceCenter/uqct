@@ -67,7 +67,6 @@ def get_dataset(kwargs: dict, dataset_type: str) -> tuple[Subset, Subset]:
         kwargs["clip_range"] = [3e4, 5e4]
 
     dataset = dataset_class(**kwargs)
-    torch.manual_seed(0)
     perm = torch.randperm(len(dataset))
     trainSet = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
     testSet = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore
