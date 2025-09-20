@@ -270,19 +270,7 @@ def main(**kwargs):
     torch.backends.cudnn.benchmark = True
 
     # Load dataset
-    settings = {
-        "composite": {"kwargs": KWARGS_COMPOSITE, "filetype": "nii"},
-        "lamino": {"kwargs": KWARGS_LAMINO, "filetype": "tiff"},
-        "lung": {"kwargs": KWARGS_LUNG, "filetype": "h5"},
-    }
-
-    # We need 256x256 to mitigate 'inverse crime problem'
-    for v in settings.values():
-        v["kwargs"]["rescale"] = 256
-
-    train_set, _ = get_dataset(
-        settings[kwargs["dataset"]]["kwargs"], settings[kwargs["dataset"]]["filetype"]
-    )
+    train_set, _ = get_dataset(kwargs["dataset"], True)
 
     # Create forward projector
     angles = torch.from_numpy(np.linspace(0, 180, N_ANGLES, endpoint=False))

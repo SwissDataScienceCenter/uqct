@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal, Union
 
 import numpy as np
 import torch
@@ -55,7 +56,23 @@ KWARGS_COMPOSITE = {
 }
 
 
-def get_dataset(kwargs: dict, dataset_type: str) -> tuple[Subset, Subset]:
+def get_dataset(
+    name: Literal["composite", "lamino", "lung"], high_res: bool = False
+) -> tuple[Subset, Subset]:
+    settings = {
+        "composite": {"kwargs": KWARGS_COMPOSITE, "filetype": "nii"},
+        "lamino": {"kwargs": KWARGS_LAMINO, "filetype": "tiff"},
+        "lung": {"kwargs": KWARGS_LUNG, "filetype": "h5"},
+    }
+
+    # We need 256x256 to mitigate 'inverse crime problem'
+    if high_res:
+        for v in settings.values():
+            v["kwargs"]["rescale"] = 256
+
+    dataset_type: Literal["nii", "tiff", "h5"] = settings[name]["composite"]["filetype"]
+    kwargs = settings[name]["composite"]["kwargs"]
+
     dataset_class = TomogramDataset if dataset_type == "h5" else TIFFDataset
     dataset_class = NiiDataset if dataset_type == "nii" else dataset_class
 
@@ -75,4 +92,4 @@ def get_dataset(kwargs: dict, dataset_type: str) -> tuple[Subset, Subset]:
 
 
 if __name__ == "__main__":
-    get_dataset(KWARGS_LAMINO, "tiff")
+    get_dataset("lung")

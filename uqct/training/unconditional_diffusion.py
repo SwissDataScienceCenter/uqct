@@ -152,14 +152,7 @@ def main(**kwargs):
     torch.backends.cudnn.benchmark = True
 
     # Load dataset
-    settings = {
-        "composite": {"kwargs": KWARGS_COMPOSITE, "filetype": "nii"},
-        "lamino": {"kwargs": KWARGS_LAMINO, "filetype": "tiff"},
-        "lung": {"kwargs": KWARGS_LUNG, "filetype": "h5"},
-    }
-    train_set, test_set = get_dataset(
-        settings[kwargs["dataset"]]["kwargs"], settings[kwargs["dataset"]]["filetype"]
-    )
+    train_set, _ = get_dataset(kwargs["dataset"], False)
 
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
