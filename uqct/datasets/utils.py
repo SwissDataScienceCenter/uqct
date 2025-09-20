@@ -70,8 +70,8 @@ def get_dataset(
         for v in settings.values():
             v["kwargs"]["rescale"] = 256
 
-    dataset_type: Literal["nii", "tiff", "h5"] = settings[name]["composite"]["filetype"]
-    kwargs = settings[name]["composite"]["kwargs"]
+    dataset_type: Literal["nii", "tiff", "h5"] = settings[name]["filetype"]
+    kwargs = settings[name]["kwargs"]
 
     dataset_class = TomogramDataset if dataset_type == "h5" else TIFFDataset
     dataset_class = NiiDataset if dataset_type == "nii" else dataset_class

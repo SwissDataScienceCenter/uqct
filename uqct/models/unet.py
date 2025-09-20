@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import click
 import matplotlib.pyplot as plt
@@ -92,25 +93,19 @@ def predict(
     is_flag=True,
     help="Whether its as 'sparsely trained' U-Net",
 )
-def main(ckpt_path: Path, dataset: str, num_examples: int, sparse: bool):
+def main(
+    ckpt_path: Path,
+    dataset: Literal["lamino", "lung", "composite"],
+    num_examples: int,
+    sparse: bool,
+):
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.benchmark = True
 
-    # Dataset (reuse training settings: rescale=256)
-    settings = {
-        "composite": {"kwargs": KWARGS_COMPOSITE, "filetype": "nii"},
-        "lamino": {"kwargs": KWARGS_LAMINO, "filetype": "tiff"},
-        "lung": {"kwargs": KWARGS_LUNG, "filetype": "h5"},
-    }
-    for v in settings.values():
-        v["kwargs"]["rescale"] = 256
-
-    _, test_set = get_dataset(
-        settings[dataset]["kwargs"], settings[dataset]["filetype"]
-    )
+    _, test_set = get_dataset(dataset, True)
     num_examples = min(num_examples, len(test_set))
     xs = torch.stack([test_set[i] for i in range(num_examples)], dim=0).to(
         device
