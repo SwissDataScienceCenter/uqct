@@ -17,10 +17,10 @@ from uqct.datasets.utils import (KWARGS_COMPOSITE, KWARGS_LAMINO, KWARGS_LUNG,
 # Metrics
 from uqct.metrics import get_metrics
 # Reuse from training:
-from uqct.training.unet import N_ANGLES  # shared geometry/exposure constants
 from uqct.training.unet import \
     sample_fbp  # forward -> Poisson -> bin -> FBP (LR)
-from uqct.training.unet import MAX_EXPOSURE, MIN_EXPOSURE, build_unet
+from uqct.training.unet import (  # shared geometry/exposure constants
+    MAX_EXPOSURE, MIN_EXPOSURE, N_ANGLES, build_unet, sample_fbp_sparse)
 
 
 def load_unet(ckpt_path: Path, sparse: bool) -> UNet2DModel:
@@ -87,17 +87,25 @@ def predict(
     "--num-examples", default=5, type=int, help="How many examples to visualize"
 )
 @click.option(
-    "--sparse",
+    "--sparse-model",
     default=False,
     type=bool,
     is_flag=True,
     help="Whether its as 'sparsely trained' U-Net",
 )
+@click.option(
+    "--sparse-data",
+    default=False,
+    type=bool,
+    is_flag=True,
+    help="Whether to use the 'sparse' data distribution",
+)
 def main(
     ckpt_path: Path,
     dataset: Literal["lamino", "lung", "composite"],
     num_examples: int,
-    sparse: bool,
+    sparse_model: bool,
+    sparse_data: bool,
 ):
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -118,21 +126,24 @@ def main(
     op = AstraParallelOp3D(proj_geom_hr, vol_geom_hr)
 
     # Load model
-    unet = load_unet(ckpt_path, sparse).to(device)  # type: ignore
+    unet = load_unet(ckpt_path, sparse_model).to(device)  # type: ignore
     unet.eval()
 
     # Build LR FBP and predict
-    fbp_lr, I0_lr = sample_fbp(
-        xs, op, proj_geom_lr, vol_geom_lr, device
-    )  # (N,128,128), (N,1,1)
-    class_labels = None
-    if sparse:
-        class_labels = torch.ones(len(fbp_lr), device=device) * N_ANGLES - 1
+    n_angles = torch.ones(num_examples, device=device) * 200
+    if sparse_data:
+        fbp_lr, I0_lr, n_angles = sample_fbp_sparse(xs)  # (N,128,128), (N,1,1)
+    else:
+        fbp_lr, I0_lr = sample_fbp(
+            xs, op, proj_geom_lr, vol_geom_lr, device
+        )  # (N,128,128), (N,1,1)
+    if not sparse_model:
+        n_angles = None
     preds_lr = predict(
         unet,
         fbp_lr,
         I0_lr,
-        class_labels=class_labels,
+        class_labels=n_angles,
     )  # (N,128,128)
 
     # Prepare for plotting (uniform 256×256 display)
