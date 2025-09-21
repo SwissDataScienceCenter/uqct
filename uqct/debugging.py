@@ -4,6 +4,8 @@ import torch
 
 
 def _to_numpy(img: torch.Tensor | np.ndarray) -> np.ndarray:
+    if img.ndim == 3:
+        img = img[0]
     if isinstance(img, torch.Tensor):
         return np.array(img.detach().cpu())
     return img

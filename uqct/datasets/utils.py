@@ -58,7 +58,7 @@ KWARGS_COMPOSITE = {
 
 def get_dataset(
     name: Literal["composite", "lamino", "lung"], high_res: bool = False
-) -> tuple[Subset, Subset]:
+) -> tuple[Subset[torch.Tensor], Subset[torch.Tensor]]:
     settings = {
         "composite": {"kwargs": KWARGS_COMPOSITE, "filetype": "nii"},
         "lamino": {"kwargs": KWARGS_LAMINO, "filetype": "tiff"},

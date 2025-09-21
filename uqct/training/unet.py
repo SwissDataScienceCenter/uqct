@@ -17,8 +17,7 @@ from tqdm.auto import tqdm
 
 from uqct.ct import (AstraParallelOp3D, forward_and_fbp_2d,
                      get_astra_geometry_3d, iradon_astra, poisson, sinogram_ct)
-from uqct.datasets.utils import (KWARGS_COMPOSITE, KWARGS_LAMINO, KWARGS_LUNG,
-                                 get_dataset)
+from uqct.datasets.utils import get_dataset
 from uqct.debugging import plot_img
 
 L = 5
@@ -40,7 +39,7 @@ def sample_exposure(
     )
 
 
-def sample_fbp(
+def sample_fbp_dense(
     x: torch.Tensor,
     op: AstraParallelOp3D,
     proj_geom_lr: dict[str, Any],
@@ -357,7 +356,9 @@ def main(**kwargs):
                     fbp, I_0, n_angles = sample_fbp_sparse(x)
                     loss = loss_fn(x, fbp, I_0, unet, n_angles)
                 else:
-                    fbp, I_0 = sample_fbp(x, op, proj_geom_lr, vol_geom_lr, device)
+                    fbp, I_0 = sample_fbp_dense(
+                        x, op, proj_geom_lr, vol_geom_lr, device
+                    )
                     loss = loss_fn(x, fbp, I_0, unet)
 
             if not torch.isfinite(loss):
@@ -394,7 +395,9 @@ def main(**kwargs):
                         fbp, I_0, n_angles = sample_fbp_sparse(x)
                         vloss = loss_fn(x, fbp, I_0, unet, n_angles)
                     else:
-                        fbp, I_0 = sample_fbp(x, op, proj_geom_lr, vol_geom_lr, device)
+                        fbp, I_0 = sample_fbp_dense(
+                            x, op, proj_geom_lr, vol_geom_lr, device
+                        )
                         vloss = loss_fn(x, fbp, I_0, unet)
                 val_losses.append(vloss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))

@@ -18,7 +18,7 @@ from uqct.datasets.utils import (KWARGS_COMPOSITE, KWARGS_LAMINO, KWARGS_LUNG,
 from uqct.metrics import get_metrics
 # Reuse from training:
 from uqct.training.unet import \
-    sample_fbp  # forward -> Poisson -> bin -> FBP (LR)
+    sample_fbp_dense  # forward -> Poisson -> bin -> FBP (LR)
 from uqct.training.unet import (  # shared geometry/exposure constants
     MAX_EXPOSURE, MIN_EXPOSURE, N_ANGLES, build_unet, sample_fbp_sparse)
 
@@ -134,7 +134,7 @@ def main(
     if sparse_data:
         fbp_lr, I0_lr, n_angles = sample_fbp_sparse(xs)  # (N,128,128), (N,1,1)
     else:
-        fbp_lr, I0_lr = sample_fbp(
+        fbp_lr, I0_lr = sample_fbp_dense(
             xs, op, proj_geom_lr, vol_geom_lr, device
         )  # (N,128,128), (N,1,1)
     if not sparse_model:

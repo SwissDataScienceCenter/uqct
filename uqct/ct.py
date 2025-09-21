@@ -665,7 +665,7 @@ def iradon_astra(
     return vol[0] if single else vol
 
 
-def _proj_and_vol_geom_2d(
+def get_astra_geometry_2d(
     angles_deg: np.ndarray, im_size: int
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """
@@ -705,7 +705,7 @@ def forward_angle_sets_2d(
         img_i = img_t if not batch else img_t[i]
         assert img_i.shape == (ny, nx)
 
-        proj_geom, vol_geom = _proj_and_vol_geom_2d(angles_deg, img_t.shape[-1])
+        proj_geom, vol_geom = get_astra_geometry_2d(angles_deg, img_t.shape[-1])
 
         n_angles_i = int(proj_geom["ProjectionAngles"].shape[0])
         n_det = int(proj_geom["DetectorCount"])
@@ -816,7 +816,7 @@ def forward_and_fbp_2d(
         I_0_lr = I_0 * 2
         sino = sinogram_ct(counts_lr, I_0_lr, l).clamp_min_(0)  # (n_angles, 128)
 
-        proj_geom_lr, vol_geom_lr = _proj_and_vol_geom_2d(
+        proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(
             angle_sets[i], counts_lr.shape[-1]
         )
 
