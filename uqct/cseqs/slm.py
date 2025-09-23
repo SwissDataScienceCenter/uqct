@@ -15,7 +15,9 @@ from uqct.ct import (AstraParallelOp3D, fbp_single_from_forward,
 from uqct.datasets.utils import get_dataset
 from uqct.debugging import plot_img
 
-N_ANGLES = 360
+N_ROUNDS = 200
+N_ANGLES = 200
+ANGULAR_RANGE = 180
 L = 5
 
 
@@ -45,19 +47,19 @@ class DenseCTScan:
         self.exposure = exposure
         self.T = T
         self.device = device
-        self.angles = linspace(0, 360, N_ANGLES).to(device)
-        self.proj_geom_lr, self.vol_geom_lr = get_astra_geometry_3d(self.angles, 128, T)
+        self.angles = linspace(0, ANGULAR_RANGE, N_ANGLES).to(device)
+        self.proj_geom_lr, self.vol_geom_lr = get_astra_geometry_3d(self.angles, 128, 1)
         proj_geom_hr, vol_geom_hr = get_astra_geometry_3d(self.angles, 256, T)
         self.op = AstraParallelOp3D(proj_geom_hr, vol_geom_hr)
         I_0_hr = self.exposure / N_ANGLES / self.T
         scale = L / self.image.shape[-1]
         radon = self.op.forward(self.image.expand(T, -1, -1).contiguous())
-        counts_hr = poisson(I_0_hr * torch.exp(-scale * radon))  # (B, 200, 256)
+        counts_hr = poisson(I_0_hr * torch.exp(-scale * radon))  # (N_ROUNDS, 200, 256)
+
+        # (N_ROUNDS, 200, 128)
         self.counts = counts_hr.view(
             counts_hr.shape[0], counts_hr.shape[1], 128, 2
-        ).sum(
-            -1
-        )  # (B, 200, 128)
+        ).sum(-1)
         self.I_0 = I_0_hr * 2
 
         # Lazy
@@ -71,17 +73,24 @@ class DenseCTScan:
         return self.counts[:t]
 
     def get_sinogram(self, t_start: int, t: int) -> torch.Tensor:
-        if isinstance(self.sinogram, torch.Tensor):
-            return self.sinogram[t_start - 1 : t]
-        self.sinogram = sinogram_ct(self.counts, self.I_0, L).clip(0)
-        return self.sinogram
+        return sinogram_ct(
+            self.counts[t_start - 1 : t].sum(0, keepdim=True),
+            self.I_0 * (t - t_start + 1),
+            L,
+        ).clip(0)
 
     def get_fbp(self, t: int) -> torch.Tensor:
         sinogram = self.get_sinogram(1, t)
-        fbp = iradon_astra(
+        breakpoint()
+        return iradon_astra(
             sinogram.transpose(1, 2), self.vol_geom_lr, self.proj_geom_lr
         ).clip(0, 1)
-        return fbp
+
+    def get_fbps(self, t_start: int) -> torch.Tensor:
+        fbps = list()
+        for t in range(t_start, N_ROUNDS):
+            fbps.append(self.get_fbp(t))
+        return torch.stack(fbps)
 
 
 class SparseCTScan:
@@ -96,12 +105,11 @@ class SparseCTScan:
         self.exposure = exposure
         self.t_end = t_end
         self.device = device
-        self.angles = linspace(0, 360, N_ANGLES)
+        self.angles = linspace(0, ANGULAR_RANGE, N_ANGLES)
 
         r = image.shape[-1]
-        angles_np = self.angles.detach().cpu().numpy()
-        proj_geom_hr, vol_geom_hr = get_astra_geometry_2d(angles_np, r)
-        self.proj_geom_lr, self.vol_geom_lr = get_astra_geometry_2d(angles_np, r // 2)
+        self.angles_np = self.angles.detach().cpu().numpy()
+        proj_geom_hr, vol_geom_hr = get_astra_geometry_2d(self.angles_np, r)
 
         n_angles = int(proj_geom_hr["ProjectionAngles"].shape[0])
         n_det = int(proj_geom_hr["DetectorCount"])
@@ -144,25 +152,41 @@ class SparseCTScan:
 
         # (n_angles, 128)
         self.sinogram = sinogram_ct(self.counts, I_0_lr, L).clamp_min_(0)
-        return self.sinogram[t_start:t]
+        return self.sinogram[t_start - 1 : t]
 
     def get_fbp(self, t: int) -> torch.Tensor:
         sinogram = self.get_sinogram(1, t)
+        proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(
+            self.angles_np[:t], sinogram.shape[-1]
+        )
         self.fbp = fbp_single_from_forward(
-            vol_geom=self.vol_geom_lr,
-            proj_geom=self.proj_geom_lr,
+            vol_geom=vol_geom_lr,
+            proj_geom=proj_geom_lr,
             sino_t=sinogram,
             filter_name="ramp",
             circle=True,
         ).clip(0, 1)
         return self.fbp
 
+    def get_fbps(self, t_start) -> torch.Tensor:
+        fbps = list()
+        for t in range(t_start, N_ANGLES + 1):
+            fbps.append(self.get_fbp(t))
+        return torch.stack(fbps)
+
 
 def get_predictions(
     scan: SparseCTScan | DenseCTScan,
     t_start: int,
     predictor_name: Literal["fbp", "mle", "map", "unet", "diffusion"],
-) -> torch.Tensor: ...
+) -> torch.Tensor:
+    if predictor_name == "fbp":
+        # TODO: Implement mu_0 prediction
+        return scan.get_fbps(t_start)
+    else:
+        raise NotImplementedError(
+            f"Getting predictions for predictor '{predictor_name}' is not implemented yet."
+        )
 
 
 def run_cseq(kwargs: dict[str, Any]) -> None:
@@ -189,9 +213,10 @@ def run_cseq(kwargs: dict[str, Any]) -> None:
         scan = SparseCTScan(image, kwargs["exposure"], kwargs["t_end"], device)
     else:
         scan = DenseCTScan(image, kwargs["exposure"], kwargs["t_end"], device)
+    breakpoint()
 
     # Obtain predictions
-    get_predictions(scan, kwargs["t_start"], kwargs["t_end"])
+    preds = get_predictions(scan, kwargs["t_start"], kwargs["predictor"])
 
     # Save predictions with metrics
 
@@ -210,7 +235,7 @@ def run_cseq(kwargs: dict[str, Any]) -> None:
 @click.option(
     "--predictor",
     default="mle",
-    type=click.Choice(["mle", "map", "unet", "diffusion"]),
+    type=click.Choice(["fbp", "mle", "map", "unet", "diffusion"]),
     help="which predictor to use",
 )
 @click.option(

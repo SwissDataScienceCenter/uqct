@@ -666,13 +666,15 @@ def iradon_astra(
 
 
 def get_astra_geometry_2d(
-    angles_deg: np.ndarray, im_size: int
+    angles_deg: np.ndarray | torch.Tensor, im_size: int
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Build ASTRA 2D parallel-beam geometries for a given (variable-length) angle set.
     angles_deg: 1D tensor with degrees in [0, 360]
     im_size: number of detector bins and image width/height (square)
     """
+    if isinstance(angles_deg, torch.Tensor):
+        angles_deg = angles_deg.cpu().detach().numpy()
     angles_rad = -np.deg2rad(angles_deg)
     det_spacing = 1.0
     n_det = int(im_size)
