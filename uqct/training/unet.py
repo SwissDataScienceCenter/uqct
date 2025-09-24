@@ -241,11 +241,6 @@ def main(**kwargs):
     else:
         print(f"Running DENSE training")
 
-    # Seeding
-    torch.random.manual_seed(kwargs["seed"])
-    np.random.seed(kwargs["seed"])
-    random.seed(kwargs["seed"])
-
     # Device & perf
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
@@ -255,6 +250,11 @@ def main(**kwargs):
 
     # Load dataset
     train_set, _ = get_dataset(kwargs["dataset"], True)
+
+    # Seeding
+    torch.random.manual_seed(kwargs["seed"])
+    np.random.seed(kwargs["seed"])
+    random.seed(kwargs["seed"])
 
     # Create forward projector
     angles = torch.from_numpy(np.linspace(0, 180, N_ANGLES, endpoint=False))
