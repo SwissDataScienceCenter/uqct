@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Literal
 
@@ -112,6 +113,10 @@ def main(
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.benchmark = True
 
+    torch.random.manual_seed(0)
+    np.random.seed(0)
+    random.seed(0)
+
     _, test_set = get_dataset(dataset, True)
     num_examples = min(num_examples, len(test_set))
     xs = torch.stack([test_set[i] for i in range(num_examples)], dim=0).to(
@@ -176,7 +181,7 @@ def main(
         .squeeze(1)
         .to(fbp_lr.device)
     )  # match FBP/Pred resolution
-    mse = ((gt_lr - preds_lr) ** 2).mean()
+    mse = F.mse_loss(gt_lr, preds_lr)
     print(f"MSE: {mse}")
 
     fbp_metrics = []

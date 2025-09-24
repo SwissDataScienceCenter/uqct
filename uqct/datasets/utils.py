@@ -1,7 +1,6 @@
 from pathlib import Path
-from typing import Literal, Union
+from typing import Literal
 
-import numpy as np
 import torch
 from torch.utils.data import Subset
 
