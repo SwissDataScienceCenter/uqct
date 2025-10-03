@@ -401,6 +401,7 @@ def main(**kwargs):
                         vloss = loss_fn(x, fbp, I_0, unet)
                 val_losses.append(vloss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))
+        print(f"Mean val loss: {mean_val_loss}")
         writer.add_scalar("val/loss_epoch", mean_val_loss, epoch)
 
         if mean_val_loss < best_val:

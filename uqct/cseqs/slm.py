@@ -78,10 +78,9 @@ class DenseCTScan:
 
     def get_fbp(self, t: int) -> torch.Tensor:
         sinogram = self.get_sinogram(1, t)
-        fbp = iradon_astra(
+        return iradon_astra(
             sinogram.transpose(1, 2), self.vol_geom_lr, self.proj_geom_lr
         ).clip(0, 1)
-        return fbp
 
 
 class SparseCTScan:
@@ -162,7 +161,14 @@ def get_predictions(
     scan: SparseCTScan | DenseCTScan,
     t_start: int,
     predictor_name: Literal["fbp", "mle", "map", "unet", "diffusion"],
-) -> torch.Tensor: ...
+) -> torch.Tensor:
+    if predictor_name == "fbp":
+        # TODO: Implement mu_0 prediction: do it
+        return scan.get_fbps(t_start)
+    else:
+        raise NotImplementedError(
+            f"Getting predictions for predictor '{predictor_name}' is not implemented yet."
+        )
 
 
 def run_cseq(kwargs: dict[str, Any]) -> None:
