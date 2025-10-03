@@ -1,7 +1,6 @@
 from pathlib import Path
-from typing import Literal, Union
+from typing import Literal
 
-import numpy as np
 import torch
 from torch.utils.data import Subset
 
@@ -84,6 +83,7 @@ def get_dataset(
         kwargs["clip_range"] = [3e4, 5e4]
 
     dataset = dataset_class(**kwargs)
+    torch.manual_seed(0)
     perm = torch.randperm(len(dataset))
     trainSet = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
     testSet = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore

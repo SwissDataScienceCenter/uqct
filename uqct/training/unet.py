@@ -22,6 +22,7 @@ from uqct.debugging import plot_img
 
 L = 5
 N_ANGLES = 200
+ANGULAR_RANGE = 180
 MIN_EXPOSURE = 1e4
 MAX_EXPOSURE = 1e9
 
@@ -66,7 +67,7 @@ def sample_fbp_sparse(
     n_angles = np.random.randint(1, N_ANGLES + 1, (len(images),))
     split_indices = np.cumsum(n_angles[:-1])
     total = int(n_angles.sum())
-    angle_sets = np.split(np.random.rand(total) * 360, split_indices)
+    angle_sets = np.split(np.random.rand(total) * ANGULAR_RANGE, split_indices)
     fbp, I_0 = forward_and_fbp_2d(images, angle_sets, exposures.tolist(), l=L)
     return (
         fbp,
@@ -240,11 +241,6 @@ def main(**kwargs):
     else:
         print(f"Running DENSE training")
 
-    # Seeding
-    torch.random.manual_seed(kwargs["seed"])
-    np.random.seed(kwargs["seed"])
-    random.seed(kwargs["seed"])
-
     # Device & perf
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
@@ -254,6 +250,11 @@ def main(**kwargs):
 
     # Load dataset
     train_set, _ = get_dataset(kwargs["dataset"], True)
+
+    # Seeding
+    torch.random.manual_seed(kwargs["seed"])
+    np.random.seed(kwargs["seed"])
+    random.seed(kwargs["seed"])
 
     # Create forward projector
     angles = torch.from_numpy(np.linspace(0, 180, N_ANGLES, endpoint=False))

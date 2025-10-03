@@ -208,18 +208,13 @@ def main(
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.benchmark = True
 
-    # Deterministic split & sampling
-    torch.random.manual_seed(0)
-    np.random.seed(0)
-    random.seed(0)
-
     train_set, test_set = get_dataset(dataset, True)
 
     # ---- Create val split from train_set (5%) ----
     dataset_size = len(train_set)
     val_size = int(0.05 * dataset_size)
     train_size = dataset_size - val_size
-    train_subset, val_subset = random_split(
+    _, val_subset = random_split(
         train_set,
         [train_size, val_size],
         generator=torch.Generator().manual_seed(0),  # reproducible split
@@ -240,16 +235,32 @@ def main(
     proj_geom_lr, vol_geom_lr = get_astra_geometry_3d(angles, 128, num_examples)
     op = AstraParallelOp3D(proj_geom_hr, vol_geom_hr)
 
-    # Build LR FBP and predict for the small viz batch
+    # Load model
+    unet = load_unet(ckpt_path, sparse_model).to(device)  # type: ignore
+    unet.eval()
+
+    # Build LR FBP and predict
+    # Keep a separate tensor for DISPLAY so we don't lose values when class_labels=None
     if sparse_data:
-        fbp_lr, I0_lr, n_angles_tensor = sample_fbp_sparse(xs)
-        n_angles_disp = n_angles_tensor
+        fbp_lr, I0_lr, n_angles_tensor = sample_fbp_sparse(
+            xs
+        )  # (N,128,128), (N,1,1), (N,)
+        n_angles_disp = n_angles_tensor  # per-sample angle counts
     else:
-        fbp_lr, I0_lr = sample_fbp_dense(xs, op, proj_geom_lr, vol_geom_lr, device)
+        fbp_lr, I0_lr = sample_fbp_dense(
+            xs, op, proj_geom_lr, vol_geom_lr, device
+        )  # (N,128,128), (N,1,1)
         n_angles_disp = torch.full((num_examples,), N_ANGLES, device=device)
 
+    # Class labels only if using sparse_model (as in training)
     class_labels = n_angles_disp if sparse_model else None
-    preds_lr = predict(unet, fbp_lr, I0_lr, class_labels)
+
+    preds_lr = predict(
+        unet,
+        fbp_lr,
+        I0_lr,
+        class_labels=class_labels,
+    )  # (N,128,128)
 
     # Prepare for plotting (uniform 256×256 display)
     gt = xs.squeeze(1).clamp(0, 1).detach().cpu()
@@ -276,8 +287,8 @@ def main(
         .squeeze(1)
         .to(fbp_lr.device)
     )
-    mse_batch = F.mse_loss(gt_lr, preds_lr)
-    print(f"[Viz batch] MSE: {mse_batch:.6f}")
+    mse = F.mse_loss(gt_lr, preds_lr)
+    print(f"MSE: {mse}")
 
     fbp_metrics, pred_metrics = [], []
     for i in range(num_examples):
@@ -288,20 +299,34 @@ def main(
         fbp_metrics.append(m_fbp)
         pred_metrics.append(m_pred)
 
+    # Values for overlay: angles (int) and I0 per sample (float)
     n_angles_np = n_angles_disp.detach().float().cpu().numpy()
     I0_vals = I0_lr.detach().float().view(num_examples, -1).mean(dim=1).cpu().numpy()
 
-    # Plot
+    # Plot: 3 rows (GT / FBP / Pred) × N columns, show PSNR & SSIM on each column
     _, axes = plt.subplots(3, num_examples, figsize=(2.2 * num_examples, 6.0))
     if num_examples == 1:
         axes = np.asarray(axes).reshape(3, 1)
 
     for i in range(num_examples):
-        # GT
+        # GT + overlay with angles and I0
         axes[0, i].imshow(gt[i], cmap="gray", vmin=0.0, vmax=1.0)
         axes[0, i].axis("off")
         if i == 0:
             axes[0, i].set_title("GT", fontsize=10)
+        overlay_txt = f"{int(round(n_angles_np[i]))} angles | I0={I0_vals[i]:.3g}"
+        axes[0, i].text(
+            6,
+            14,
+            overlay_txt,
+            color="white",
+            fontsize=8,
+            ha="left",
+            va="top",
+            bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.6),
+        )
+
+        # Overlay text (top-left)
         overlay_txt = f"{int(round(n_angles_np[i]))} angles | I0={I0_vals[i]:.3g}"
         axes[0, i].text(
             6,
