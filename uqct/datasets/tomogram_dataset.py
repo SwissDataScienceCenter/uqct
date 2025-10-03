@@ -76,31 +76,19 @@ class TomogramDataset(BaseImageDataset):
     def __init__(
         self,
         path,
-        lr_path=None,
         rescale=None,
         clip_range=None,
         val_range=None,
         rotation_angle=None,
-        contrast=None,
-        train_transform=False,
-        crop=None,
     ):
         self.hr_tomogram = H5Wrapper(path)
-        self.lr_tomogram = None
 
         super().__init__(
-            path,
             rescale=rescale,
             clip_range=clip_range,
             val_range=val_range,
             rotation_angle=rotation_angle,
-            contrast=contrast,
-            train_transform=train_transform,
-            crop=crop,
         )
-
-        if lr_path:
-            self.lr_tomogram = H5Wrapper(lr_path)
 
     def __getitem__(self, idx):  # type: ignore
         hr_image = torch.Tensor(self.hr_tomogram[idx])
@@ -114,7 +102,7 @@ class TomogramDataset(BaseImageDataset):
         return len(self.hr_tomogram)
 
     def __str__(self) -> str:
-        return f"TomogramDataset(\n  hr_tomogram={self.hr_tomogram},\n  lr_tomogram={self.lr_tomogram}\n)"
+        return f"TomogramDataset(hr_tomogram={self.hr_tomogram})"
 
 
 if __name__ == "__main__":
