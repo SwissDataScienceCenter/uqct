@@ -47,7 +47,7 @@ def sample_fbp_dense(
     vol_geom_lr: dict[str, dict],
     device: torch.device,
 ):
-    I_0 = sample_exposure(op.nx, device=device).view(-1, 1, 1) / N_ANGLES
+    I_0 = sample_exposure(op.nz, device=device).view(-1, 1, 1) / N_ANGLES
     scale = L / x.shape[-1]
     radon = op.forward(x.squeeze(1))
     counts = poisson(I_0 * torch.exp(-scale * radon))  # (B, 200, 256)
@@ -58,6 +58,27 @@ def sample_fbp_dense(
     sino = sinogram_ct(counts_lr, I_0_lr, L).clip(0)
     fbp = iradon_astra(sino.transpose(1, 2), vol_geom_lr, proj_geom_lr).clip(0, 1)
     return fbp[: x.shape[0]], I_0_lr[: x.shape[0]]
+
+
+def sample_obs_dense(
+    x: torch.Tensor,
+    op: AstraParallelOp3D,
+    proj_geom_lr: dict[str, Any],
+    vol_geom_lr: dict[str, dict],
+    I_tot: torch.Tensor,
+    device: torch.device,
+):
+    I_0 = I_tot.view(-1, 1, 1) / N_ANGLES / 2  # divide by 2 since we simulate at higher resolution
+    scale = L / x.shape[-1]
+    radon = op.forward(x.squeeze(1))
+    counts = poisson(I_0 * torch.exp(-scale * radon))  # (B, 200, 256)
+    counts_lr = counts.view(counts.shape[0], counts.shape[1], 128, 2).sum(
+        -1
+    )  # (B, 200, 128)
+    # I_0_lr = I_0 * 2
+    # sino = sinogram_ct(counts_lr, I_0_lr, L).clip(0)
+    # fbp = iradon_astra(sino.transpose(1, 2), vol_geom_lr, proj_geom_lr).clip(0, 1)
+    return counts_lr
 
 
 def sample_fbp_sparse(

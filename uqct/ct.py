@@ -5,78 +5,76 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import tqdm
-from skimage.transform import iradon, radon
-
-from uqct.debugging import plot_img
+# from skimage.transform import iradon, radon
 
 
-def batched_sinogram(images, sinogram_angles=None, interpolation: str = "bilinear"):
-    assert len(images.shape) == 3
+# def batched_sinogram(images, sinogram_angles=None, interpolation: str = "bilinear"):
+#     assert len(images.shape) == 3
 
-    device = images.device
-    sinogram_angles = sinogram_angles.to(device)
+#     device = images.device
+#     sinogram_angles = sinogram_angles.to(device)
 
-    rotation_matrix = torch.stack(
-        [
-            torch.stack(
-                [
-                    torch.cos(torch.deg2rad(sinogram_angles)),
-                    -torch.sin(torch.deg2rad(sinogram_angles)),
-                    torch.zeros_like(sinogram_angles),
-                ],
-                1,
-            ).to(device),
-            torch.stack(
-                [
-                    torch.sin(torch.deg2rad(sinogram_angles)),
-                    torch.cos(torch.deg2rad(sinogram_angles)),
-                    torch.zeros_like(sinogram_angles),
-                ],
-                1,
-            ).to(device),
-        ],
-        1,
-    )
-    current_grid = F.affine_grid(
-        rotation_matrix.to(images.device),
-        images.repeat(len(sinogram_angles), 1, 1, 1).size(),
-        align_corners=False,
-    )
+#     rotation_matrix = torch.stack(
+#         [
+#             torch.stack(
+#                 [
+#                     torch.cos(torch.deg2rad(sinogram_angles)),
+#                     -torch.sin(torch.deg2rad(sinogram_angles)),
+#                     torch.zeros_like(sinogram_angles),
+#                 ],
+#                 1,
+#             ).to(device),
+#             torch.stack(
+#                 [
+#                     torch.sin(torch.deg2rad(sinogram_angles)),
+#                     torch.cos(torch.deg2rad(sinogram_angles)),
+#                     torch.zeros_like(sinogram_angles),
+#                 ],
+#                 1,
+#             ).to(device),
+#         ],
+#         1,
+#     )
+#     current_grid = F.affine_grid(
+#         rotation_matrix.to(images.device),
+#         images.repeat(len(sinogram_angles), 1, 1, 1).size(),
+#         align_corners=False,
+#     )
 
-    rotated = F.grid_sample(
-        images.repeat(len(sinogram_angles), 1, 1, 1).float(),
-        current_grid.repeat(1, 1, 1, 1),
-        align_corners=False,
-        mode=interpolation,
-    )
-    rotated = rotated.transpose(0, 1)
-    # Sum over one of the dimensions to compute the projection
-    sinogram = rotated.sum(axis=-2).squeeze(2)
-    return sinogram
-
-
-def compute_sinogram(images, angles, interpolation: str = "bilinear"):
-    batch_dims = images.size()[:-2]
-    img_shape = images.size()[-2:]
-    images = images.view(-1, *img_shape)
-    sinogram = batched_sinogram(
-        images, sinogram_angles=angles, interpolation=interpolation
-    )
-    return sinogram.view(*batch_dims, len(angles), img_shape[0])
+#     rotated = F.grid_sample(
+#         images.repeat(len(sinogram_angles), 1, 1, 1).float(),
+#         current_grid.repeat(1, 1, 1, 1),
+#         align_corners=False,
+#         mode=interpolation,
+#     )
+#     rotated = rotated.transpose(0, 1)
+#     # Sum over one of the dimensions to compute the projection
+#     sinogram = rotated.sum(axis=-2).squeeze(2)
+#     return sinogram
 
 
-def linspace(start, end, steps, endpoint=True, device=None, dtype=None):
-    """
-    Torch linspace with endpoint option.
-    If endpoint=False, the last value is excluded.
-    """
-    if endpoint:
-        return torch.linspace(start, end, steps, device=device, dtype=dtype)
-    else:
-        if steps == 1:
-            return torch.tensor([start], device=device, dtype=dtype)
-        step_size = (end - start) / steps
-        return torch.arange(steps, device=device, dtype=dtype) * step_size + start
+# def compute_sinogram(images, angles, interpolation: str = "bilinear"):
+#     batch_dims = images.size()[:-2]
+#     img_shape = images.size()[-2:]
+#     images = images.view(-1, *img_shape)
+#     sinogram = batched_sinogram(
+#         images, sinogram_angles=angles, interpolation=interpolation
+#     )
+#     return sinogram.view(*batch_dims, len(angles), img_shape[0])
+
+
+# def linspace(start, end, steps, endpoint=True, device=None, dtype=None):
+#     """
+#     Torch linspace with endpoint option.
+#     If endpoint=False, the last value is excluded.
+#     """
+#     if endpoint:
+#         return torch.linspace(start, end, steps, device=device, dtype=dtype)
+#     else:
+#         if steps == 1:
+#             return torch.tensor([start], device=device, dtype=dtype)
+#         step_size = (end - start) / steps
+#         return torch.arange(steps, device=device, dtype=dtype) * step_size + start
 
 
 class Tomogram(torch.nn.Module):
@@ -124,39 +122,39 @@ def anscombe_transform(x):
     return torch.sqrt(x + 3 / 8)
 
 
-def fbp(sinogram, angles, filter_name="ramp"):
-    """
-    Filtered back projection using sklearn's implementation.
-    Accepts batched sinograms of shape (batch, n_angles, n_detectors).
-    Returns reconstructed images of shape (batch, H, W).
-    """
-    batch_dims = sinogram.size()[:-2]
-    sinogram_size = sinogram.size()[-2:]
-    sinogram = sinogram.view(-1, *sinogram_size)
-    sinogram_np = sinogram.cpu().numpy()
-    angles_np = angles.cpu().numpy()
-    batch_size = sinogram_np.shape[0]
-    recon_list = []
-    for i in range(batch_size):
-        recon = iradon(sinogram_np[i].T, theta=-angles_np, filter_name=filter_name)
-        recon_list.append(torch.tensor(recon, device=sinogram.device))
-    return torch.stack(recon_list).view(
-        *batch_dims, sinogram_size[-1], sinogram_size[-1]
-    )
+# def fbp(sinogram, angles, filter_name="ramp"):
+#     """
+#     Filtered back projection using sklearn's implementation.
+#     Accepts batched sinograms of shape (batch, n_angles, n_detectors).
+#     Returns reconstructed images of shape (batch, H, W).
+#     """
+#     batch_dims = sinogram.size()[:-2]
+#     sinogram_size = sinogram.size()[-2:]
+#     sinogram = sinogram.view(-1, *sinogram_size)
+#     sinogram_np = sinogram.cpu().numpy()
+#     angles_np = angles.cpu().numpy()
+#     batch_size = sinogram_np.shape[0]
+#     recon_list = []
+#     for i in range(batch_size):
+#         recon = iradon(sinogram_np[i].T, theta=-angles_np, filter_name=filter_name)
+#         recon_list.append(torch.tensor(recon, device=sinogram.device))
+#     return torch.stack(recon_list).view(
+#         *batch_dims, sinogram_size[-1], sinogram_size[-1]
+#     )
 
 
-def radon_sklearn(images, angles):
-    """
-    Compute the Radon transform (sinogram) using sklearn's iradon.
-    Accepts batched images of shape (batch, H, W).
-    Returns sinograms of shape (batch, n_angles, n_detectors).
-    """
-    batch_size = images.shape[0]
-    sinograms = []
-    for i in range(batch_size):
-        sinogram = radon(images[i].cpu().numpy(), theta=-angles.cpu().numpy()).T
-        sinograms.append(torch.tensor(sinogram, device=images.device))
-    return torch.stack(sinograms)
+# def radon_sklearn(images, angles):
+#     """
+#     Compute the Radon transform (sinogram) using sklearn's iradon.
+#     Accepts batched images of shape (batch, H, W).
+#     Returns sinograms of shape (batch, n_angles, n_detectors).
+#     """
+#     batch_size = images.shape[0]
+#     sinograms = []
+#     for i in range(batch_size):
+#         sinogram = radon(images[i].cpu().numpy(), theta=-angles.cpu().numpy()).T
+#         sinograms.append(torch.tensor(sinogram, device=images.device))
+#     return torch.stack(sinograms)
 
 
 def poisson(input):
@@ -298,13 +296,13 @@ def uniform_allocation(num_angles=360, exposure=1e5, device=None):
     """
     Create a uniform allocation vector for the angles.
     """
-    angles = linspace(0, 180, num_angles, endpoint=False, device=device)
+    angles = torch.from_numpy(np.linspace(0, 180, num_angles, endpoint=False)).float().to(device)
     allocation = torch.ones(num_angles, device=device) * exposure / num_angles
     return allocation.unsqueeze(-1), angles
 
 
 def random_allocation(num_angles=360, exposure=1e5, device=None):
-    angles = linspace(0, 180, num_angles, endpoint=False, device=device)
+    angles = torch.from_numpy(np.linspace(0, 180, num_angles, endpoint=False)).float().to(device)
     allocation = (
         torch.distributions.Dirichlet(torch.ones(num_angles, device=device))
         .sample()
@@ -364,9 +362,10 @@ def get_astra_geometry_3d(
     angles: torch.Tensor, im_size: int, n_slices: int
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     # ASTRA 3D geometries
-    angles_rad = -torch.deg2rad(angles).detach().cpu().numpy()
+    angles_rad = torch.deg2rad(angles).detach().cpu().numpy()
     det_spacing_x = 1.0
     det_spacing_y = 1.0
+
     n_det_cols = int(im_size)
     n_det_rows = int(n_slices)
 
@@ -379,6 +378,20 @@ def get_astra_geometry_3d(
     return proj_geom3d, vol_geom3d
 
 
+def get_astra_geometry_from_images(angles, images):
+    assert images.ndim == 3, "images must be 3D (n_slices, H, W)"
+    assert images.shape[-1] == images.shape[-2], f"images must be square (H, W), got images.shape={images.shape}"
+    n_slices, im_size = images.shape[0], images.shape[-2]
+    return get_astra_geometry_3d(angles, im_size, n_slices)
+
+
+def get_astra_geometry_from_sinogram(angles, sinogram):
+    assert sinogram.ndim == 3, "sinogram must be 3D (n_angles, n_det_y, n_det_x)"
+    n_det_rows, n_angles, n_det_cols = sinogram.shape
+    assert n_angles == angles.shape[0], f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sinogram.shape}"
+    return get_astra_geometry_3d(angles, n_det_cols, n_det_rows)
+
+
 class AstraParallelOp3D:
     """
     Torch ⇄ ASTRA 3D parallel-beam operator (GPU preferred).
@@ -389,7 +402,7 @@ class AstraParallelOp3D:
     def __init__(self, proj_geom: dict[str, Any], vol_geom: dict[str, Any]):
         self.vol_geom = vol_geom
         self.proj_geom = proj_geom
-        self.nz, self.ny, self.nx = (
+        self.ny, self.nx, self.nz = (
             vol_geom["GridRowCount"],
             vol_geom["GridColCount"],
             vol_geom["GridSliceCount"],
@@ -409,10 +422,10 @@ class AstraParallelOp3D:
                 dtype=torch.float32,
             )
 
-        n = vol_t.shape[0]
-        if vol_t.shape[0] != self.nx:
-            filler = torch.zeros(self.nx - n, self.ny, self.nz, device=vol_t.device)
-            vol_t = torch.cat([vol_t, filler])
+        # n = vol_t.shape[0]
+        # if vol_t.shape[0] != self.nx:
+        #     filler = torch.zeros(self.nx - n, self.ny, self.nz, device=vol_t.device)
+        #     vol_t = torch.cat([vol_t, filler])
         vol_id = astra.data3d.link("-vol", self.vol_geom, vol_t.detach())
         sino_id = astra.data3d.link("-sino", self.proj_geom, out_sino_t.detach())
 
@@ -471,7 +484,6 @@ def make_radon_layer(op: AstraParallelOp3D) -> Callable[[torch.Tensor], torch.Te
         @staticmethod
         def backward(ctx, grad_out: torch.Tensor) -> torch.Tensor:  # type: ignore
             op = ctx.op
-
             g_vol = torch.zeros(
                 (op.nz, op.ny, op.nx), device=grad_out.device, dtype=torch.float32
             )
@@ -481,12 +493,14 @@ def make_radon_layer(op: AstraParallelOp3D) -> Callable[[torch.Tensor], torch.Te
     return ParallelBeam3DFn.apply  # type: ignore
 
 
-def compute_sinogram_astra(
-    images: torch.Tensor, vol_geom_3d: dict[str, dict], proj_geom_3d: dict[str, Any]
+def compute_sinogram(
+    images: torch.Tensor, angles: torch.Tensor
 ):
     batch_dims = images.size()[:-2]
     img_shape = images.size()[-2:]
     images = images.view(-1, *img_shape)
+
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(angles, images)
 
     op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
     parallel3d_layer = make_radon_layer(op3d)
@@ -494,6 +508,23 @@ def compute_sinogram_astra(
     sinogram = parallel3d_layer(images.squeeze())
 
     return sinogram.view(*batch_dims, sinogram.shape[1], img_shape[0])
+
+# def compute_sinogram(
+#     images: torch.Tensor, angles: torch.Tensor
+# ):
+#     batch_dims = images.size()[:-2]
+#     img_shape = images.size()[-2:]
+#     images = images.view(-1, *img_shape)
+
+#     n_slices = images.shape[0]
+#     proj_geom_3d, vol_geom_3d = get_astra_geometry_3d(angles, img_shape[0], n_slices)
+
+#     op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
+#     parallel3d_layer = make_radon_layer(op3d)
+
+#     sinogram = parallel3d_layer(images.squeeze())
+
+#     return sinogram.view(*batch_dims, sinogram.shape[1], img_shape[0])
 
 
 def _fourier_filter_1d(
@@ -590,7 +621,7 @@ def _circular_mask(img_size: int, device=None, dtype=torch.float32) -> torch.Ten
 
 
 def iradon_astra(
-    radon_image: torch.Tensor,
+    astra_radon_image: torch.Tensor,
     vol_geom3d: dict[str, dict],
     proj_geom3d: dict[str, Any],
     output_size: int | None = None,
@@ -602,25 +633,25 @@ def iradon_astra(
     Input:  (M, N) or (B, M, N) torch float tensor
     Output: (H, W) or (B, H, W) torch float32 tensor.
     """
-    if not isinstance(radon_image, torch.Tensor):
+    if not isinstance(astra_radon_image, torch.Tensor):
         raise TypeError("radon_image must be a torch.Tensor")
-    if radon_image.ndim not in (2, 3):
+    if astra_radon_image.ndim not in (2, 3):
         raise ValueError("radon_image must be 2-D (M,N) or 3-D (B,M,N)")
-    single = radon_image.ndim == 2
+    single = astra_radon_image.ndim == 2
     if single:
-        radon_image = radon_image.unsqueeze(0)  # (1, M, N)
+        astra_radon_image = astra_radon_image.unsqueeze(0)  # (1, M, N)
 
     # dtype and device handling
-    radon_image = radon_image.detach()
-    if radon_image.dtype not in (torch.float32, torch.float64):
-        radon_image = radon_image.float()
+    astra_radon_image = astra_radon_image.detach()
+    if astra_radon_image.dtype not in (torch.float32, torch.float64):
+        astra_radon_image = astra_radon_image.float()
     # ASTRA expects CPU-linked arrays
-    radon_image = radon_image.contiguous()  # .cpu()
+    astra_radon_image = astra_radon_image.contiguous()  # .cpu()
 
-    B, M, N = radon_image.shape
+    B, M, N = astra_radon_image.shape
 
     # Filter in frequency domain
-    sino_filt = _apply_filter_batch(radon_image, filter_name)  # (B, M, N)
+    sino_filt = _apply_filter_batch(astra_radon_image, filter_name)  # (B, M, N)
 
     # Output size
     if output_size is None:
@@ -634,7 +665,7 @@ def iradon_astra(
 
     # Preallocate output and link both
     vol = torch.zeros(
-        (B, output_size, output_size), dtype=torch.float32, device=radon_image.device
+        (B, output_size, output_size), dtype=torch.float32, device=astra_radon_image.device
     )
 
     sino_id = astra.data3d.link("-sino", proj_geom3d, sino_3d)
@@ -831,3 +862,25 @@ def forward_and_fbp_2d(
         ).clip(0, 1)
         fbps.append(fbp)
     return torch.stack(fbps).to(img_t.device), torch.tensor(I_0s, device=img_t.device)
+def fbp(sinogram, angles):
+    """
+    Filtered back projection using astra's implementation.
+    Accepts batched sinograms of shape (batch, n_angles, n_detectors).
+    Returns reconstructed images of shape (batch, H, W).
+    """
+    batch_dims = sinogram.size()[:-2]
+    sinogram_size = sinogram.size()[-2:]
+    sinogram = sinogram.view(-1, *sinogram_size)
+
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_sinogram(angles, sinogram)
+
+    recon = iradon_astra(
+        sinogram.swapaxes(-1, -2),
+        vol_geom3d=vol_geom_3d,
+        proj_geom3d=proj_geom_3d,
+        output_size=sinogram_size[-1],
+        filter_name="ramp",
+        circle=True,
+    )
+
+    return recon.view(*batch_dims, sinogram_size[-1], sinogram_size[-1])
