@@ -82,10 +82,10 @@ def get_dataset(
     dataset = dataset_class(**kwargs)
     torch.manual_seed(0)
     perm = torch.randperm(len(dataset))
-    trainSet = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
-    testSet = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore
-    return trainSet, testSet
+    train_set = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
+    test_set = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore
+    return train_set, test_set
 
 
 if __name__ == "__main__":
-    get_dataset("lung")
+    train_set, test_set = get_dataset("lung")

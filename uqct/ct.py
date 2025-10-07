@@ -3,66 +3,8 @@ from typing import Any, Callable
 import astra
 import numpy as np
 import torch
-import torch.nn.functional as F
-import tqdm
-from skimage.transform import iradon, radon
 
 from uqct.debugging import plot_img
-
-
-def batched_sinogram(images, sinogram_angles=None, interpolation: str = "bilinear"):
-    assert len(images.shape) == 3
-
-    device = images.device
-    sinogram_angles = sinogram_angles.to(device)
-
-    rotation_matrix = torch.stack(
-        [
-            torch.stack(
-                [
-                    torch.cos(torch.deg2rad(sinogram_angles)),
-                    -torch.sin(torch.deg2rad(sinogram_angles)),
-                    torch.zeros_like(sinogram_angles),
-                ],
-                1,
-            ).to(device),
-            torch.stack(
-                [
-                    torch.sin(torch.deg2rad(sinogram_angles)),
-                    torch.cos(torch.deg2rad(sinogram_angles)),
-                    torch.zeros_like(sinogram_angles),
-                ],
-                1,
-            ).to(device),
-        ],
-        1,
-    )
-    current_grid = F.affine_grid(
-        rotation_matrix.to(images.device),
-        images.repeat(len(sinogram_angles), 1, 1, 1).size(),
-        align_corners=False,
-    )
-
-    rotated = F.grid_sample(
-        images.repeat(len(sinogram_angles), 1, 1, 1).float(),
-        current_grid.repeat(1, 1, 1, 1),
-        align_corners=False,
-        mode=interpolation,
-    )
-    rotated = rotated.transpose(0, 1)
-    # Sum over one of the dimensions to compute the projection
-    sinogram = rotated.sum(axis=-2).squeeze(2)
-    return sinogram
-
-
-def compute_sinogram(images, angles, interpolation: str = "bilinear"):
-    batch_dims = images.size()[:-2]
-    img_shape = images.size()[-2:]
-    images = images.view(-1, *img_shape)
-    sinogram = batched_sinogram(
-        images, sinogram_angles=angles, interpolation=interpolation
-    )
-    return sinogram.view(*batch_dims, len(angles), img_shape[0])
 
 
 def linspace(start, end, steps, endpoint=True, device=None, dtype=None):
@@ -124,41 +66,6 @@ def anscombe_transform(x):
     return torch.sqrt(x + 3 / 8)
 
 
-def fbp(sinogram, angles, filter_name="ramp"):
-    """
-    Filtered back projection using sklearn's implementation.
-    Accepts batched sinograms of shape (batch, n_angles, n_detectors).
-    Returns reconstructed images of shape (batch, H, W).
-    """
-    batch_dims = sinogram.size()[:-2]
-    sinogram_size = sinogram.size()[-2:]
-    sinogram = sinogram.view(-1, *sinogram_size)
-    sinogram_np = sinogram.cpu().numpy()
-    angles_np = angles.cpu().numpy()
-    batch_size = sinogram_np.shape[0]
-    recon_list = []
-    for i in range(batch_size):
-        recon = iradon(sinogram_np[i].T, theta=-angles_np, filter_name=filter_name)
-        recon_list.append(torch.tensor(recon, device=sinogram.device))
-    return torch.stack(recon_list).view(
-        *batch_dims, sinogram_size[-1], sinogram_size[-1]
-    )
-
-
-def radon_sklearn(images, angles):
-    """
-    Compute the Radon transform (sinogram) using sklearn's iradon.
-    Accepts batched images of shape (batch, H, W).
-    Returns sinograms of shape (batch, n_angles, n_detectors).
-    """
-    batch_size = images.shape[0]
-    sinograms = []
-    for i in range(batch_size):
-        sinogram = radon(images[i].cpu().numpy(), theta=-angles.cpu().numpy()).T
-        sinograms.append(torch.tensor(sinogram, device=images.device))
-    return torch.stack(sinograms)
-
-
 def poisson(input):
     """
     Sample from a Poisson distribution with the given input.
@@ -171,32 +78,13 @@ def poisson(input):
     return torch.poisson(input)
 
 
-# def finetune(image, measurements, angles, exposure, num_steps=100, verbose=False):
-#     # if not isinstance(image, Tomogram):
-#     #     image = Tomogram(prior=image, use_sigmoid=False, sigmoid_alpha=5.0).to(device)
-
-#     image.train()
-#     optimizer = torch.optim.Adam(image.parameters(), lr=1e-3)
-#     losses = []
-#     it = tqdm(range(num_steps), desc="Finetuning", disable=not verbose)
-#     for step in it:
-#         optimizer.zero_grad()
-#         recon = image()
-#         proj_recon = tomography2d(recon, angles)
-#         loss = mse(proj_recon, measurements, exposure=exposure, vst=anscombe_transform)
-#         # loss = mse(proj_recon, measurements, exposure=exposure)
-#         loss.backward()
-#         optimizer.step()
-#         losses.append(loss.item())
-
-#         it.set_postfix(loss=loss.item())
-
-#         # if step % 10 == 0:
-#         #     print(f"Step {step}: Loss = {loss.item():.4f}")
-#     return image, losses
-
-
-def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
+def forward_ct(
+    images: torch.Tensor,
+    angles: torch.Tensor,
+    exposure: torch.Tensor,
+    l: float = 5.0,
+    sinogram_fct: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
+):
     """
     forward model
     """
@@ -206,30 +94,39 @@ def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
         if sinogram_fct
         else compute_sinogram(images, angles.flatten())
     )
-
     scale = l / images.shape[-1]  # Normalize by the image size
 
     return poisson(exposure * torch.exp(-scale * projections))
 
 
-def nll_ct(images, measurements, angles, exposure, l=5.0):
+def nll(
+    predictions: torch.Tensor,
+    counts: torch.Tensor,
+    I_tot: torch.Tensor,
+    angles: torch.Tensor,
+    L: int = 5,
+) -> torch.Tensor:
     """
-    Computes the negative log-likelihood for Poisson distributed measurements.
+    Arguments:
+        predictions (torch.Tensor): (..., side_length, side_length)
+        counts (torch.Tensor): (..., n_angles, side_length)
+        I_tot (torch.Tensor): (..., n_angles, side_length)
+        angles (torch.Tensor): (n_angles)
+    Returns:
+        torch.Tensor: (..., n_angles, side_length)
     """
-    sinogram = compute_sinogram(images, angles.flatten())
-    scale = l / images.shape[-1]
 
-    # The log of the expected photon count (lambda) is log(exposure * exp(-scale * sinogram))
-    # which expands to log(exposure) - scale * sinogram
-    log_lambda = torch.log(exposure + 1e-9) - scale * sinogram
+    I_0 = I_tot / counts.shape[-2]
+    radon = compute_sinogram(predictions, angles)
+    scale = L / predictions.shape[-1]
+    log_lambda = torch.log(I_0 + 1e-9) - scale * radon
 
     # The expected photon count (lambda)
-    lambda_ = exposure * torch.exp(-scale * sinogram)
+    lambda_ = I_0 * torch.exp(-scale * radon)
 
-    # The Poisson negative log-likelihood is -(k * log(lambda) - lambda)
-    nll = -(measurements * log_lambda - lambda_)
-
-    return nll.sum(dim=(-1, -2, -3))  # Mean over all measurements
+    # The Poisson negative log-likelihood is -(k * log(lambda) - lambda - Gamma(k + 1))
+    nll = -(counts * log_lambda - lambda_ - torch.lgamma(counts + 1))
+    return nll
 
 
 def sinogram_ct(measurements, I_0, l=5.0):
@@ -250,7 +147,6 @@ def fbp_ct(measurements, angles, exposure, l=5.0, weighted=False, clip=True):
         weights = exposure / exposure.sum(
             dim=-2, keepdim=True
         )  # * np.pi  # Normalize exposure to sum to 1
-        # print(f"min/max of weights: {weights.min().item()}/{weights.max().item()}")
         sinogram_weighted = sinogram * weights
         recon_weighted = fbp(sinogram_weighted, angles)
         recon_weighted *= len(angles)
@@ -266,45 +162,25 @@ def fbp_ct(measurements, angles, exposure, l=5.0, weighted=False, clip=True):
     return recon
 
 
-def finetune_ct(
-    image, measurements, angles, exposure, num_steps=100, verbose=False, l=5.0
-):
-    # if not isinstance(image, Tomogram):
-    #     image = Tomogram(prior=image, use_sigmoid=False, sigmoid_alpha=5.0).to(device)
-
-    image.train()
-    optimizer = torch.optim.Adam(image.parameters(), lr=1e-3)
-    losses = []
-    it = tqdm(range(num_steps), desc="Finetuning", disable=not verbose)
-    for step in it:
-        optimizer.zero_grad()
-        recon = image()
-        # proj_recon = tomography2d(recon, angles)/
-        # loss = mse(proj_recon, measurements, exposure=exposure, vst=anscombe_transform)
-        loss = nll_ct(recon, measurements, angles, exposure, l=l)
-        # loss = mse(proj_recon, measurements, exposure=exposure)
-        loss.backward()
-        optimizer.step()
-        losses.append(loss.item())
-
-        it.set_postfix(loss=loss.item())
-
-        # if step % 10 == 0:
-        #     print(f"Step {step}: Loss = {loss.item():.4f}")
-    return image, losses
-
-
 def uniform_allocation(num_angles=360, exposure=1e5, device=None):
     """
     Create a uniform allocation vector for the angles.
     """
-    angles = linspace(0, 180, num_angles, endpoint=False, device=device)
+    angles = (
+        torch.from_numpy(np.linspace(0, 180, num_angles, endpoint=False))
+        .float()
+        .to(device)
+    )
     allocation = torch.ones(num_angles, device=device) * exposure / num_angles
     return allocation.unsqueeze(-1), angles
 
 
 def random_allocation(num_angles=360, exposure=1e5, device=None):
-    angles = linspace(0, 180, num_angles, endpoint=False, device=device)
+    angles = (
+        torch.from_numpy(np.linspace(0, 180, num_angles, endpoint=False))
+        .float()
+        .to(device)
+    )
     allocation = (
         torch.distributions.Dirichlet(torch.ones(num_angles, device=device))
         .sample()
@@ -343,7 +219,6 @@ def mse_ct(images, measurements, angles, exposure, vst=None, l=5.0):
     scale = l / images.shape[-1]  # Normalize by the image size
 
     # scale_projection = scale * projections
-    # print(f"min/max of projections: {scale_projection.min().item()}/{scale_projection.max().item()}")
 
     predictions = torch.exp(-scale * projections)
     # predictions = torch.clamp(predictions, min=1e-6)  # Ensure predictions are positive
@@ -379,6 +254,24 @@ def get_astra_geometry_3d(
     return proj_geom3d, vol_geom3d
 
 
+def get_astra_geometry_from_images(angles, images):
+    assert images.ndim == 3, "images must be 3D (n_slices, H, W)"
+    assert (
+        images.shape[-1] == images.shape[-2]
+    ), f"images must be square (H, W), got images.shape={images.shape}"
+    n_slices, im_size = images.shape[0], images.shape[-2]
+    return get_astra_geometry_3d(angles, im_size, n_slices)
+
+
+def get_astra_geometry_from_sinogram(angles, sinogram):
+    assert sinogram.ndim == 3, "sinogram must be 3D (n_angles, n_det_y, n_det_x)"
+    n_det_rows, n_angles, n_det_cols = sinogram.shape
+    assert (
+        n_angles == angles.shape[0]
+    ), f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sinogram.shape}"
+    return get_astra_geometry_3d(angles, n_det_cols, n_det_rows)
+
+
 class AstraParallelOp3D:
     """
     Torch ⇄ ASTRA 3D parallel-beam operator (GPU preferred).
@@ -409,17 +302,9 @@ class AstraParallelOp3D:
                 dtype=torch.float32,
             )
 
-        n = vol_t.shape[0]
-        if vol_t.shape[0] != self.nx:
-            filler = torch.zeros(self.nx - n, self.ny, self.nz, device=vol_t.device)
-            vol_t = torch.cat([vol_t, filler])
         vol_id = astra.data3d.link("-vol", self.vol_geom, vol_t.detach())
         sino_id = astra.data3d.link("-sino", self.proj_geom, out_sino_t.detach())
-
-        try:
-            cfg = astra.astra_dict("FP3D_CUDA")
-        except Exception:
-            cfg = astra.astra_dict("FP3D")
+        cfg = astra.astra_dict("FP3D_CUDA")
         cfg["VolumeDataId"] = vol_id
         cfg["ProjectionDataId"] = sino_id
         alg_id = astra.algorithm.create(cfg)
@@ -440,10 +325,7 @@ class AstraParallelOp3D:
 
         vol_id = astra.data3d.link("-vol", self.vol_geom, out_vol_t.detach())
         sino_id = astra.data3d.link("-sino", self.proj_geom, sino_t.detach())
-        try:
-            cfg = astra.astra_dict("BP3D_CUDA")
-        except Exception:
-            cfg = astra.astra_dict("BP3D")
+        cfg = astra.astra_dict("BP3D_CUDA")
         cfg["ReconstructionDataId"] = vol_id
         cfg["ProjectionDataId"] = sino_id
         alg_id = astra.algorithm.create(cfg)
@@ -481,13 +363,12 @@ def make_radon_layer(op: AstraParallelOp3D) -> Callable[[torch.Tensor], torch.Te
     return ParallelBeam3DFn.apply  # type: ignore
 
 
-def compute_sinogram_astra(
-    images: torch.Tensor, vol_geom_3d: dict[str, dict], proj_geom_3d: dict[str, Any]
-):
+def compute_sinogram(images: torch.Tensor, angles: torch.Tensor):
     batch_dims = images.size()[:-2]
     img_shape = images.size()[-2:]
     images = images.view(-1, *img_shape)
 
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(images, angles)
     op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
     parallel3d_layer = make_radon_layer(op3d)
 
@@ -634,7 +515,9 @@ def iradon_astra(
 
     # Preallocate output and link both
     vol = torch.zeros(
-        (B, output_size, output_size), dtype=torch.float32, device=radon_image.device
+        (B, output_size, output_size),
+        dtype=torch.float32,
+        device=astra_radon_image.device,  # type: ignore
     )
 
     sino_id = astra.data3d.link("-sino", proj_geom3d, sino_3d)
@@ -643,7 +526,6 @@ def iradon_astra(
     try:
         try:
             cfg = astra.astra_dict("BP3D_CUDA")
-            # print("ASTRA using GPU for FBP")
         except Exception:
             cfg = astra.astra_dict("BP3D")
         cfg["ReconstructionDataId"] = vol_id
@@ -831,3 +713,40 @@ def forward_and_fbp_2d(
         ).clip(0, 1)
         fbps.append(fbp)
     return torch.stack(fbps).to(img_t.device), torch.tensor(I_0s, device=img_t.device)
+
+
+def fbp(sinogram, angles):
+    """
+    Filtered back projection using astra's implementation.
+    Accepts batched sinograms of shape (batch, n_angles, n_detectors).
+    Returns reconstructed images of shape (batch, H, W).
+    """
+    batch_dims = sinogram.size()[:-2]
+    sinogram_size = sinogram.size()[-2:]
+    sinogram = sinogram.view(-1, *sinogram_size)
+
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_sinogram(angles, sinogram)
+
+    recon = iradon_astra(
+        sinogram.swapaxes(-1, -2),
+        vol_geom3d=vol_geom_3d,
+        proj_geom3d=proj_geom_3d,
+        output_size=sinogram_size[-1],
+        filter_name="ramp",
+        circle=True,
+    )
+
+    return recon.view(*batch_dims, sinogram_size[-1], sinogram_size[-1])
+
+
+if __name__ == "__main__":
+    side_lengths = [64, 128, 256]
+    n_angles = [1, 2, 64]
+    batch_dims = [(1,), (2, 3), (5, 6, 7)]
+
+    for i in range(3):
+        predictions = torch.rand(side_lengths[i], side_lengths[i])
+        counts = torch.rand(*batch_dims[i], n_angles[i], side_lengths[i])
+        I_tot = torch.rand(*batch_dims[i], n_angles[i], side_lengths[i])
+        angles = torch.linspace(0, 180, n_angles[i])
+        nlls = nll(predictions, counts, I_tot, angles)
