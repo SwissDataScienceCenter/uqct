@@ -83,7 +83,7 @@ def nll(
     counts: torch.Tensor,
     intensities: torch.Tensor,
     angles: torch.Tensor,
-    L: int = 5,
+    l: int = 5,
 ) -> torch.Tensor:
     """
     Arguments:
@@ -91,6 +91,7 @@ def nll(
         counts (torch.Tensor): (..., n_angles, n_detectors)
         intensities (torch.Tensor): (..., n_angles, 1)
         angles (torch.Tensor): (n_angles)
+        l: (int)
     Returns:
         torch.Tensor: (..., n_angles, side_length)
     """
@@ -113,32 +114,12 @@ def nll(
 
     intensities = intensities.clip(1e-9)
     radon = compute_sinogram(predictions.contiguous(), angles).clip(1e-9)
-    scale = L / predictions.shape[-1]
+    scale = l / predictions.shape[-1]
 
     log_lam = (torch.log(intensities) - scale * radon).double()
     lam = torch.exp(log_lam)
     nll = -(counts * log_lam - lam - torch.lgamma(counts + 1))
     return nll
-
-
-# def nll_ct(images, measurements, angles, exposure, l=5.0):
-#     """
-#     Computes the negative log-likelihood for Poisson distributed measurements.
-#     """
-#     sinogram = compute_sinogram(images, angles.flatten())
-#     scale = l / images.shape[-1]
-#
-#     # The log of the expected photon count (lambda) is log(exposure * exp(-scale * sinogram))
-#     # which expands to log(exposure) - scale * sinogram
-#     log_lambda = torch.log(exposure + 1e-9) - scale * sinogram
-#
-#     # The expected photon count (lambda)
-#     lambda_ = exposure * torch.exp(-scale * sinogram)
-#
-#     # The Poisson negative log-likelihood is -(k * log(lambda) - lambda)
-#     nll = -(measurements * log_lambda - lambda_)
-#
-#     return nll.sum(dim=(-1, -2, -3))  # Mean over all measurements
 
 
 def sinogram_ct(measurements, I_0, l=5.0):
@@ -150,6 +131,7 @@ def sinogram_ct(measurements, I_0, l=5.0):
     return sinogram
 
 
+# TODO: Phase out this function
 def fbp_ct(measurements, angles, exposure, l=5.0, weighted=False, clip=True):
     scale = l / measurements.shape[-1]  # Normalize by the image size
     sinogram = measurements / exposure
