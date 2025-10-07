@@ -31,13 +31,17 @@ KWARGS_LAMINO = {
     "rescale": 128,
     "im_size": 256,
     "val_range": (0.0, 234.59),
+    "train_transform": False,
     "rotation_angle": 30,
 }
+
+TEST_PATH_LUNG = DATA_DIR / "lung/ground_truth_test"
 
 KWARGS_LUNG = {
     "path": DATA_DIR / "lung/ground_truth_train",
     "rescale": 128,
     "val_range": (0.0, 1.0),
+    "train_transform": False,
     "rotation_angle": 30,
 }
 
@@ -46,6 +50,7 @@ KWARGS_COMPOSITE = {
     "rescale": 128,
     "im_size": 256,
     "val_range": (0.0, 10646.63),
+    "train_transform": False,
     "file_range": [20, 360],
     "clip_range": [3e4, 5e4],
     "rotation_angle": 30,
@@ -82,9 +87,15 @@ def get_dataset(
     dataset = dataset_class(**kwargs)
     torch.manual_seed(0)
     perm = torch.randperm(len(dataset))
-    train_set = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
-    test_set = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore
-    return train_set, test_set
+    if name == "lung":
+        train_set = dataset
+        kwargs_test = kwargs.copy()
+        kwargs_test["path"] = TEST_PATH_LUNG
+        test_set = dataset_class(**kwargs_test)
+    else:
+        train_set = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
+        test_set = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore
+    return train_set, test_set  # type: ignore
 
 
 if __name__ == "__main__":

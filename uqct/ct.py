@@ -4,22 +4,6 @@ import astra
 import numpy as np
 import torch
 
-from uqct.debugging import plot_img
-
-
-def linspace(start, end, steps, endpoint=True, device=None, dtype=None):
-    """
-    Torch linspace with endpoint option.
-    If endpoint=False, the last value is excluded.
-    """
-    if endpoint:
-        return torch.linspace(start, end, steps, device=device, dtype=dtype)
-    else:
-        if steps == 1:
-            return torch.tensor([start], device=device, dtype=dtype)
-        step_size = (end - start) / steps
-        return torch.arange(steps, device=device, dtype=dtype) * step_size + start
-
 
 class Tomogram(torch.nn.Module):
     def __init__(
@@ -78,13 +62,7 @@ def poisson(input):
     return torch.poisson(input)
 
 
-def forward_ct(
-    images: torch.Tensor,
-    angles: torch.Tensor,
-    exposure: torch.Tensor,
-    l: float = 5.0,
-    sinogram_fct: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
-):
+def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
     """
     forward model
     """
@@ -94,12 +72,13 @@ def forward_ct(
         if sinogram_fct
         else compute_sinogram(images, angles.flatten())
     )
+
     scale = l / images.shape[-1]  # Normalize by the image size
 
     return poisson(exposure * torch.exp(-scale * projections))
 
 
-def nll(
+def nll_dense(
     predictions: torch.Tensor,
     counts: torch.Tensor,
     I_tot: torch.Tensor,
@@ -108,17 +87,22 @@ def nll(
 ) -> torch.Tensor:
     """
     Arguments:
-        predictions (torch.Tensor): (..., side_length, side_length)
-        counts (torch.Tensor): (..., n_angles, side_length)
-        I_tot (torch.Tensor): (..., n_angles, side_length)
+        predictions (torch.Tensor): (n_time_steps, n_images, side_length, side_length)
+        counts (torch.Tensor): (n_time_steps, n_images, n_angles, side_length)
+        I_tot (torch.Tensor): (n_time_steps)
         angles (torch.Tensor): (n_angles)
     Returns:
-        torch.Tensor: (..., n_angles, side_length)
+        torch.Tensor: (n_time_steps, n_images)
     """
 
-    I_0 = I_tot / counts.shape[-2]
+    assert predictions.ndim == counts.ndim
+    assert predictions.shape[0] == counts.shape[0] == I_tot.shape[0]
+    assert counts.shape[2] == angles.shape[0]
+
+    I_0 = I_tot.view(-1, 1, 1, 1) / counts.shape[-2]  # uniform allocation
     radon = compute_sinogram(predictions, angles)
     scale = L / predictions.shape[-1]
+
     log_lambda = torch.log(I_0 + 1e-9) - scale * radon
 
     # The expected photon count (lambda)
@@ -126,7 +110,28 @@ def nll(
 
     # The Poisson negative log-likelihood is -(k * log(lambda) - lambda - Gamma(k + 1))
     nll = -(counts * log_lambda - lambda_ - torch.lgamma(counts + 1))
-    return nll
+
+    return nll.sum(dim=(-1, -2))
+
+
+def nll_ct(images, measurements, angles, exposure, l=5.0):
+    """
+    Computes the negative log-likelihood for Poisson distributed measurements.
+    """
+    sinogram = compute_sinogram(images, angles.flatten())
+    scale = l / images.shape[-1]
+
+    # The log of the expected photon count (lambda) is log(exposure * exp(-scale * sinogram))
+    # which expands to log(exposure) - scale * sinogram
+    log_lambda = torch.log(exposure + 1e-9) - scale * sinogram
+
+    # The expected photon count (lambda)
+    lambda_ = exposure * torch.exp(-scale * sinogram)
+
+    # The Poisson negative log-likelihood is -(k * log(lambda) - lambda)
+    nll = -(measurements * log_lambda - lambda_)
+
+    return nll.sum(dim=(-1, -2, -3))  # Mean over all measurements
 
 
 def sinogram_ct(measurements, I_0, l=5.0):
@@ -239,9 +244,10 @@ def get_astra_geometry_3d(
     angles: torch.Tensor, im_size: int, n_slices: int
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     # ASTRA 3D geometries
-    angles_rad = -torch.deg2rad(angles).detach().cpu().numpy()
+    angles_rad = torch.deg2rad(angles).detach().cpu().numpy()
     det_spacing_x = 1.0
     det_spacing_y = 1.0
+
     n_det_cols = int(im_size)
     n_det_rows = int(n_slices)
 
@@ -282,7 +288,7 @@ class AstraParallelOp3D:
     def __init__(self, proj_geom: dict[str, Any], vol_geom: dict[str, Any]):
         self.vol_geom = vol_geom
         self.proj_geom = proj_geom
-        self.nz, self.ny, self.nx = (
+        self.ny, self.nx, self.nz = (
             vol_geom["GridRowCount"],
             vol_geom["GridColCount"],
             vol_geom["GridSliceCount"],
@@ -353,7 +359,6 @@ def make_radon_layer(op: AstraParallelOp3D) -> Callable[[torch.Tensor], torch.Te
         @staticmethod
         def backward(ctx, grad_out: torch.Tensor) -> torch.Tensor:  # type: ignore
             op = ctx.op
-
             g_vol = torch.zeros(
                 (op.nz, op.ny, op.nx), device=grad_out.device, dtype=torch.float32
             )
@@ -368,7 +373,8 @@ def compute_sinogram(images: torch.Tensor, angles: torch.Tensor):
     img_shape = images.size()[-2:]
     images = images.view(-1, *img_shape)
 
-    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(images, angles)
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(angles, images)
+
     op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
     parallel3d_layer = make_radon_layer(op3d)
 
@@ -471,7 +477,7 @@ def _circular_mask(img_size: int, device=None, dtype=torch.float32) -> torch.Ten
 
 
 def iradon_astra(
-    radon_image: torch.Tensor,
+    astra_radon_image: torch.Tensor,
     vol_geom3d: dict[str, dict],
     proj_geom3d: dict[str, Any],
     output_size: int | None = None,
@@ -483,25 +489,25 @@ def iradon_astra(
     Input:  (M, N) or (B, M, N) torch float tensor
     Output: (H, W) or (B, H, W) torch float32 tensor.
     """
-    if not isinstance(radon_image, torch.Tensor):
+    if not isinstance(astra_radon_image, torch.Tensor):
         raise TypeError("radon_image must be a torch.Tensor")
-    if radon_image.ndim not in (2, 3):
+    if astra_radon_image.ndim not in (2, 3):
         raise ValueError("radon_image must be 2-D (M,N) or 3-D (B,M,N)")
-    single = radon_image.ndim == 2
+    single = astra_radon_image.ndim == 2
     if single:
-        radon_image = radon_image.unsqueeze(0)  # (1, M, N)
+        astra_radon_image = astra_radon_image.unsqueeze(0)  # (1, M, N)
 
     # dtype and device handling
-    radon_image = radon_image.detach()
-    if radon_image.dtype not in (torch.float32, torch.float64):
-        radon_image = radon_image.float()
+    astra_radon_image = astra_radon_image.detach()
+    if astra_radon_image.dtype not in (torch.float32, torch.float64):
+        astra_radon_image = astra_radon_image.float()
     # ASTRA expects CPU-linked arrays
-    radon_image = radon_image.contiguous()  # .cpu()
+    astra_radon_image = astra_radon_image.contiguous()  # .cpu()
 
-    B, M, N = radon_image.shape
+    B, M, N = astra_radon_image.shape
 
     # Filter in frequency domain
-    sino_filt = _apply_filter_batch(radon_image, filter_name)  # (B, M, N)
+    sino_filt = _apply_filter_batch(astra_radon_image, filter_name)  # (B, M, N)
 
     # Output size
     if output_size is None:
@@ -517,7 +523,7 @@ def iradon_astra(
     vol = torch.zeros(
         (B, output_size, output_size),
         dtype=torch.float32,
-        device=astra_radon_image.device,  # type: ignore
+        device=astra_radon_image.device,
     )
 
     sino_id = astra.data3d.link("-sino", proj_geom3d, sino_3d)
@@ -737,16 +743,3 @@ def fbp(sinogram, angles):
     )
 
     return recon.view(*batch_dims, sinogram_size[-1], sinogram_size[-1])
-
-
-if __name__ == "__main__":
-    side_lengths = [64, 128, 256]
-    n_angles = [1, 2, 64]
-    batch_dims = [(1,), (2, 3), (5, 6, 7)]
-
-    for i in range(3):
-        predictions = torch.rand(side_lengths[i], side_lengths[i])
-        counts = torch.rand(*batch_dims[i], n_angles[i], side_lengths[i])
-        I_tot = torch.rand(*batch_dims[i], n_angles[i], side_lengths[i])
-        angles = torch.linspace(0, 180, n_angles[i])
-        nlls = nll(predictions, counts, I_tot, angles)

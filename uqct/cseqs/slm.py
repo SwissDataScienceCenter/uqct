@@ -1,6 +1,7 @@
+import csv
 import json
+import math
 from datetime import datetime
-from os import cpu_count
 from pathlib import Path
 from typing import Any, Literal
 
@@ -8,13 +9,14 @@ import astra
 import click
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
-from tqdm.auto import tqdm
+import torch.nn.functional as F
 
 from uqct.ct import (AstraParallelOp3D, fbp_single_from_forward,
-                     get_astra_geometry_2d, get_astra_geometry_3d,
-                     iradon_astra, linspace, poisson, sinogram_ct)
+                     forward_and_fbp_2d, get_astra_geometry_2d,
+                     get_astra_geometry_3d, iradon_astra, poisson, sinogram_ct)
 from uqct.datasets.utils import get_dataset
+from uqct.debugging import plot_img
+from uqct.metrics import get_metrics
 
 N_ROUNDS = 200
 N_ANGLES = 200
@@ -36,6 +38,46 @@ def set_seeds(seed: int) -> None:
         torch.cuda.manual_seed(seed)
 
 
+def linspace(start, end, steps, endpoint=False, device=None, dtype=None):
+    """
+    Torch linspace with endpoint option.
+    If endpoint=False, the last value is excluded.
+    """
+    if endpoint:
+        return torch.linspace(start, end, steps, device=device, dtype=dtype)
+    else:
+        if steps == 1:
+            return torch.tensor([start], device=device, dtype=dtype)
+        step_size = (end - start) / steps
+        return torch.arange(steps, device=device, dtype=dtype) * step_size + start
+
+
+def save_metrics(
+    cseq_dir: Path, t_start: int, t_end: int, image: torch.Tensor, preds: torch.Tensor
+) -> None:
+    with open(cseq_dir / "pred_metrics.csv", "w", newline="") as csvfile:
+        fieldnames = ["t"]
+        if preds.ndim == 4:
+            fieldnames += ["rep"]
+        fieldnames += ["psnr", "l1", "zeroone", "ss", "rmse"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for t in range(t_start, t_end + 1):
+            row = {"t": t}
+            if preds.ndim == 4:
+                for i in range(preds.shape[1]):
+                    row["rep"] = i
+                    for metric_name, val in get_metrics(
+                        image, preds[t - t_start, i]
+                    ).items():
+                        row[metric_name.lower()] = float(val)  # type: ignore
+                    writer.writerow(row)
+            else:
+                for metric_name, val in get_metrics(image, preds[t - t_start]).items():
+                    row[metric_name.lower()] = float(val)  # type: ignore
+                writer.writerow(row)
+
+
 class DenseCTScan:
     def __init__(
         self,
@@ -48,7 +90,7 @@ class DenseCTScan:
         self.exposure = exposure
         self.T = T
         self.device = device
-        self.angles = linspace(0, ANGULAR_RANGE, N_ANGLES).to(device)
+        self.angles = linspace(0, ANGULAR_RANGE, N_ANGLES, endpoint=False).to(device)
         self.proj_geom_lr, self.vol_geom_lr = get_astra_geometry_3d(self.angles, 128, 1)
         proj_geom_hr, vol_geom_hr = get_astra_geometry_3d(self.angles, 256, T)
         self.op = AstraParallelOp3D(proj_geom_hr, vol_geom_hr)
@@ -67,22 +109,20 @@ class DenseCTScan:
         self.sinogram = None
         self.fbp = None
 
-    def get_counts(self, t: int) -> torch.Tensor:
+    def get_counts(self, t_start: int, t: int) -> torch.Tensor:
         """
         Returns a (T, N_ANGLES, 128) tensor of Poisson counts.
         """
-        return self.counts[:t]
+        return self.counts[t_start - 1 : t]
 
     def get_sinogram(self, t_start: int, t: int) -> torch.Tensor:
         return sinogram_ct(
-            self.counts[t_start - 1 : t].sum(0, keepdim=True),
+            self.get_counts(t_start, t).sum(0, keepdim=True),
             self.I_0 * (t - t_start + 1),
             L,
         ).clip(0)
 
     def get_fbp(self, t: int) -> torch.Tensor:
-        if t <= 0:
-            raise ValueError(f"Expected t >= 1, got t = {t}")
         sinogram = self.get_sinogram(1, t)
         return iradon_astra(
             sinogram.transpose(1, 2), self.vol_geom_lr, self.proj_geom_lr
@@ -90,9 +130,11 @@ class DenseCTScan:
 
     def get_fbps(self, t_start: int) -> torch.Tensor:
         fbps = list()
-        for t in range(t_start - 1, N_ROUNDS - 1):
+        for t in range(t_start, N_ROUNDS):
             fbps.append(self.get_fbp(t))
         return torch.stack(fbps)
+
+    def get_nlls(self, t_start: int, preds: torch.Tensor) -> torch.Tensor: ...
 
 
 class SparseCTScan:
@@ -107,7 +149,7 @@ class SparseCTScan:
         self.exposure = exposure
         self.t_end = t_end
         self.device = device
-        self.angles = linspace(0, ANGULAR_RANGE, N_ANGLES)
+        self.angles = linspace(0, ANGULAR_RANGE, N_ANGLES, False)
 
         r = image.shape[-1]
         self.angles_np = self.angles.detach().cpu().numpy()
@@ -144,12 +186,13 @@ class SparseCTScan:
         self.sinogram = None
         self.fbp = None
 
-    def get_counts(self, t: int) -> torch.Tensor:
-        return self.counts[:t]
+    def get_counts(self, t_start: int, t: int) -> torch.Tensor:
+        return self.counts[t_start - 1 : t]
 
     def get_sinogram(self, t_start: int, t: int) -> torch.Tensor:
-        if isinstance(self.sinogram, torch.Tensor):
-            return self.sinogram[t_start - 1 : t]
+        sino = self.sinogram
+        if isinstance(sino, torch.Tensor):
+            return sino[t_start - 1 : t]
         I_0_lr = self.I_0 * 2
 
         # (n_angles, 128)
@@ -170,42 +213,31 @@ class SparseCTScan:
         ).clip(0, 1)
         return self.fbp
 
-    def get_fbps(self, t_start) -> torch.Tensor:
+    def get_fbps(self, t_start: int) -> torch.Tensor:
         fbps = list()
         for t in range(t_start, N_ANGLES + 1):
             fbps.append(self.get_fbp(t))
         return torch.stack(fbps)
 
-
-def get_avg_image(train_set: Subset[torch.Tensor]) -> torch.Tensor:
-    out = torch.zeros_like(train_set[0])
-    num_workers = cpu_count()
-    breakpoint()
-    data_loader = DataLoader(
-        train_set,
-        batch_size=16,
-        prefetch_factor=2,
-        num_workers=min(8, num_workers if num_workers else 1),
-    )
-    for batch in tqdm(data_loader, desc="avg image"):
-        out += batch.sum(0)
-    return out / len(train_set)
+    def get_nlls(self, t_start: int, preds: torch.Tensor) -> torch.Tensor:
+        sino = self.get_sinogram(t_start, N_ANGLES)  # (n_rounds, 128)
+        I_0_lr = self.I_0 * 2
+        scale = L / preds.shape[-1]
+        log_lam = (math.log(I_0_lr) - scale * sino).double()
+        lam = torch.exp(log_lam)
+        counts = self.get_counts(t_start, N_ANGLES).double()
+        nll = -(counts * log_lam - lam - torch.lgamma(1 + counts))
+        return nll.sum(-1).cumsum(0).float()
 
 
 def get_predictions(
     scan: SparseCTScan | DenseCTScan,
-    avg_img: torch.Tensor,
     t_start: int,
     predictor_name: Literal["fbp", "mle", "map", "unet", "diffusion"],
 ) -> torch.Tensor:
-    assert t_start >= 1
     if predictor_name == "fbp":
-        if t_start >= 2:
-            out = scan.get_fbps(t_start)
-        else:
-            fbps = scan.get_fbps(2)
-            out = torch.cat([avg_img, fbps])
-        return out
+        # TODO: Implement mu_0 prediction
+        return scan.get_fbps(t_start)
     else:
         raise NotImplementedError(
             f"Getting predictions for predictor '{predictor_name}' is not implemented yet."
@@ -226,31 +258,30 @@ def run_cseq(kwargs: dict[str, Any]) -> None:
     print(f"Saved arguments to '{cseq_dir}'")
 
     # Retrieve image
-    train_set, test_set = get_dataset(kwargs["dataset"], True)
-
-    # Retrieve average image if necessary
-    avg_img = torch.zeros_like(train_set[0])
-    if kwargs["t_start"] == 1:
-        print("Computing average image...")
-        avg_img = get_avg_image(train_set)
-
-    image = test_set[kwargs["test_set_idx"]]
+    _, test_set = get_dataset(kwargs["dataset"], True)
+    gt = test_set[kwargs["test_set_idx"]]
 
     # Simulate measurements
     set_seeds(kwargs["seed"])
     if kwargs["sparse"]:
-        scan = SparseCTScan(image, kwargs["exposure"], kwargs["t_end"], device)
+        scan = SparseCTScan(gt, kwargs["exposure"], kwargs["t_end"], device)
     else:
-        scan = DenseCTScan(image, kwargs["exposure"], kwargs["t_end"], device)
+        scan = DenseCTScan(gt, kwargs["exposure"], kwargs["t_end"], device)
 
     # Obtain predictions
-    print("Obtaining predictions...")
-    preds = get_predictions(scan, avg_img, kwargs["t_start"], kwargs["predictor"])
-    breakpoint()
+    preds = get_predictions(scan, kwargs["t_start"], kwargs["predictor"])
 
     # Save predictions with metrics
+    torch.save(preds, cseq_dir / "preds.pt")
+    gl_lr = F.interpolate(gt.unsqueeze(0), size=preds.shape[-2:], mode="area").squeeze(
+        0
+    )
+    save_metrics(cseq_dir, kwargs["t_start"], kwargs["t_end"], gl_lr, preds)
 
     # Compute confidence sequence
+    nlls_preds = scan.get_nlls(kwargs["t_start"], preds)
+    nlls_gt = scan.get_nlls(kwargs["t_start"], preds)
+    breakpoint()
 
     # Save confidence coefficients, NLL of true image
 
@@ -259,12 +290,12 @@ def run_cseq(kwargs: dict[str, Any]) -> None:
 @click.option(
     "--sparse",
     default=False,
-    is_flag=True,
+    type=bool,
     help="sequence of linearly increasing angles or number number of (dense) scanning rounds",
 )
 @click.option(
     "--predictor",
-    default="mle",
+    default="fbp",
     type=click.Choice(["fbp", "mle", "map", "unet", "diffusion"]),
     help="which predictor to use",
 )

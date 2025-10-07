@@ -34,6 +34,7 @@ class H5Wrapper:
                 ]:
                     if dataset_name in hr_data:
                         break
+
                 idx_to_file_list.append(
                     i * torch.ones(len(hr_data.get(dataset_name))).int()  # type: ignore
                 )
@@ -80,14 +81,21 @@ class TomogramDataset(BaseImageDataset):
         clip_range=None,
         val_range=None,
         rotation_angle=None,
+        contrast=None,
+        train_transform=False,
+        crop=None,
     ):
         self.hr_tomogram = H5Wrapper(path)
 
         super().__init__(
+            path,
             rescale=rescale,
             clip_range=clip_range,
             val_range=val_range,
             rotation_angle=rotation_angle,
+            contrast=contrast,
+            train_transform=train_transform,
+            crop=crop,
         )
 
     def __getitem__(self, idx):  # type: ignore
