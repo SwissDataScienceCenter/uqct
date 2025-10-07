@@ -78,60 +78,67 @@ def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
     return poisson(exposure * torch.exp(-scale * projections))
 
 
-def nll_dense(
+def nll(
     predictions: torch.Tensor,
     counts: torch.Tensor,
-    I_tot: torch.Tensor,
+    intensities: torch.Tensor,
     angles: torch.Tensor,
     L: int = 5,
 ) -> torch.Tensor:
     """
     Arguments:
-        predictions (torch.Tensor): (n_time_steps, n_images, side_length, side_length)
-        counts (torch.Tensor): (n_time_steps, n_images, n_angles, side_length)
-        I_tot (torch.Tensor): (n_time_steps)
+        predictions (torch.Tensor): (..., width, height)
+        counts (torch.Tensor): (..., n_angles, n_detectors)
+        intensities (torch.Tensor): (..., n_angles, 1)
         angles (torch.Tensor): (n_angles)
     Returns:
-        torch.Tensor: (n_time_steps, n_images)
+        torch.Tensor: (..., n_angles, side_length)
     """
+    assert (
+        predictions.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1
+    ), f"angles ({angles.shape}) must be 1D and predictions ({predictions.shape}) and counts ({counts.shape}) must be at least two dimensional."
 
-    assert predictions.ndim == counts.ndim
-    assert predictions.shape[0] == counts.shape[0] == I_tot.shape[0]
-    assert counts.shape[2] == angles.shape[0]
+    if intensities.ndim == 1:
+        intensities = intensities.unsqueeze(-1)
+    max_ndim = max(predictions.ndim, counts.ndim, intensities.ndim)
 
-    I_0 = I_tot.view(-1, 1, 1, 1) / counts.shape[-2]  # uniform allocation
-    radon = compute_sinogram(predictions, angles)
+    def inflate(x):
+        while x.ndim < max_ndim:
+            x = x.unsqueeze(0)
+        return x
+
+    predictions = inflate(predictions)
+    intensities = inflate(intensities)
+    counts = inflate(counts)
+
+    intensities = intensities.clip(1e-9)
+    radon = compute_sinogram(predictions.contiguous(), angles).clip(1e-9)
     scale = L / predictions.shape[-1]
 
-    log_lambda = torch.log(I_0 + 1e-9) - scale * radon
-
-    # The expected photon count (lambda)
-    lambda_ = I_0 * torch.exp(-scale * radon)
-
-    # The Poisson negative log-likelihood is -(k * log(lambda) - lambda - Gamma(k + 1))
-    nll = -(counts * log_lambda - lambda_ - torch.lgamma(counts + 1))
-
-    return nll.sum(dim=(-1, -2))
+    log_lam = (torch.log(intensities) - scale * radon).double()
+    lam = torch.exp(log_lam)
+    nll = -(counts * log_lam - lam - torch.lgamma(counts + 1))
+    return nll
 
 
-def nll_ct(images, measurements, angles, exposure, l=5.0):
-    """
-    Computes the negative log-likelihood for Poisson distributed measurements.
-    """
-    sinogram = compute_sinogram(images, angles.flatten())
-    scale = l / images.shape[-1]
-
-    # The log of the expected photon count (lambda) is log(exposure * exp(-scale * sinogram))
-    # which expands to log(exposure) - scale * sinogram
-    log_lambda = torch.log(exposure + 1e-9) - scale * sinogram
-
-    # The expected photon count (lambda)
-    lambda_ = exposure * torch.exp(-scale * sinogram)
-
-    # The Poisson negative log-likelihood is -(k * log(lambda) - lambda)
-    nll = -(measurements * log_lambda - lambda_)
-
-    return nll.sum(dim=(-1, -2, -3))  # Mean over all measurements
+# def nll_ct(images, measurements, angles, exposure, l=5.0):
+#     """
+#     Computes the negative log-likelihood for Poisson distributed measurements.
+#     """
+#     sinogram = compute_sinogram(images, angles.flatten())
+#     scale = l / images.shape[-1]
+#
+#     # The log of the expected photon count (lambda) is log(exposure * exp(-scale * sinogram))
+#     # which expands to log(exposure) - scale * sinogram
+#     log_lambda = torch.log(exposure + 1e-9) - scale * sinogram
+#
+#     # The expected photon count (lambda)
+#     lambda_ = exposure * torch.exp(-scale * sinogram)
+#
+#     # The Poisson negative log-likelihood is -(k * log(lambda) - lambda)
+#     nll = -(measurements * log_lambda - lambda_)
+#
+#     return nll.sum(dim=(-1, -2, -3))  # Mean over all measurements
 
 
 def sinogram_ct(measurements, I_0, l=5.0):
@@ -378,7 +385,7 @@ def compute_sinogram(images: torch.Tensor, angles: torch.Tensor):
     op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
     parallel3d_layer = make_radon_layer(op3d)
 
-    sinogram = parallel3d_layer(images.squeeze())
+    sinogram = parallel3d_layer(images)
 
     return sinogram.view(*batch_dims, sinogram.shape[1], img_shape[0])
 
