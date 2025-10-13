@@ -1,4 +1,5 @@
-from typing import Any, Callable
+import math
+from typing import Any, Callable, Literal
 
 import astra
 import numpy as np
@@ -70,7 +71,7 @@ def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
     projections = (
         sinogram_fct(images, angles.flatten())
         if sinogram_fct
-        else compute_sinogram(images, angles.flatten())
+        else radon(images, angles.flatten())
     )
 
     scale = l / images.shape[-1]  # Normalize by the image size
@@ -79,7 +80,7 @@ def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
 
 
 def nll(
-    predictions: torch.Tensor,
+    images: torch.Tensor,
     counts: torch.Tensor,
     intensities: torch.Tensor,
     angles: torch.Tensor,
@@ -96,30 +97,192 @@ def nll(
         torch.Tensor: (..., n_angles, side_length)
     """
     assert (
-        predictions.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1
-    ), f"angles ({angles.shape}) must be 1D and predictions ({predictions.shape}) and counts ({counts.shape}) must be at least two dimensional."
+        images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1
+    ), f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
 
     if intensities.ndim == 1:
         intensities = intensities.unsqueeze(-1)
-    max_ndim = max(predictions.ndim, counts.ndim, intensities.ndim)
+    max_ndim = max(images.ndim, counts.ndim, intensities.ndim)
 
     def inflate(x):
         while x.ndim < max_ndim:
             x = x.unsqueeze(0)
         return x
 
-    predictions = inflate(predictions)
+    images = inflate(images)
     intensities = inflate(intensities)
     counts = inflate(counts)
 
     intensities = intensities.clip(1e-9)
-    radon = compute_sinogram(predictions.contiguous(), angles).clip(1e-9)
-    scale = l / predictions.shape[-1]
+    sino = radon(images.contiguous(), angles).clip(1e-9)
+    scale = l / images.shape[-1]
 
-    log_lam = (torch.log(intensities) - scale * radon).double()
+    log_lam = (torch.log(intensities) - scale * sino).double()
     lam = torch.exp(log_lam)
     nll = -(counts * log_lam - lam - torch.lgamma(counts + 1))
     return nll
+
+
+def nll_mixture(
+    images: torch.Tensor,
+    counts: torch.Tensor,
+    intensities: torch.Tensor,
+    angles: torch.Tensor,
+    l: int = 5,
+) -> torch.Tensor:
+    """
+    Arguments:
+        images (torch.Tensor): (..., n_preds, H, W)
+        counts (torch.Tensor): (..., n_angles, n_detectors)
+        intensities (torch.Tensor): (..., n_angles, 1)
+        angles (torch.Tensor): (n_angles,)
+        l: (int)
+    Returns:
+        torch.Tensor: (...)
+    """
+    n_pred = images.shape[-3]
+    # (..., n_pred, n_angles, side_length)
+    nlls = nll(images, counts.unsqueeze(-3), intensities, angles, l)
+    nlls -= math.log(n_pred)
+    nlls = nlls.sum((-1, -2))  # (..., n_pred)
+    mix = torch.logsumexp(nlls, dim=-1)  # (...)
+    return mix
+
+
+def radon(images: torch.Tensor, angles: torch.Tensor):
+    """Computes sinogram.
+
+    Arguments:
+        images (torch.Tensor): (..., H, W)
+        angles (torch.Tensor): (n_angles,)
+    Returns:
+        sinogram (torch.Tensor): (..., n_angles, n_detectors)
+    """
+    batch_dims = images.size()[:-2]
+    img_shape = images.size()[-2:]
+    images = images.view(-1, *img_shape)
+
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(angles, images)
+
+    op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
+    parallel3d_layer = make_radon_layer(op3d)
+
+    sinogram = parallel3d_layer(images)
+
+    return sinogram.view(*batch_dims, sinogram.shape[1], img_shape[0])
+
+
+FilterType = Literal["ramp", "shepp-logan", "cosine", "hamming", "hann"] | None
+
+
+def fbp(
+    sinogram: torch.Tensor,
+    angles: torch.Tensor,
+    filter_name: FilterType = "ramp",
+    circle: bool = True,
+) -> torch.Tensor:
+    """Computes FBP from sinogram.
+
+    Arguments:
+        sinogram (torch.Tensor): (..., n_angles, n_detectors)
+        angles (torch.Tensor): (n_angles,)
+        filter_name (str | None): One of "ramp", "shepp-logan", "cosine", "hamming", "hann" or None
+        circle (bool): map values outside inscribed circle to zero
+    Returns:
+        fbp (torch.Tensor): (..., H, W)
+    """
+    if sinogram.ndim < 2:
+        raise ValueError("sinogram must be at least 2D")
+
+    batch_dims = sinogram.size()[:-2]
+    sinogram_size = sinogram.size()[-2:]
+    sinogram = sinogram.view(-1, *sinogram_size)
+
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_sinogram(angles, sinogram)
+
+    sinogram.swapaxes_(-2, -1)
+
+    single = sinogram.ndim == 2
+    if single:
+        astra_radon_image = sinogram.unsqueeze(0)  # (1, M, N)
+
+    # dtype and device handling
+    astra_radon_image = sinogram.detach()
+    if astra_radon_image.dtype not in (torch.float32, torch.float64):
+        astra_radon_image = astra_radon_image.float()
+    # ASTRA expects CPU-linked arrays
+    astra_radon_image = astra_radon_image.contiguous()  # .cpu()
+
+    B, _, N = astra_radon_image.shape
+
+    # Filter in frequency domain
+    sino_filt = _apply_filter_batch(astra_radon_image, filter_name)  # (B, M, N)
+
+    # Reorder for ASTRA: (n_det_rows, n_angles, n_det_cols)
+    sino_3d = sino_filt.permute(
+        0, 2, 1
+    ).contiguous()  # torch tensor (B, N, M) CPU float
+
+    # Preallocate output and link both
+    vol = torch.zeros(
+        (B, sinogram_size[-1], sinogram_size[-1]),
+        dtype=torch.float32,
+        device=astra_radon_image.device,
+    )
+
+    sino_id = astra.data3d.link("-sino", proj_geom_3d, sino_3d)
+    vol_id = astra.data3d.link("-vol", vol_geom_3d, vol)
+
+    try:
+        try:
+            cfg = astra.astra_dict("BP3D_CUDA")
+        except Exception:
+            cfg = astra.astra_dict("BP3D")
+        cfg["ReconstructionDataId"] = vol_id
+        cfg["ProjectionDataId"] = sino_id
+        alg_id = astra.algorithm.create(cfg)
+        astra.algorithm.run(alg_id, 1)
+        astra.algorithm.delete(alg_id)
+    finally:
+        astra.data3d.delete([sino_id, vol_id])
+
+    # Scale to match skimage.iradon
+    scale = np.pi / (2.0 * float(N))
+    vol.mul_(float(scale))
+
+    if circle:
+        mask = _circular_mask(
+            sinogram_size[-1], device=vol.device, dtype=vol.dtype
+        )  # (H,W)
+        vol *= mask.unsqueeze(0)
+
+    out = vol[0] if single else vol
+
+    return out.view(*batch_dims, sinogram_size[-1], sinogram_size[-1])
+
+
+def sample_observations(
+    images: torch.Tensor,
+    intensities: torch.Tensor,
+    angles: torch.Tensor,
+    l: float = 5.0,
+) -> torch.Tensor:
+    """Samples Poisson counts based on high-res images
+
+    Important: Images should be high-res images to avoid inverse crime.
+
+    Arguments:
+        images (torch.Tensor): (..., H, W)
+        intensities (torch.Tensor): (..., n_angles, 1)
+        angles (torch.Tensor): (n_angles,)
+    Returns:
+        counts (torch.Tensor): (..., n_angles, n_detectors)
+    """
+    scale = l / images.shape[-1]
+    sino = radon(images, angles)
+    counts = poisson(intensities * torch.exp(-scale * sino))
+    counts_lr = counts.view(*counts.shape[:-1], counts.shape[-1] // 2, 2).sum(-1)
+    return counts_lr
 
 
 def sinogram_ct(measurements, I_0, l=5.0):
@@ -131,11 +294,9 @@ def sinogram_ct(measurements, I_0, l=5.0):
     return sinogram
 
 
-# TODO: Phase out this function
+# TODO: Phase out this function?
 def fbp_ct(measurements, angles, exposure, l=5.0, weighted=False, clip=True):
-    scale = l / measurements.shape[-1]  # Normalize by the image size
-    sinogram = measurements / exposure
-    sinogram = torch.log(sinogram + 1e-6) / -scale
+    sinogram = sinogram_ct(measurements, exposure, l)
 
     if weighted:
         weights = exposure / exposure.sum(
@@ -209,7 +370,7 @@ def mse_ct(images, measurements, angles, exposure, vst=None, l=5.0):
     measurements: observed measurements
     exposure: exposure time or dose
     """
-    projections = compute_sinogram(images, angles.flatten())
+    projections = radon(images, angles.flatten())
     scale = l / images.shape[-1]  # Normalize by the image size
 
     # scale_projection = scale * projections
@@ -249,7 +410,9 @@ def get_astra_geometry_3d(
     return proj_geom3d, vol_geom3d
 
 
-def get_astra_geometry_from_images(angles, images):
+def get_astra_geometry_from_images(
+    angles: torch.Tensor, images: torch.Tensor
+) -> tuple[dict[str, Any], dict[str, dict]]:
     assert images.ndim == 3, "images must be 3D (n_slices, H, W)"
     assert (
         images.shape[-1] == images.shape[-2]
@@ -258,7 +421,9 @@ def get_astra_geometry_from_images(angles, images):
     return get_astra_geometry_3d(angles, im_size, n_slices)
 
 
-def get_astra_geometry_from_sinogram(angles, sinogram):
+def get_astra_geometry_from_sinogram(
+    angles: torch.Tensor, sinogram: torch.Tensor
+) -> tuple[dict[str, Any], dict[str, dict]]:
     assert sinogram.ndim == 3, "sinogram must be 3D (n_angles, n_det_y, n_det_x)"
     n_det_rows, n_angles, n_det_cols = sinogram.shape
     assert (
@@ -357,23 +522,11 @@ def make_radon_layer(op: AstraParallelOp3D) -> Callable[[torch.Tensor], torch.Te
     return ParallelBeam3DFn.apply  # type: ignore
 
 
-def compute_sinogram(images: torch.Tensor, angles: torch.Tensor):
-    batch_dims = images.size()[:-2]
-    img_shape = images.size()[-2:]
-    images = images.view(-1, *img_shape)
-
-    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(angles, images)
-
-    op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
-    parallel3d_layer = make_radon_layer(op3d)
-
-    sinogram = parallel3d_layer(images)
-
-    return sinogram.view(*batch_dims, sinogram.shape[1], img_shape[0])
-
-
 def _fourier_filter_1d(
-    size: int, filter_name: str, device=None, dtype=torch.float32
+    size: int,
+    filter_name: FilterType,
+    device: torch.device | None = None,
+    dtype=torch.float32,
 ) -> torch.Tensor:
     if filter_name not in ("ramp", "shepp-logan", "cosine", "hamming", "hann", None):
         raise ValueError(f"Unknown filter: {filter_name}")
@@ -421,7 +574,10 @@ def _fourier_filter_1d(
     return fourier_filter.to(dtype).reshape(size, 1)
 
 
-def _apply_filter_batch(sino: torch.Tensor, filter_name: str) -> torch.Tensor:
+def _apply_filter_batch(
+    sino: torch.Tensor,
+    filter_name: FilterType,
+) -> torch.Tensor:
     """
     sino: (B, M, N) float32 or (M, N) float32 torch tensor.
     Returns same shape as input, torch tensor.
@@ -465,81 +621,86 @@ def _circular_mask(img_size: int, device=None, dtype=torch.float32) -> torch.Ten
     return mask
 
 
-def iradon_astra(
-    astra_radon_image: torch.Tensor,
-    vol_geom3d: dict[str, dict],
-    proj_geom3d: dict[str, Any],
-    output_size: int | None = None,
-    filter_name: str = "ramp",
-    circle: bool = True,
-) -> torch.Tensor:
-    """
-    Torch-only I/O fast FBP using ASTRA's 3D backprojection to handle a batch of 2D sinograms.
-    Input:  (M, N) or (B, M, N) torch float tensor
-    Output: (H, W) or (B, H, W) torch float32 tensor.
-    """
-    if not isinstance(astra_radon_image, torch.Tensor):
-        raise TypeError("radon_image must be a torch.Tensor")
-    if astra_radon_image.ndim not in (2, 3):
-        raise ValueError("radon_image must be 2-D (M,N) or 3-D (B,M,N)")
-    single = astra_radon_image.ndim == 2
-    if single:
-        astra_radon_image = astra_radon_image.unsqueeze(0)  # (1, M, N)
+# def iradon(
+#     astra_radon_image: torch.Tensor,
+#     vol_geom3d: dict[str, dict],
+#     proj_geom3d: dict[str, Any],
+#     output_size: int | None = None,
+#     filter_name: str = "ramp",
+#     circle: bool = True,
+# ) -> torch.Tensor:
+#     """
+#     Torch-only I/O fast FBP using ASTRA's 3D backprojection to handle a batch of 2D sinograms.
+#     Input:  (M, N) or (B, M, N) torch float tensor
+#     Output: (H, W) or (B, H, W) torch float32 tensor.
+#     """
+#     if not isinstance(astra_radon_image, torch.Tensor):
+#         raise TypeError("radon_image must be a torch.Tensor")
+#     if astra_radon_image.ndim not in (2, 3):
+#         raise ValueError("radon_image must be 2-D (M,N) or 3-D (B,M,N)")
+#     single = astra_radon_image.ndim == 2
+#     if single:
+#         astra_radon_image = astra_radon_image.unsqueeze(0)  # (1, M, N)
+#
+#     # dtype and device handling
+#     astra_radon_image = astra_radon_image.detach()
+#     if astra_radon_image.dtype not in (torch.float32, torch.float64):
+#         astra_radon_image = astra_radon_image.float()
+#     # ASTRA expects CPU-linked arrays
+#     astra_radon_image = astra_radon_image.contiguous()  # .cpu()
+#
+#     B, M, N = astra_radon_image.shape
+#
+#     # Filter in frequency domain
+#     sino_filt = _apply_filter_batch(astra_radon_image, filter_name)  # (B, M, N)
+#
+#     # Output size
+#     if output_size is None:
+#         output_size = int(M)
+#     output_size = int(output_size)
+#
+#     # Reorder for ASTRA: (n_det_rows, n_angles, n_det_cols)
+#     sino_3d = sino_filt.permute(
+#         0, 2, 1
+#     ).contiguous()  # torch tensor (B, N, M) CPU float
+#
+#     # Preallocate output and link both
+#     vol = torch.zeros(
+#         (B, output_size, output_size),
+#         dtype=torch.float32,
+#         device=astra_radon_image.device,
+#     )
+#
+#     sino_id = astra.data3d.link("-sino", proj_geom3d, sino_3d)
+#     vol_id = astra.data3d.link("-vol", vol_geom3d, vol)
+#
+#     try:
+#         try:
+#             cfg = astra.astra_dict("BP3D_CUDA")
+#         except Exception:
+#             cfg = astra.astra_dict("BP3D")
+#         cfg["ReconstructionDataId"] = vol_id
+#         cfg["ProjectionDataId"] = sino_id
+#         alg_id = astra.algorithm.create(cfg)
+#         astra.algorithm.run(alg_id, 1)
+#         astra.algorithm.delete(alg_id)
+#     finally:
+#         astra.data3d.delete([sino_id, vol_id])
+#
+#     # Scale to match skimage.iradon
+#     scale = np.pi / (2.0 * float(N))
+#     vol.mul_(float(scale))
+#
+#     if circle:
+#         mask = _circular_mask(output_size, device=vol.device, dtype=vol.dtype)  # (H,W)
+#         vol *= mask.unsqueeze(0)
+#
+#     return vol[0] if single else vol
 
-    # dtype and device handling
-    astra_radon_image = astra_radon_image.detach()
-    if astra_radon_image.dtype not in (torch.float32, torch.float64):
-        astra_radon_image = astra_radon_image.float()
-    # ASTRA expects CPU-linked arrays
-    astra_radon_image = astra_radon_image.contiguous()  # .cpu()
 
-    B, M, N = astra_radon_image.shape
-
-    # Filter in frequency domain
-    sino_filt = _apply_filter_batch(astra_radon_image, filter_name)  # (B, M, N)
-
-    # Output size
-    if output_size is None:
-        output_size = int(M)
-    output_size = int(output_size)
-
-    # Reorder for ASTRA: (n_det_rows, n_angles, n_det_cols)
-    sino_3d = sino_filt.permute(
-        0, 2, 1
-    ).contiguous()  # torch tensor (B, N, M) CPU float
-
-    # Preallocate output and link both
-    vol = torch.zeros(
-        (B, output_size, output_size),
-        dtype=torch.float32,
-        device=astra_radon_image.device,
-    )
-
-    sino_id = astra.data3d.link("-sino", proj_geom3d, sino_3d)
-    vol_id = astra.data3d.link("-vol", vol_geom3d, vol)
-
-    try:
-        try:
-            cfg = astra.astra_dict("BP3D_CUDA")
-        except Exception:
-            cfg = astra.astra_dict("BP3D")
-        cfg["ReconstructionDataId"] = vol_id
-        cfg["ProjectionDataId"] = sino_id
-        alg_id = astra.algorithm.create(cfg)
-        astra.algorithm.run(alg_id, 1)
-        astra.algorithm.delete(alg_id)
-    finally:
-        astra.data3d.delete([sino_id, vol_id])
-
-    # Scale to match skimage.iradon
-    scale = np.pi / (2.0 * float(N))
-    vol.mul_(float(scale))
-
-    if circle:
-        mask = _circular_mask(output_size, device=vol.device, dtype=vol.dtype)  # (H,W)
-        vol *= mask.unsqueeze(0)
-
-    return vol[0] if single else vol
+##################################################
+#              2D Functions (U-Net Training)
+##################################################
 
 
 def get_astra_geometry_2d(
@@ -621,7 +782,9 @@ def fbp_single_from_forward(
     vol_geom: dict[str, Any],
     proj_geom: dict[str, Any],
     sino_t: torch.Tensor,  # (n_angles, n_det) on any device
-    filter_name: str = "ramp",
+    filter_name: Literal[
+        "ramp", "shepp-logan", "cosine", "hamming", "hann", None
+    ] = "ramp",
     circle: bool = True,
 ) -> torch.Tensor:
     """
@@ -674,11 +837,13 @@ def forward_and_fbp_2d(
     img_t: torch.Tensor,
     angle_sets: list[np.ndarray],
     exposures: list[float],
-    filter_name: str = "ramp",
+    filter_name: Literal[
+        "ramp", "shepp-logan", "cosine", "hamming", "hann", None
+    ] = "ramp",
     circle: bool = True,
     l: int = 5,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    img_t.squeeze_(1)
+    img_t = img_t.squeeze(1)
     radons = forward_angle_sets_2d(img_t, angle_sets)
     fbps = []
     I_0s = []
@@ -710,25 +875,57 @@ def forward_and_fbp_2d(
     return torch.stack(fbps).to(img_t.device), torch.tensor(I_0s, device=img_t.device)
 
 
-def fbp(sinogram, angles):
-    """
-    Filtered back projection using astra's implementation.
-    Accepts batched sinograms of shape (batch, n_angles, n_detectors).
-    Returns reconstructed images of shape (batch, H, W).
-    """
-    batch_dims = sinogram.size()[:-2]
-    sinogram_size = sinogram.size()[-2:]
-    sinogram = sinogram.view(-1, *sinogram_size)
+#
+# def fbp(sinogram, angles):
+#     """
+#     Filtered back projection using astra's implementation.
+#     Accepts batched sinograms of shape (batch, n_angles, n_detectors).
+#     Returns reconstructed images of shape (batch, H, W).
+#     """
+#     batch_dims = sinogram.size()[:-2]
+#     sinogram_size = sinogram.size()[-2:]
+#     sinogram = sinogram.view(-1, *sinogram_size)
+#
+#     proj_geom_3d, vol_geom_3d = get_astra_geometry_from_sinogram(angles, sinogram)
+#
+#     recon = iradon_astra(
+#         sinogram.swapaxes(-1, -2),
+#         vol_geom3d=vol_geom_3d,
+#         proj_geom3d=proj_geom_3d,
+#         output_size=sinogram_size[-1],
+#         filter_name="ramp",
+#         circle=True,
+#     )
+#
+#     return recon.view(*batch_dims, sinogram_size[-1], sinogram_size[-1])
 
-    proj_geom_3d, vol_geom_3d = get_astra_geometry_from_sinogram(angles, sinogram)
 
-    recon = iradon_astra(
-        sinogram.swapaxes(-1, -2),
-        vol_geom3d=vol_geom_3d,
-        proj_geom3d=proj_geom_3d,
-        output_size=sinogram_size[-1],
-        filter_name="ramp",
-        circle=True,
+if __name__ == "__main__":
+    b = 2
+    r = 4
+    n_pred = 5
+    n_angles = 200
+    n_detectors = r
+    rates = 100.0
+
+    preds = torch.rand(b, n_pred, r, r)
+    counts = poisson(torch.full((b, n_angles, n_detectors), rates))
+    intensities = torch.rand(n_angles, 1)
+    angles = torch.rand(n_angles) * 180
+    nlls = nll_mixture(preds, counts, intensities, angles)
+    assert nlls.shape[0] == b and nlls.ndim == 1
+    rad = radon(preds, angles)
+    assert (
+        rad.shape[0] == b
+        and rad.shape[1] == n_pred
+        and rad.shape[2] == n_angles
+        and rad.shape[3] == n_detectors
     )
-
-    return recon.view(*batch_dims, sinogram_size[-1], sinogram_size[-1])
+    rad = radon(preds[0, 0], angles)
+    assert rad.shape[0] == n_angles and rad.shape[1] == n_detectors
+    rad = radon(preds[0], angles)
+    assert (
+        rad.shape[0] == n_pred
+        and rad.shape[1] == n_angles
+        and rad.shape[2] == n_detectors
+    )

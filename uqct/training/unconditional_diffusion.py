@@ -15,8 +15,7 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
-from uqct.datasets.utils import (KWARGS_COMPOSITE, KWARGS_LAMINO, KWARGS_LUNG,
-                                 get_dataset)
+from uqct.datasets.utils import get_dataset
 
 
 def save_ckpt(
