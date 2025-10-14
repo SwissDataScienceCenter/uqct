@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=unc-diffusion-training       # name of the job
+#SBATCH --job-name=diffusion-training       # name of the job
 #SBATCH --output=/cluster/scratch/mgaetzner/logs/%x_%A_%a.out          # stdout (%x=job name, %A=job ID, %a=array index)
 #SBATCH --error=/cluster/scratch/mgaetzner/logs/%x_%A_%a.err           # stderr
 #SBATCH --cpus-per-task=12
@@ -26,7 +26,7 @@ DATASETS=(composite lung lamino)
 DATASET=${DATASETS[$SLURM_ARRAY_TASK_ID]}
 
 # run the actual job
-"$PYTHONBIN" "${GITROOT}/uqct/training/unconditional_diffusion.py" \
+"$PYTHONBIN" "${GITROOT}/uqct/training/diffusion.py" \
 	--dataset "$DATASET" \
 	--epochs 500 \
 	--batch-size 64 \

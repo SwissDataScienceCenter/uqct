@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 
 from uqct.ct import (AstraParallelOp3D, fbp_single_from_forward,
                      get_astra_geometry_2d, get_astra_geometry_3d,
-                     iradon_astra, linspace, poisson, sinogram_ct)
+                     iradon_astra, linspace, poisson, sinogram)
 from uqct.datasets.utils import get_dataset
 
 N_ROUNDS = 200
@@ -74,7 +74,7 @@ class DenseCTScan:
         return self.counts[:t]
 
     def get_sinogram(self, t_start: int, t: int) -> torch.Tensor:
-        return sinogram_ct(
+        return sinogram(
             self.counts[t_start - 1 : t].sum(0, keepdim=True),
             self.I_0 * (t - t_start + 1),
             L,
@@ -153,7 +153,7 @@ class SparseCTScan:
         I_0_lr = self.I_0 * 2
 
         # (n_angles, 128)
-        self.sinogram = sinogram_ct(self.counts, I_0_lr, L).clamp_min_(0)
+        self.sinogram = sinogram(self.counts, I_0_lr, L).clamp_min_(0)
         return self.sinogram[t_start - 1 : t]
 
     def get_fbp(self, t: int) -> torch.Tensor:

@@ -14,9 +14,8 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
-from uqct.ct import fbp, forward_and_fbp_2d, sample_observations, sinogram_ct
+from uqct.ct import fbp, forward_and_fbp_2d, sample_observations, sinogram
 from uqct.datasets.utils import get_dataset
-from uqct.debugging import plot_img
 
 L = 5
 N_ANGLES = 200
@@ -47,7 +46,7 @@ def sample_fbp_dense(
     intensities = intensities.reshape(-1, 1, 1, 1).expand(-1, -1, len(angles), -1)
     counts_lr = sample_observations(x, intensities, angles)
     intensities_lr = intensities * 2
-    sino = sinogram_ct(counts_lr, intensities_lr, L).clip(0)
+    sino = sinogram(counts_lr, intensities_lr, L).clip(0)
     out = fbp(sino, angles).clip(0, 1)
     return out, intensities_lr[:, 0, 0, 0]
 
