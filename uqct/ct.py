@@ -345,22 +345,37 @@ def random_allocation(num_angles=360, exposure=1e5, device=None):
 
 
 class Experiment:
+    """In the dense settings we have
+        counts (torch.Tensor): (..., T, n_angles, n_detectors)
+        intensities (torch.Tensor): (..., T, n_angles, 1)
+        angles (torch.Tensor): (n_angles)
 
-    def __init__(self, exposure, measurements, angles):
+    In the sparse setting
+        counts (torch.Tensor): (...,  n_angles, n_detectors)
+        intensities (torch.Tensor): (..., n_angles, 1)
+        angles (torch.Tensor): (n_angles)
+    """
+
+    def __init__(
+        self,
+        counts: torch.Tensor,
+        intensities: torch.Tensor,
+        angles: torch.Tensor,
+        sparse: bool,
+    ):
         self.angles = angles
-        self.exposure = exposure  # 'allocation' before
-        self.measurements = measurements
-        self.total_exposure = exposure.sum()  # 'exposure' before
+        self.intensities = intensities
+        self.counts = counts
+        if sparse:
+            self.total_exposure = intensities.sum((-2, -1))
+            self.batch_dims = counts.shape[:-2]
+        else:
+            self.total_exposure = intensities.sum((-3, -2, -1))
+            self.batch_dims = counts.shape[:-3]
+        self.sparse = sparse
 
-    def aggregate(self, measurements, exposure):
-        self.measurements += measurements
-        self.exposure += exposure
-        self.total_exposure += exposure.sum()
-
-    def clone(self):
-        return Experiment(
-            self.exposure.clone(), self.measurements.clone(), self.angles.clone()
-        )
+    def __str__(self) -> str:
+        return f"Experiments:\n\nsparse: {self.sparse}\n\tintensities: {self.intensities}\n\ncounts: {self.counts}\n\tangles: {self.angles}"
 
 
 def mse_ct(images, measurements, angles, exposure, vst=None, l=5.0):
