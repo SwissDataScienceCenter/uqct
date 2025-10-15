@@ -20,14 +20,15 @@ from uqct.datasets.utils import get_dataset
 L = 5
 N_ANGLES = 200
 ANGULAR_RANGE = 180
-MIN_EXPOSURE = 1e4
-MAX_EXPOSURE = 1e9
+N_BINS_HR = 256
+MIN_TOTAL_INTENSITY = 1e4 * N_BINS_HR
+MAX_TOTAL_INTENSITY = 1e9 * N_BINS_HR
 
 
-def sample_exposure(
+def sample_intensities(
     n: int,
-    low: float = MIN_EXPOSURE,
-    high: float = MAX_EXPOSURE,
+    low: float = MIN_TOTAL_INTENSITY,
+    high: float = MAX_TOTAL_INTENSITY,
     device: torch.device = torch.device("cpu"),
 ) -> torch.Tensor:
     u = torch.rand(n, device=device)
@@ -42,7 +43,7 @@ def sample_fbp_dense(
     angles: torch.Tensor,
     device: torch.device,
 ):
-    intensities = sample_exposure(x.shape[0], device=device) / N_ANGLES
+    intensities = sample_intensities(x.shape[0], device=device) / N_ANGLES / N_BINS_HR
     intensities = intensities.reshape(-1, 1, 1, 1).expand(-1, -1, len(angles), -1)
     counts_lr = sample_observations(x, intensities, angles)
     intensities_lr = intensities * 2
@@ -54,12 +55,12 @@ def sample_fbp_dense(
 def sample_fbp_sparse(
     images: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    exposures = sample_exposure(len(images))
+    intensities = sample_intensities(len(images)) / N_ANGLES / N_BINS_HR
     n_angles = np.random.randint(1, N_ANGLES + 1, (len(images),))
     split_indices = np.cumsum(n_angles[:-1])
     total = int(n_angles.sum())
     angle_sets = np.split(np.random.rand(total) * ANGULAR_RANGE, split_indices)
-    fbp, I_0 = forward_and_fbp_2d(images, angle_sets, exposures.tolist(), l=L)
+    fbp, I_0 = forward_and_fbp_2d(images, angle_sets, intensities.tolist(), l=L)
     return (
         fbp,
         I_0,
@@ -151,7 +152,9 @@ def loss_fn(
 
     _n_angles = n_angles if n_angles is not None else N_ANGLES
     exposure_norm = (
-        (I_0 * _n_angles - MIN_EXPOSURE) / (MAX_EXPOSURE - MIN_EXPOSURE) * 999
+        (I_0 * _n_angles * N_BINS_HR - MIN_TOTAL_INTENSITY)
+        / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
+        * 999
     )  # [0, 999]
 
     if n_angles is None:

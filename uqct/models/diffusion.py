@@ -8,7 +8,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import optim
 from tqdm.auto import tqdm
 
-from uqct.ct import Experiment, fbp, nll, sinogram, vst
+from uqct.ct import Experiment, fbp, fbp_2d, mse_loss, nll, sinogram
 from uqct.debugging import plot_img
 
 DatasetName = Literal["lung", "composite", "lamino"]
@@ -23,6 +23,7 @@ class Diffusion:
         buffer: int = 20,
         sgd_steps: int = 500,
         lr: float = 0.01,
+        batch_size: int = 64,
         verbose: bool = False,
     ):
         self.verbose = verbose
@@ -32,6 +33,7 @@ class Diffusion:
         )
 
         # U-Net
+        self.batch_size = batch_size
         ckpt_path = find_ckpt(dataset)
         self.unet = load_unet(ckpt_path)
         self.unet.eval()
@@ -56,26 +58,38 @@ class Diffusion:
         device = x_t.device
         timesteps = torch.LongTensor([t]).to(device)
 
-        with torch.inference_mode():
-            with torch.autocast(
-                device_type=device.type,
-                dtype=torch.float16,
-                enabled=(device.type == "cuda"),
-            ):
-                noise_pred = self.unet(
-                    x_t.view(-1, 1, x_t.shape[-1], x_t.shape[-1]),
-                    timesteps,
-                    return_dict=False,
-                )[0]
+        noise_preds, x0_preds, x_t_prevs = [], [], []
+        in_shape = x_t.shape
+        x_t_flat = x_t.view(-1, 1, x_t.shape[-1], x_t.shape[-1])
 
-        x_0_pred = self.noise_scheduler.step(
-            noise_pred, int(timesteps.item()), x_t.reshape(noise_pred.shape)
-        ).pred_original_sample  # type: ignore
-        assert isinstance(x_0_pred, torch.Tensor)
+        # Split into batches of size <= self.batch_size
+        for batch in x_t_flat.split(self.batch_size):
+            with torch.inference_mode():
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=torch.float16,
+                    enabled=(device.type == "cuda"),
+                ):
+                    noise_pred = self.unet(
+                        batch,
+                        timesteps,
+                        return_dict=False,
+                    )[0]
 
-        x_t_previous = self.noise_scheduler.step(
-            noise_pred, int(timesteps.item()), x_t.reshape(noise_pred.shape)
-        ).prev_sample  # type: ignore
+            step_result = self.noise_scheduler.step(
+                noise_pred, int(timesteps.item()), batch.reshape(noise_pred.shape)
+            )
+            x_0_pred = step_result.pred_original_sample  # type: ignore
+            x_t_previous = step_result.prev_sample  # type: ignore
+
+            noise_preds.append(noise_pred)
+            x0_preds.append(x_0_pred)
+            x_t_prevs.append(x_t_previous)
+
+        # Concatenate all batch results
+        noise_pred = torch.cat(noise_preds, dim=0).view(in_shape)
+        x_0_pred = torch.cat(x0_preds, dim=0).view(in_shape)
+        x_t_previous = torch.cat(x_t_prevs, dim=0).view(in_shape)
 
         return noise_pred, x_0_pred, x_t_previous
 
@@ -84,7 +98,9 @@ class Diffusion:
         noise_pred, x_0_pred, _ = self.predict_x_0(int(t.item()), x_t)
         new_timestep = torch.LongTensor([target_t]).to(device)
         new_x_t = self.noise_scheduler.add_noise(
-            x_0_pred, torch.randn_like(x_0_pred), new_timestep  # type: ignore
+            x_0_pred,
+            torch.randn_like(x_0_pred),
+            new_timestep,  # type: ignore
         ).to(device)
         return new_x_t, noise_pred
 
@@ -107,7 +123,16 @@ class Diffusion:
     def sample(self, replicates: int = 10) -> torch.Tensor:
         side_length = self.experiment.counts.shape[-1]
         if self.experiment.sparse:
-            raise ValueError()
+            # (rep, ..., n_angles, side_length, side_length)
+            x_t = torch.randn(
+                replicates,
+                *self.experiment.batch_dims,
+                self.experiment.counts.shape[-2],
+                side_length,
+                side_length,
+                device=self.device,
+            )
+            out_shape = x_t.shape
         else:
             x_t = torch.randn(
                 replicates,
@@ -214,10 +239,26 @@ def get_guidance_loss_fn(
     if experiment.sparse:
 
         def loss_fn(image: torch.Tensor) -> torch.Tensor:
-            raise ValueError()
-            loss = nll(
-                image, experiment.counts, experiment.intensities, experiment.angles
-            )
+            loss = torch.zeros(1, device=image.device)
+            n = 1
+            for x in image.shape[:-3]:
+                n *= x
+            for t in range(1, image.shape[-2]):
+                print(t, end="")
+                loss += mse_loss(
+                    image[..., t - 1, :, :].view(
+                        n, -1, image.shape[-2], image.shape[-1]
+                    ),
+                    experiment.counts[..., :t, :].view(
+                        n, experiment.counts.shape[-2], experiment.counts.shape[-1]
+                    ),
+                    experiment.intensities[..., :t, :].view(
+                        n,
+                        experiment.intensities.shape[-2],
+                        experiment.intensities.shape[-1],
+                    ),
+                    experiment.angles[:t],
+                )
             return loss
 
     else:
@@ -228,7 +269,9 @@ def get_guidance_loss_fn(
             # nlls = nll(image, counts_csum, intensities_csum, experiment.angles)
             # nlls /= nlls.detach().mean((-2, -1), dtype=None, keepdim=True)
             # return nlls.mean()
-            return vst(image, counts_csum, intensities_csum, experiment.angles).mean()
+            return mse_loss(
+                image, counts_csum, intensities_csum, experiment.angles
+            ).mean()
 
     return loss_fn
 
@@ -308,10 +351,13 @@ def denorm_image(
     help="Whether to generate samples for the sparse setting",
 )
 def main(dataset: DatasetName, sparse: bool):
+    import lovely_tensors as lt
     import numpy as np
 
     from uqct.ct import sample_observations
     from uqct.datasets.utils import get_dataset
+
+    lt.monkey_patch()
 
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -323,30 +369,55 @@ def main(dataset: DatasetName, sparse: bool):
 
     _, test_set = get_dataset(dataset, True)
 
-    # ---- Quick viz on a few test examples (kept from your script) ----
-    num_gt = min(2, len(test_set))
-    gt = torch.stack([test_set[i] for i in range(num_gt)], dim=0).to(device)
+    n_gt = min(2, len(test_set))
+    gt = torch.stack([test_set[i] for i in range(n_gt)], dim=0).to(device)
 
-    angles = torch.from_numpy(np.linspace(0, 360, 200, endpoint=False)).to(device)
+    n_angles = 200
+    angles = torch.from_numpy(np.linspace(0, 360, n_angles, endpoint=False)).to(device)
+    n_rounds = 5
+    total_intensity_rounds = torch.logspace(4, 9, n_rounds).to(device)
+    n_detectors = gt.shape[-1] // 2
     if sparse:
-        raise ValueError()
+        intensities = total_intensity_rounds.sum().view(1, 1, 1, 1).expand(
+            -1, -1, n_angles, -1
+        ) / (n_angles * n_detectors)
+        counts = sample_observations(gt, intensities / 2, angles)
     else:
-        n_rounds = 5
-        n_detectors = gt.shape[-1] // 2
-        n_angles = len(angles)
-        total_intensity_rounds = torch.logspace(4, 9, n_rounds).to(device)
         intensities = total_intensity_rounds.view(1, n_rounds, 1, 1).expand(
             -1, -1, n_angles, -1
         ) / (n_angles * n_detectors)
-
         counts = sample_observations(gt, intensities / 2, angles)
 
-    experiment = Experiment(counts, intensities, angles, False)
+    experiment = Experiment(counts, intensities, angles, sparse)
     diffusion = Diffusion(dataset, experiment, sgd_steps=50, lr=0.01, verbose=True)
 
-    sino = sinogram(counts.cumsum(-3), intensities.cumsum(-3))
-    fbps = fbp(sino, angles).clip(0, 1)  # shape: (2, 10, 128, 128)
-    plot_img(*fbps.reshape(-1, 128, 128), share_range=True)
+    if sparse:
+        angle_sets = n_gt * [angles[:i].cpu().numpy() for i in range(1, n_angles + 1)]
+        counts_separate = []
+        for i in range(n_gt):
+            for j in range(1, n_angles + 1):
+                counts_separate.append(counts[i, :, :j].reshape(-1, n_detectors))
+        fbps = fbp_2d(
+            angle_sets,
+            n_gt * intensities.flatten().tolist(),
+            counts_separate,
+        )
+        # plot_img(
+        #     gt[0, 0],
+        #     fbps[0],
+        #     fbps[50],
+        #     fbps[100],
+        #     fbps[199],
+        #     gt[1, 0],
+        #     fbps[200],
+        #     fbps[250],
+        #     fbps[300],
+        #     fbps[399],
+        # )
+    else:
+        sino = sinogram(counts.cumsum(-3), intensities.cumsum(-3))
+        fbps = fbp(sino, angles).clip(0, 1)  # shape: (2, 10, 128, 128)
+        plot_img(*fbps.reshape(-1, 128, 128), share_range=True)
 
     sample = diffusion.sample(1)
     print(sample.shape)

@@ -79,14 +79,14 @@ def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
     return poisson(exposure * torch.exp(-scale * projections))
 
 
-def vst(
+def mse_loss(
     images: torch.Tensor,
     counts: torch.Tensor,
     intensities: torch.Tensor,
     angles: torch.Tensor,
     l: int = 5,
 ) -> torch.Tensor:
-    """Variance stabilizing transformation.
+    """MSE loss.
 
     Arguments:
         predictions (torch.Tensor): (..., width, height)
@@ -132,9 +132,9 @@ def log_lam(
     angles: torch.Tensor,
     l: int = 5,
 ) -> torch.Tensor:
-    assert (
-        images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1
-    ), f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
+    assert images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1, (
+        f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
+    )
 
     if intensities.ndim == 1:
         intensities = intensities.unsqueeze(-1)
@@ -150,6 +150,7 @@ def log_lam(
     counts = inflate(counts)
 
     intensities = intensities.clip(1e-9)
+    breakpoint()
     sino = radon(images.contiguous(), angles).clip(1e-9)
     scale = l / images.shape[-1]
 
@@ -212,7 +213,7 @@ FilterType = Literal["ramp", "shepp-logan", "cosine", "hamming", "hann"] | None
 def fbp(
     sino: torch.Tensor,
     angles: torch.Tensor,
-    filter_name: FilterType = "shepp-logan",
+    filter_name: FilterType = "ramp",
     circle: bool = True,
 ) -> torch.Tensor:
     """Computes FBP from sinogram.
@@ -319,12 +320,14 @@ def sample_observations(
     return counts_lr
 
 
-def sinogram(measurements, I_0, l=5.0):
+def sinogram(
+    counts: torch.Tensor, intensities: torch.Tensor | float, l=5.0
+) -> torch.Tensor:
     """
     Computes the sinogram from the measurements.
     """
-    scale = l / measurements.shape[-1]  # Normalize by the image size
-    sino = torch.log(measurements / I_0 + 1e-6) / -scale
+    scale = l / counts.shape[-1]  # Normalize by the image size
+    sino = torch.log(counts / intensities + 1e-6) / -scale
     return sino
 
 
@@ -412,33 +415,6 @@ class Experiment:
         return f"Experiments:\n\nsparse: {self.sparse}\n\tintensities: {self.intensities}\n\ncounts: {self.counts}\n\tangles: {self.angles}"
 
 
-def mse_ct(images, measurements, angles, exposure, vst=None, l=5.0):
-    """
-    Mean Squared Error loss function.
-    predictions: predicted intensity values
-    measurements: observed measurements
-    exposure: exposure time or dose
-    """
-    projections = radon(images, angles.flatten())
-    scale = l / images.shape[-1]  # Normalize by the image size
-
-    # scale_projection = scale * projections
-
-    predictions = torch.exp(-scale * projections)
-    # predictions = torch.clamp(predictions, min=1e-6)  # Ensure predictions are positive
-    if vst is not None:
-        # predictions_exposure = predictions * exposure
-        # Apply variance-stabilizing transformation if provided
-        # predictions_exposure = vst(predictions_exposure)
-        # measurements = vst(measurements)
-        # total_exposure = torch.sum(exposure, dim=(-1, -2), keepdim=True)
-        mse_loss = torch.mean((vst(measurements / exposure) - vst(predictions)) ** 2)
-    else:
-        # Calculate MSE
-        mse_loss = torch.mean((measurements / exposure - predictions) ** 2)
-    return mse_loss
-
-
 def get_astra_geometry_3d(
     angles: torch.Tensor, im_size: int, n_slices: int
 ) -> tuple[dict[str, Any], dict[str, dict]]:
@@ -463,9 +439,9 @@ def get_astra_geometry_from_images(
     angles: torch.Tensor, images: torch.Tensor
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     assert images.ndim == 3, "images must be 3D (n_slices, H, W)"
-    assert (
-        images.shape[-1] == images.shape[-2]
-    ), f"images must be square (H, W), got images.shape={images.shape}"
+    assert images.shape[-1] == images.shape[-2], (
+        f"images must be square (H, W), got images.shape={images.shape}"
+    )
     n_slices, im_size = images.shape[0], images.shape[-2]
     return get_astra_geometry_3d(angles, im_size, n_slices)
 
@@ -475,9 +451,9 @@ def get_astra_geometry_from_sinogram(
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     assert sino.ndim == 3, "sinogram must be 3D (n_angles, n_det_y, n_det_x)"
     n_det_rows, n_angles, n_det_cols = sino.shape
-    assert (
-        n_angles == angles.shape[0]
-    ), f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sino.shape}"
+    assert n_angles == angles.shape[0], (
+        f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sino.shape}"
+    )
     return get_astra_geometry_3d(angles, n_det_cols, n_det_rows)
 
 
@@ -806,31 +782,37 @@ def fbp_single_from_forward(
 
 @torch.no_grad()
 def forward_and_fbp_2d(
-    img_t: torch.Tensor,
+    image: torch.Tensor,
     angle_sets: list[np.ndarray],
-    exposures: list[float],
+    intensities: list[float],
     filter_name: Literal[
         "ramp", "shepp-logan", "cosine", "hamming", "hann", None
     ] = "ramp",
     circle: bool = True,
     l: int = 5,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    img_t = img_t.squeeze(1)
-    radons = forward_angle_sets_2d(img_t, angle_sets)
+    """
+    TODO
+
+    Arguments:
+        image (torch.Tensor): (B, side_length, side_length)
+    """
+    image = image.squeeze(1)
+    radons = forward_angle_sets_2d(image, angle_sets)
     fbps = []
     I_0s = []
     for i, radon in enumerate(radons):
         n_angles = len(angle_sets[i])
-        I_0 = exposures[i] / n_angles
-        I_0s.append(I_0)
-        scale = l / img_t.shape[-1]
+        intensity = intensities[i]
+        I_0s.append(intensity)
+        scale = l / image.shape[-1]
 
-        counts = poisson(I_0 * torch.exp(-scale * radon))  # (n_angles, 256)
-        counts_lr = counts.view(n_angles, img_t.shape[-1] // 2, 2).sum(
+        counts = poisson(intensity * torch.exp(-scale * radon))  # (n_angles, 256)
+        counts_lr = counts.view(n_angles, image.shape[-1] // 2, 2).sum(
             -1
         )  # (n_angles, 128)
-        I_0_lr = I_0 * 2
-        sino = sinogram(counts_lr, I_0_lr, l).clamp_min_(0)  # (n_angles, 128)
+        intensity_lr = intensity * 2
+        sino = sinogram(counts_lr, intensity_lr, l).clamp_min_(0)  # (n_angles, 128)
 
         proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(
             angle_sets[i], counts_lr.shape[-1]
@@ -844,7 +826,40 @@ def forward_and_fbp_2d(
             circle=circle,
         ).clip(0, 1)
         fbps.append(fbp)
-    return torch.stack(fbps).to(img_t.device), torch.tensor(I_0s, device=img_t.device)
+    return torch.stack(fbps).to(image.device), torch.tensor(I_0s, device=image.device)
+
+
+@torch.no_grad()
+def fbp_2d(
+    angle_sets: list[np.ndarray],
+    intensities: list[float] | list[torch.Tensor],
+    counts: list[torch.Tensor],
+    filter_name: Literal[
+        "ramp", "shepp-logan", "cosine", "hamming", "hann", None
+    ] = "ramp",
+    circle: bool = True,
+) -> torch.Tensor:
+    """
+    Arguments:
+        image (torch.Tensor): (B, side_length, side_length)
+    """
+    fbps = []
+    for angle_set_i, counts_i, intensity_i in zip(angle_sets, counts, intensities):
+        sino = sinogram(
+            counts_i, torch.tensor(intensity_i, device=counts_i.device)
+        ).clamp_min(0)
+        proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(
+            angle_set_i, counts_i.shape[-1]
+        )
+        fbp = fbp_single_from_forward(
+            vol_geom=vol_geom_lr,
+            proj_geom=proj_geom_lr,
+            sino_t=sino.view(-1, sino.shape[-1]),
+            filter_name=filter_name,
+            circle=circle,
+        ).clip(0, 1)
+        fbps.append(fbp)
+    return torch.stack(fbps).to(counts[0].device)
 
 
 if __name__ == "__main__":
