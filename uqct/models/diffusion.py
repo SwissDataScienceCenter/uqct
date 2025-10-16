@@ -8,7 +8,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import optim
 from tqdm.auto import tqdm
 
-from uqct.ct import Experiment, fbp, fbp_2d, mse_loss, nll, sinogram
+from uqct.ct import Experiment, fbp, fbp_2d, pearson_chi_square, sinogram
 from uqct.debugging import plot_img
 
 DatasetName = Literal["lung", "composite", "lamino"]
@@ -144,8 +144,10 @@ class Diffusion:
             )
             out_shape = x_t.shape
 
-        timesteps = torch.linspace(0, 999, self.num_steps + 1).int()
+        timesteps = torch.linspace(0, 500, self.num_steps + 1).int()
         it = tqdm(range(self.num_steps), disable=not self.verbose)
+        optimizer = None
+
         for i in it:
             t = timesteps[-i - 1]
             target_t = timesteps[-i - 2]
@@ -155,11 +157,12 @@ class Diffusion:
             _, x_0_pred, _ = self.predict_x_0(int(t.item()), x_t)
             x_t = x_0_pred.view(out_shape)
 
-            x_t, guidance_loss = guide(
+            x_t, guidance_loss, optimizer = guide(
                 x_t,
                 self.loss_fct,
                 sgd_steps=self.sgd_steps,
                 lr=self.lr,
+                optimizer=optimizer,
                 verbose=False,
             )
             it.set_postfix({"loss": f"{guidance_loss:.3f}"})
@@ -237,39 +240,28 @@ def get_guidance_loss_fn(
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Create a loss function that takes as input a batch of images and returns the Poisson NLL loss."""
     if experiment.sparse:
+        n_angles = experiment.counts.shape[-2]
+        mask = torch.tril(
+            torch.ones(
+                n_angles, n_angles, dtype=torch.bool, device=experiment.counts.device
+            )
+        )
 
         def loss_fn(image: torch.Tensor) -> torch.Tensor:
-            loss = torch.zeros(1, device=image.device)
-            n = 1
-            for x in image.shape[:-3]:
-                n *= x
-            for t in range(1, image.shape[-2]):
-                print(t, end="")
-                loss += mse_loss(
-                    image[..., t - 1, :, :].view(
-                        n, -1, image.shape[-2], image.shape[-1]
-                    ),
-                    experiment.counts[..., :t, :].view(
-                        n, experiment.counts.shape[-2], experiment.counts.shape[-1]
-                    ),
-                    experiment.intensities[..., :t, :].view(
-                        n,
-                        experiment.intensities.shape[-2],
-                        experiment.intensities.shape[-1],
-                    ),
-                    experiment.angles[:t],
-                )
-            return loss
+            squares = pearson_chi_square(
+                image,
+                experiment.counts.unsqueeze(-3),
+                experiment.intensities.unsqueeze(-3),
+                experiment.angles,
+            )
+            return squares[..., mask, :].mean()
 
     else:
         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
 
         def loss_fn(image: torch.Tensor) -> torch.Tensor:
-            # nlls = nll(image, counts_csum, intensities_csum, experiment.angles)
-            # nlls /= nlls.detach().mean((-2, -1), dtype=None, keepdim=True)
-            # return nlls.mean()
-            return mse_loss(
+            return pearson_chi_square(
                 image, counts_csum, intensities_csum, experiment.angles
             ).mean()
 
@@ -279,15 +271,11 @@ def get_guidance_loss_fn(
 def guide(
     x_t: torch.Tensor,
     loss_fct: Callable[..., torch.Tensor],
-    sgd_steps: int | list[int] = 50,
+    sgd_steps: int = 50,
     lr: float = 0.1,
+    optimizer: None | optim.Adam = None,
     verbose: bool = False,
-) -> tuple[torch.Tensor, float]:
-    lr_list, sgd_steps_list = lr, sgd_steps
-    if not isinstance(lr, list):
-        lr_list = [lr]
-        sgd_steps_list = [sgd_steps]
-
+) -> tuple[torch.Tensor, float, optim.Adam]:
     circle_mask = torch.ones(*x_t.shape[-2:], device=x_t.device)
     radius = x_t.shape[-1] // 2
     y, x = torch.meshgrid(
@@ -299,32 +287,37 @@ def guide(
     circle_mask[~mask] = 0
     loss = torch.tensor([float("inf")])
 
-    y = denorm_image(x_t)
-    y.requires_grad_()
-    y = torch.nn.Parameter(y)
+    y_0 = denorm_image(x_t)
 
-    for lr_instance, sgd_steps_instance in zip(lr_list, sgd_steps_list):  # type: ignore
-        optimizer = optim.Adam([y], lr=lr_instance)
-        it = tqdm(range(sgd_steps_instance), disable=not verbose)
-        for _ in it:
-            optimizer.zero_grad()
-            yp = y * mask
-            loss = loss_fct(yp.clip(0))
+    if optimizer is None:
+        y = torch.nn.Parameter(y_0)
+        optimizer = optim.Adam([y], lr=lr)
+    else:
+        y = optimizer.param_groups[0]["params"][0]
+        with torch.no_grad():
+            y.copy_(y_0)
+    it = tqdm(range(sgd_steps), disable=not verbose)
+    for _ in it:
+        optimizer.zero_grad()
+        yp = y * mask
+        loss = loss_fct(yp.clip(0))
 
-            # Punish out of range
-            low = yp[yp < 0]
-            if len(low) > 0:
-                loss += low.abs().mean()
-            high = yp[yp > 1]
-            if len(high) > 0:
-                loss += (high - 1).abs().mean()
+        # Punish out of range
+        low = yp[yp < 0]
+        if len(low) > 0:
+            loss += low.abs().mean()
+        high = yp[yp > 1]
+        if len(high) > 0:
+            loss += (high - 1).abs().mean()
 
-            loss.backward()
-            optimizer.step()
-            with torch.no_grad():
-                y.data[..., ~mask] = 0.0
-            it.set_postfix({"loss": f"{loss.item():.3f}"})
-    return norm_image(y).clip(-1, 1), loss.item()
+        loss.backward()
+        optimizer.step()
+        with torch.no_grad():
+            y.data[..., ~mask] = 0.0
+        it.set_postfix({"loss": f"{loss.item():.3f}"})
+    optimizer.zero_grad(set_to_none=True)
+    x_t_guided = norm_image(y).clip(-1, 1)
+    return x_t_guided, loss.item(), optimizer
 
 
 def norm_image(image: torch.Tensor) -> torch.Tensor:
@@ -372,7 +365,7 @@ def main(dataset: DatasetName, sparse: bool):
     n_gt = min(2, len(test_set))
     gt = torch.stack([test_set[i] for i in range(n_gt)], dim=0).to(device)
 
-    n_angles = 200
+    n_angles = 60
     angles = torch.from_numpy(np.linspace(0, 360, n_angles, endpoint=False)).to(device)
     n_rounds = 5
     total_intensity_rounds = torch.logspace(4, 9, n_rounds).to(device)
@@ -389,7 +382,15 @@ def main(dataset: DatasetName, sparse: bool):
         counts = sample_observations(gt, intensities / 2, angles)
 
     experiment = Experiment(counts, intensities, angles, sparse)
-    diffusion = Diffusion(dataset, experiment, sgd_steps=50, lr=0.01, verbose=True)
+    diffusion = Diffusion(
+        dataset,
+        experiment,
+        num_steps=50,
+        buffer=10,
+        sgd_steps=100,
+        lr=0.01,
+        verbose=True,
+    )
 
     if sparse:
         angle_sets = n_gt * [angles[:i].cpu().numpy() for i in range(1, n_angles + 1)]
@@ -402,18 +403,6 @@ def main(dataset: DatasetName, sparse: bool):
             n_gt * intensities.flatten().tolist(),
             counts_separate,
         )
-        # plot_img(
-        #     gt[0, 0],
-        #     fbps[0],
-        #     fbps[50],
-        #     fbps[100],
-        #     fbps[199],
-        #     gt[1, 0],
-        #     fbps[200],
-        #     fbps[250],
-        #     fbps[300],
-        #     fbps[399],
-        # )
     else:
         sino = sinogram(counts.cumsum(-3), intensities.cumsum(-3))
         fbps = fbp(sino, angles).clip(0, 1)  # shape: (2, 10, 128, 128)

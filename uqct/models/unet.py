@@ -12,9 +12,14 @@ from torch import nn
 
 from uqct.datasets.utils import get_dataset
 from uqct.metrics import get_metrics
-from uqct.training.unet import (MAX_EXPOSURE, MIN_EXPOSURE, N_ANGLES,
-                                build_unet, sample_fbp_dense,
-                                sample_fbp_sparse)
+from uqct.training.unet import (
+    MAX_TOTAL_INTENSITY,
+    MIN_TOTAL_INTENSITY,
+    N_ANGLES,
+    build_unet,
+    sample_fbp_dense,
+    sample_fbp_sparse,
+)
 
 
 class FBPUNet(nn.Module):
@@ -28,7 +33,7 @@ class FBPUNet(nn.Module):
             sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
         unet.load_state_dict(sd, strict=True)
         print(
-            f"Loaded checkpoint: epoch={ckpt.get('epoch','?')}, val_loss={ckpt.get('val_loss','?')}"
+            f"Loaded checkpoint: epoch={ckpt.get('epoch', '?')}, val_loss={ckpt.get('val_loss', '?')}"
         )
         self.unet = unet.eval()  # inference only
 
@@ -77,8 +82,11 @@ class FBPUNet(nn.Module):
 
             x = fbp_b.to(device, non_blocking=True) * 2.0 - 1.0
             exposure_norm = (
-                (intensity_b.to(device, non_blocking=True) * N_ANGLES - MIN_EXPOSURE)
-                / (MAX_EXPOSURE - MIN_EXPOSURE)
+                (
+                    intensity_b.to(device, non_blocking=True) * N_ANGLES
+                    - MIN_TOTAL_INTENSITY
+                )
+                / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
                 * 999
             )
 

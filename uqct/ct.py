@@ -79,7 +79,7 @@ def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
     return poisson(exposure * torch.exp(-scale * projections))
 
 
-def mse_loss(
+def pearson_chi_square(
     images: torch.Tensor,
     counts: torch.Tensor,
     intensities: torch.Tensor,
@@ -150,7 +150,6 @@ def log_lam(
     counts = inflate(counts)
 
     intensities = intensities.clip(1e-9)
-    breakpoint()
     sino = radon(images.contiguous(), angles).clip(1e-9)
     scale = l / images.shape[-1]
 
