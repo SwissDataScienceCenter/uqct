@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from os import cpu_count
 from pathlib import Path
 from typing import Any, Literal
 
@@ -7,13 +8,13 @@ import astra
 import click
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Subset
+from tqdm.auto import tqdm
 
 from uqct.ct import (AstraParallelOp3D, fbp_single_from_forward,
-                     forward_and_fbp_2d, get_astra_geometry_2d,
-                     get_astra_geometry_3d, iradon_astra, linspace, poisson,
-                     sinogram_ct)
+                     get_astra_geometry_2d, get_astra_geometry_3d,
+                     iradon_astra, linspace, poisson, sinogram)
 from uqct.datasets.utils import get_dataset
-from uqct.debugging import plot_img
 
 N_ROUNDS = 200
 N_ANGLES = 200
@@ -73,22 +74,23 @@ class DenseCTScan:
         return self.counts[:t]
 
     def get_sinogram(self, t_start: int, t: int) -> torch.Tensor:
-        return sinogram_ct(
+        return sinogram(
             self.counts[t_start - 1 : t].sum(0, keepdim=True),
             self.I_0 * (t - t_start + 1),
             L,
         ).clip(0)
 
     def get_fbp(self, t: int) -> torch.Tensor:
+        if t <= 0:
+            raise ValueError(f"Expected t >= 1, got t = {t}")
         sinogram = self.get_sinogram(1, t)
-        breakpoint()
         return iradon_astra(
             sinogram.transpose(1, 2), self.vol_geom_lr, self.proj_geom_lr
         ).clip(0, 1)
 
     def get_fbps(self, t_start: int) -> torch.Tensor:
         fbps = list()
-        for t in range(t_start, N_ROUNDS):
+        for t in range(t_start - 1, N_ROUNDS - 1):
             fbps.append(self.get_fbp(t))
         return torch.stack(fbps)
 
@@ -151,7 +153,7 @@ class SparseCTScan:
         I_0_lr = self.I_0 * 2
 
         # (n_angles, 128)
-        self.sinogram = sinogram_ct(self.counts, I_0_lr, L).clamp_min_(0)
+        self.sinogram = sinogram(self.counts, I_0_lr, L).clamp_min_(0)
         return self.sinogram[t_start - 1 : t]
 
     def get_fbp(self, t: int) -> torch.Tensor:
@@ -175,14 +177,35 @@ class SparseCTScan:
         return torch.stack(fbps)
 
 
+def get_avg_image(train_set: Subset[torch.Tensor]) -> torch.Tensor:
+    out = torch.zeros_like(train_set[0])
+    num_workers = cpu_count()
+    breakpoint()
+    data_loader = DataLoader(
+        train_set,
+        batch_size=16,
+        prefetch_factor=2,
+        num_workers=min(8, num_workers if num_workers else 1),
+    )
+    for batch in tqdm(data_loader, desc="avg image"):
+        out += batch.sum(0)
+    return out / len(train_set)
+
+
 def get_predictions(
     scan: SparseCTScan | DenseCTScan,
+    avg_img: torch.Tensor,
     t_start: int,
     predictor_name: Literal["fbp", "mle", "map", "unet", "diffusion"],
 ) -> torch.Tensor:
+    assert t_start >= 1
     if predictor_name == "fbp":
-        # TODO: Implement mu_0 prediction
-        return scan.get_fbps(t_start)
+        if t_start >= 2:
+            out = scan.get_fbps(t_start)
+        else:
+            fbps = scan.get_fbps(2)
+            out = torch.cat([avg_img, fbps])
+        return out
     else:
         raise NotImplementedError(
             f"Getting predictions for predictor '{predictor_name}' is not implemented yet."
@@ -203,8 +226,14 @@ def run_cseq(kwargs: dict[str, Any]) -> None:
     print(f"Saved arguments to '{cseq_dir}'")
 
     # Retrieve image
-    set_seeds(0)  # fix order of test set images
-    _, test_set = get_dataset(kwargs["dataset"], True)
+    train_set, test_set = get_dataset(kwargs["dataset"], True)
+
+    # Retrieve average image if necessary
+    avg_img = torch.zeros_like(train_set[0])
+    if kwargs["t_start"] == 1:
+        print("Computing average image...")
+        avg_img = get_avg_image(train_set)
+
     image = test_set[kwargs["test_set_idx"]]
 
     # Simulate measurements
@@ -213,10 +242,11 @@ def run_cseq(kwargs: dict[str, Any]) -> None:
         scan = SparseCTScan(image, kwargs["exposure"], kwargs["t_end"], device)
     else:
         scan = DenseCTScan(image, kwargs["exposure"], kwargs["t_end"], device)
-    breakpoint()
 
     # Obtain predictions
-    preds = get_predictions(scan, kwargs["t_start"], kwargs["predictor"])
+    print("Obtaining predictions...")
+    preds = get_predictions(scan, avg_img, kwargs["t_start"], kwargs["predictor"])
+    breakpoint()
 
     # Save predictions with metrics
 

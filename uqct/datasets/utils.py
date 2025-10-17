@@ -31,7 +31,6 @@ KWARGS_LAMINO = {
     "rescale": 128,
     "im_size": 256,
     "val_range": (0.0, 234.59),
-    "train_transform": False,
     "rotation_angle": 30,
 }
 
@@ -39,7 +38,6 @@ KWARGS_LUNG = {
     "path": DATA_DIR / "lung/ground_truth_train",
     "rescale": 128,
     "val_range": (0.0, 1.0),
-    "train_transform": False,
     "rotation_angle": 30,
 }
 
@@ -48,15 +46,16 @@ KWARGS_COMPOSITE = {
     "rescale": 128,
     "im_size": 256,
     "val_range": (0.0, 10646.63),
-    "train_transform": False,
     "file_range": [20, 360],
     "clip_range": [3e4, 5e4],
     "rotation_angle": 30,
 }
 
+DatasetName = Literal["composite", "lamino", "lung"]
+
 
 def get_dataset(
-    name: Literal["composite", "lamino", "lung"], high_res: bool = False
+    name: DatasetName, high_res: bool = False
 ) -> tuple[Subset[torch.Tensor], Subset[torch.Tensor]]:
     settings = {
         "composite": {"kwargs": KWARGS_COMPOSITE, "filetype": "nii"},
@@ -69,7 +68,7 @@ def get_dataset(
         for v in settings.values():
             v["kwargs"]["rescale"] = 256
 
-    dataset_type: Literal["nii", "tiff", "h5"] = settings[name]["filetype"]
+    dataset_type = settings[name]["filetype"]
     kwargs = settings[name]["kwargs"]
 
     dataset_class = TomogramDataset if dataset_type == "h5" else TIFFDataset
@@ -85,10 +84,10 @@ def get_dataset(
     dataset = dataset_class(**kwargs)
     torch.manual_seed(0)
     perm = torch.randperm(len(dataset))
-    trainSet = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
-    testSet = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore
-    return trainSet, testSet
+    train_set = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
+    test_set = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore
+    return train_set, test_set  # type: ignore
 
 
 if __name__ == "__main__":
-    get_dataset("lung")
+    train_set, test_set = get_dataset("lung")

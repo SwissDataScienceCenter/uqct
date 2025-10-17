@@ -14,7 +14,7 @@ class NIIWrapper:
         self.path = path
         self.im_size = im_size
 
-        self.all_images = nib.load(path).get_fdata()[file_range[0] : file_range[1]]
+        self.all_images = nib.load(path).get_fdata()[file_range[0] : file_range[1]]  # type: ignore
         idx_to_slice_list = []
         global_index_to_local_list = []
         coordinates_list = []
@@ -61,22 +61,15 @@ class NiiDataset(BaseImageDataset):
         clip_range=None,
         val_range=None,
         rotation_angle=None,
-        contrast=None,
-        train_transform=False,
-        crop=None,
         file_range=[0, -1],
     ):
         self.im_size = im_size
         self.images = NIIWrapper(path, im_size, file_range)
         super().__init__(
-            path,
             rescale=rescale,
             clip_range=clip_range,
             val_range=val_range,
             rotation_angle=rotation_angle,
-            contrast=contrast,
-            train_transform=train_transform,
-            crop=crop,
         )
 
     def __getitem__(self, idx):

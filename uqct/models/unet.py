@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 from pathlib import Path
 from typing import Literal
 
@@ -9,65 +8,106 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from diffusers.models.unets.unet_2d import UNet2DModel
+from torch import nn
 
-# Project utilities
-from uqct.ct import AstraParallelOp3D, get_astra_geometry_3d
 from uqct.datasets.utils import get_dataset
-# Metrics
 from uqct.metrics import get_metrics
-# Reuse from training:
-from uqct.training.unet import \
-    sample_fbp_dense  # forward -> Poisson -> bin -> FBP (LR)
-from uqct.training.unet import (  # shared geometry/exposure constants
-    MAX_EXPOSURE, MIN_EXPOSURE, N_ANGLES, build_unet, sample_fbp_sparse)
+from uqct.training.unet import (
+    MAX_TOTAL_INTENSITY,
+    MIN_TOTAL_INTENSITY,
+    N_ANGLES,
+    build_unet,
+    sample_fbp_dense,
+    sample_fbp_sparse,
+)
 
 
-def load_unet(ckpt_path: Path, sparse: bool) -> UNet2DModel:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    unet = build_unet(sparse).to(device)  # type: ignore
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    sd = ckpt["unet"]
-    # Handle potential _orig_mod prefix
-    if any(k.startswith("_orig_mod.") for k in sd.keys()):
-        sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
-    unet.load_state_dict(sd, strict=True)
-    print(
-        f"Loaded checkpoint: epoch={ckpt.get('epoch','?')}, val_loss={ckpt.get('val_loss','?')}"
-    )
-    return unet  # type: ignore
+class FBPUNet(nn.Module):
+    def __init__(self, ckpt_path: Path, sparse: bool):
+        super().__init__()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        unet = build_unet(sparse).to(device)  # type: ignore
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        sd = ckpt["unet"]
+        if any(k.startswith("_orig_mod.") for k in sd.keys()):
+            sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
+        unet.load_state_dict(sd, strict=True)
+        print(
+            f"Loaded checkpoint: epoch={ckpt.get('epoch', '?')}, val_loss={ckpt.get('val_loss', '?')}"
+        )
+        self.unet = unet.eval()  # inference only
 
+    # TODO: Take experiment
+    def forward(
+        self,
+        fbp_lr: torch.Tensor,  # (N,H,W) or (N,1,H,W) in [0,1]
+        intensity_lr: torch.Tensor,  # (N,1,1)
+        class_labels: torch.Tensor | None = None,
+        batch_size: int = 64,
+        num_workers: int = 4,
+        out_device: torch.device | None = None,
+    ) -> torch.Tensor:
+        """
+        Batched inference for large inputs.
+        Always uses a DataLoader internally.
+        Returns (N,H,W) in [0,1].
+        """
+        device = next(self.unet.parameters()).device
+        if fbp_lr.ndim == 3:
+            fbp_lr = fbp_lr.unsqueeze(1)  # (N,1,H,W)
 
-@torch.inference_mode()
-def predict(
-    unet: UNet2DModel,
-    fbp_lr: torch.Tensor,
-    I0_lr: torch.Tensor,
-    class_labels: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    fbp_lr: (B,128,128) in [0,1]
-    I0_lr: (B,1,1) exposure per sample (LR)
-    returns: (B,128,128) in [0,1]
-    """
-    device = unet.device
-    x_in = (fbp_lr * 2.0 - 1.0).unsqueeze(1)  # (B,1,128,128), [-1,1]
-    exposure_norm = (
-        (I0_lr * N_ANGLES - MIN_EXPOSURE) / (MAX_EXPOSURE - MIN_EXPOSURE) * 999
-    )
-    with torch.autocast(
-        device_type=device.type, dtype=torch.float16, enabled=(device.type == "cuda")
-    ):
-        y = unet(
-            x_in,
-            timestep=exposure_norm.flatten(),
-            class_labels=class_labels,
-            return_dict=False,
-        )[
-            0
-        ]  # (B,1,128,128)
-    y = ((y + 1.0) / 2.0).clamp(0.0, 1.0).squeeze(1)  # (B,128,128)
-    return y
+        if class_labels is None:
+            dataset = torch.utils.data.TensorDataset(
+                fbp_lr.to("cpu"), intensity_lr.to("cpu")
+            )
+        else:
+            dataset = torch.utils.data.TensorDataset(
+                fbp_lr.to("cpu"), intensity_lr.to("cpu"), class_labels.to("cpu")
+            )
+
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=(device.type == "cuda"),
+        )
+
+        preds = []
+        torch.set_grad_enabled(False)
+        for batch in loader:
+            if class_labels is None:
+                fbp_b, intensity_b = batch
+                cls_b = None
+            else:
+                fbp_b, intensity_b, cls_b = batch
+
+            x = fbp_b.to(device, non_blocking=True) * 2.0 - 1.0
+            exposure_norm = (
+                (
+                    intensity_b.to(device, non_blocking=True) * N_ANGLES
+                    - MIN_TOTAL_INTENSITY
+                )
+                / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
+                * 999
+            )
+
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=(device.type == "cuda"),
+            ):
+                y = self.unet(
+                    x,
+                    timestep=exposure_norm.flatten(),
+                    class_labels=(cls_b.to(device) if cls_b is not None else None),
+                    return_dict=False,
+                )[0]
+
+            if out_device:
+                y = y.to(out_device)
+            preds.append(((y + 1.0) / 2.0).clamp(0.0, 1.0).to(out_device))
+
+        return torch.cat(preds, dim=0)
 
 
 @click.command()
@@ -109,109 +149,91 @@ def main(
 ):
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.set_grad_enabled(False)
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.benchmark = True
 
-    torch.random.manual_seed(0)
-    np.random.seed(0)
-    random.seed(0)
-
     _, test_set = get_dataset(dataset, True)
-    num_examples = min(num_examples, len(test_set))
-    xs = torch.stack([test_set[i] for i in range(num_examples)], dim=0).to(
-        device
-    )  # (N,1,256,256), [0,1]
 
-    # Geometry & projector (reuse training)
+    # ---- Quick viz on a few test examples (kept from your script) ----
+    num_examples = min(num_examples, len(test_set))
+    gt = torch.stack([test_set[i] for i in range(num_examples)], dim=0).to(
+        device
+    )  # (N,1,256,256)
+
     angles = torch.from_numpy(np.linspace(0, 180, N_ANGLES, endpoint=False))
-    proj_geom_hr, vol_geom_hr = get_astra_geometry_3d(angles, 256, num_examples)
-    proj_geom_lr, vol_geom_lr = get_astra_geometry_3d(angles, 128, num_examples)
-    op = AstraParallelOp3D(proj_geom_hr, vol_geom_hr)
 
     # Load model
-    unet = load_unet(ckpt_path, sparse_model).to(device)  # type: ignore
-    unet.eval()
+    model = FBPUNet(ckpt_path, sparse_model)
+    model.eval()
 
     # Build LR FBP and predict
     # Keep a separate tensor for DISPLAY so we don't lose values when class_labels=None
     if sparse_data:
-        fbp_lr, I0_lr, n_angles_tensor = sample_fbp_sparse(
-            xs
-        )  # (N,128,128), (N,1,1), (N,)
+        # (N,128,128), (N,1,1), (N,)
+        fbp, intensity_lr, n_angles_tensor = sample_fbp_sparse(gt)
         n_angles_disp = n_angles_tensor  # per-sample angle counts
     else:
-        fbp_lr, I0_lr = sample_fbp_dense(
-            xs, op, proj_geom_lr, vol_geom_lr, device
-        )  # (N,128,128), (N,1,1)
+        fbp, intensity_lr = sample_fbp_dense(gt, angles, device)  # (N,128,128), (N,1,1)
         n_angles_disp = torch.full((num_examples,), N_ANGLES, device=device)
 
     # Class labels only if using sparse_model (as in training)
     class_labels = n_angles_disp if sparse_model else None
 
-    preds_lr = predict(
-        unet,
-        fbp_lr,
-        I0_lr,
-        class_labels=class_labels,
-    )  # (N,128,128)
+    # (N,128,128)
+    preds = model(fbp, intensity_lr, class_labels=class_labels)
 
     # Prepare for plotting (uniform 256×256 display)
-    gt = xs.squeeze(1).clamp(0, 1).detach().cpu()  # (N,256,256)
-    fbp_up = (
-        F.interpolate(
-            fbp_lr.unsqueeze(1), size=(256, 256), mode="bilinear", align_corners=False
-        )
-        .squeeze(1)
-        .clamp(0, 1)
-        .cpu()
-    )
-    pred_up = (
-        F.interpolate(
-            preds_lr.unsqueeze(1), size=(256, 256), mode="bilinear", align_corners=False
-        )
-        .squeeze(1)
-        .clamp(0, 1)
-        .cpu()
-    )
+    gt_lr = F.interpolate(gt, size=(128, 128), mode="area").squeeze(1).to(fbp.device)
 
-    # ---- Metrics at native 128×128 resolution ----
-    gt_lr = (
-        F.interpolate(gt.unsqueeze(1), size=(128, 128), mode="area")
-        .squeeze(1)
-        .to(fbp_lr.device)
-    )  # match FBP/Pred resolution
-    mse = F.mse_loss(gt_lr, preds_lr)
-    print(f"MSE: {mse}")
-
-    fbp_metrics = []
-    pred_metrics = []
+    fbp_metrics, pred_metrics = [], []
     for i in range(num_examples):
-        m_fbp = get_metrics(gt_lr[i], fbp_lr[i], normalize_range=True, constrained=True)
-        m_pred = get_metrics(
-            gt_lr[i], preds_lr[i], normalize_range=True, constrained=True
-        )
+        m_fbp = get_metrics(gt_lr[i], fbp[i], normalize_range=True, constrained=True)
+        m_pred = get_metrics(gt_lr[i], preds[i], normalize_range=True, constrained=True)
         fbp_metrics.append(m_fbp)
         pred_metrics.append(m_pred)
 
-    # Values for overlay: angles (int) and I0 per sample (float)
+    # Values for overlay: angles (int) and intensity per sample (float)
     n_angles_np = n_angles_disp.detach().float().cpu().numpy()
-    I0_vals = I0_lr.detach().float().view(num_examples, -1).mean(dim=1).cpu().numpy()
+    intensity_vals = (
+        intensity_lr.detach().float().view(num_examples, -1).mean(dim=1).cpu().numpy()
+    )
 
     # Plot: 3 rows (GT / FBP / Pred) × N columns, show PSNR & SSIM on each column
     _, axes = plt.subplots(3, num_examples, figsize=(2.2 * num_examples, 6.0))
     if num_examples == 1:
         axes = np.asarray(axes).reshape(3, 1)
 
+    # Prep for plotting
+    gt_lr = gt_lr.to("cpu")
+    fbp = fbp.squeeze(1).to("cpu")
+    preds = preds.squeeze(1).to("cpu")
+
     for i in range(num_examples):
-        # GT + overlay with angles and I0
-        axes[0, i].imshow(gt[i], cmap="gray", vmin=0.0, vmax=1.0)
+        # GT + overlay with angles and intensity
+        axes[0, i].imshow(gt_lr[i], cmap="gray", vmin=0.0, vmax=1.0)
         axes[0, i].axis("off")
         if i == 0:
             axes[0, i].set_title("GT", fontsize=10)
+        overlay_txt = (
+            f"{int(round(n_angles_np[i]))} angles | I0={intensity_vals[i]:.3g}"
+        )
+        axes[0, i].text(
+            6,
+            14,
+            overlay_txt,
+            color="white",
+            fontsize=8,
+            ha="left",
+            va="top",
+            bbox=dict(boxstyle="round,pad=0.2", fc="black", ec="none", alpha=0.6),
+        )
 
         # Overlay text (top-left)
-        overlay_txt = f"{int(round(n_angles_np[i]))} angles | I0={I0_vals[i]:.3g}"
+        overlay_txt = (
+            f"{int(round(n_angles_np[i]))} angles | I0={intensity_vals[i]:.3g}"
+        )
         axes[0, i].text(
             6,
             14,
@@ -224,7 +246,7 @@ def main(
         )
 
         # FBP + metrics
-        axes[1, i].imshow(fbp_up[i], cmap="gray", vmin=0.0, vmax=1.0)
+        axes[1, i].imshow(fbp[i], cmap="gray", vmin=0.0, vmax=1.0)
         axes[1, i].axis("off")
         axes[1, i].set_title(
             f"FBP  PSNR {fbp_metrics[i]['PSNR']:.2f}  SSIM {fbp_metrics[i]['SS']:.3f}",
@@ -232,7 +254,7 @@ def main(
         )
 
         # Pred + metrics
-        axes[2, i].imshow(pred_up[i], cmap="gray", vmin=0.0, vmax=1.0)
+        axes[2, i].imshow(preds[i], cmap="gray", vmin=0.0, vmax=1.0)
         axes[2, i].axis("off")
         axes[2, i].set_title(
             f"Pred PSNR {pred_metrics[i]['PSNR']:.2f}  SSIM {pred_metrics[i]['SS']:.3f}",

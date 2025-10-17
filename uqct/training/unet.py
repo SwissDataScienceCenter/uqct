@@ -2,7 +2,6 @@ import os
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import click
 import numpy as np
@@ -15,22 +14,21 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
-from uqct.ct import (AstraParallelOp3D, forward_and_fbp_2d,
-                     get_astra_geometry_3d, iradon_astra, poisson, sinogram_ct)
+from uqct.ct import fbp, forward_and_fbp_2d, sample_observations, sinogram_from_counts
 from uqct.datasets.utils import get_dataset
-from uqct.debugging import plot_img
 
 L = 5
 N_ANGLES = 200
 ANGULAR_RANGE = 180
-MIN_EXPOSURE = 1e4
-MAX_EXPOSURE = 1e9
+N_BINS_HR = 256
+MIN_TOTAL_INTENSITY = 1e4 * N_BINS_HR
+MAX_TOTAL_INTENSITY = 1e9 * N_BINS_HR
 
 
-def sample_exposure(
+def sample_intensities(
     n: int,
-    low: float = MIN_EXPOSURE,
-    high: float = MAX_EXPOSURE,
+    low: float = MIN_TOTAL_INTENSITY,
+    high: float = MAX_TOTAL_INTENSITY,
     device: torch.device = torch.device("cpu"),
 ) -> torch.Tensor:
     u = torch.rand(n, device=device)
@@ -42,54 +40,27 @@ def sample_exposure(
 
 def sample_fbp_dense(
     x: torch.Tensor,
-    op: AstraParallelOp3D,
-    proj_geom_lr: dict[str, Any],
-    vol_geom_lr: dict[str, dict],
+    angles: torch.Tensor,
     device: torch.device,
 ):
-    I_0 = sample_exposure(op.nz, device=device).view(-1, 1, 1) / N_ANGLES
-    scale = L / x.shape[-1]
-    radon = op.forward(x.squeeze(1))
-    counts = poisson(I_0 * torch.exp(-scale * radon))  # (B, 200, 256)
-    counts_lr = counts.view(counts.shape[0], counts.shape[1], 128, 2).sum(
-        -1
-    )  # (B, 200, 128)
-    I_0_lr = I_0 * 2
-    sino = sinogram_ct(counts_lr, I_0_lr, L).clip(0)
-    fbp = iradon_astra(sino.transpose(1, 2), vol_geom_lr, proj_geom_lr).clip(0, 1)
-    return fbp[: x.shape[0]], I_0_lr[: x.shape[0]]
-
-
-def sample_obs_dense(
-    x: torch.Tensor,
-    op: AstraParallelOp3D,
-    proj_geom_lr: dict[str, Any],
-    vol_geom_lr: dict[str, dict],
-    I_tot: torch.Tensor,
-    device: torch.device,
-):
-    I_0 = I_tot.view(-1, 1, 1) / N_ANGLES / 2  # divide by 2 since we simulate at higher resolution
-    scale = L / x.shape[-1]
-    radon = op.forward(x.squeeze(1))
-    counts = poisson(I_0 * torch.exp(-scale * radon))  # (B, 200, 256)
-    counts_lr = counts.view(counts.shape[0], counts.shape[1], 128, 2).sum(
-        -1
-    )  # (B, 200, 128)
-    # I_0_lr = I_0 * 2
-    # sino = sinogram_ct(counts_lr, I_0_lr, L).clip(0)
-    # fbp = iradon_astra(sino.transpose(1, 2), vol_geom_lr, proj_geom_lr).clip(0, 1)
-    return counts_lr
+    intensities = sample_intensities(x.shape[0], device=device) / N_ANGLES / N_BINS_HR
+    intensities = intensities.reshape(-1, 1, 1, 1).expand(-1, -1, len(angles), -1)
+    counts_lr = sample_observations(x, intensities, angles)
+    intensities_lr = intensities * 2
+    sino = sinogram_from_counts(counts_lr, intensities_lr, L).clip(0)
+    out = fbp(sino, angles).clip(0, 1)
+    return out, intensities_lr[:, 0, 0, 0]
 
 
 def sample_fbp_sparse(
     images: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    exposures = sample_exposure(len(images))
+    intensities = sample_intensities(len(images)) / N_ANGLES / N_BINS_HR
     n_angles = np.random.randint(1, N_ANGLES + 1, (len(images),))
     split_indices = np.cumsum(n_angles[:-1])
     total = int(n_angles.sum())
     angle_sets = np.split(np.random.rand(total) * ANGULAR_RANGE, split_indices)
-    fbp, I_0 = forward_and_fbp_2d(images, angle_sets, exposures.tolist(), l=L)
+    fbp, I_0 = forward_and_fbp_2d(images, angle_sets, intensities.tolist(), l=L)
     return (
         fbp,
         I_0,
@@ -181,7 +152,9 @@ def loss_fn(
 
     _n_angles = n_angles if n_angles is not None else N_ANGLES
     exposure_norm = (
-        (I_0 * _n_angles - MIN_EXPOSURE) / (MAX_EXPOSURE - MIN_EXPOSURE) * 999
+        (I_0 * _n_angles * N_BINS_HR - MIN_TOTAL_INTENSITY)
+        / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
+        * 999
     )  # [0, 999]
 
     if n_angles is None:
@@ -258,9 +231,9 @@ def load_model_ckpt(
 )
 def main(**kwargs):
     if kwargs["sparse"]:
-        print(f"Running SPARSE training")
+        print("Running SPARSE training")
     else:
-        print(f"Running DENSE training")
+        print("Running DENSE training")
 
     # Device & perf
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -279,12 +252,6 @@ def main(**kwargs):
 
     # Create forward projector
     angles = torch.from_numpy(np.linspace(0, 180, N_ANGLES, endpoint=False))
-    side_length = train_set[0].shape[-1]
-    proj_geom_hr, vol_geom_hr = get_astra_geometry_3d(
-        angles, side_length, kwargs["batch_size"]
-    )
-    proj_geom_lr, vol_geom_lr = get_astra_geometry_3d(angles, 128, kwargs["batch_size"])
-    op = AstraParallelOp3D(proj_geom_hr, vol_geom_hr)
 
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
@@ -307,7 +274,7 @@ def main(**kwargs):
     try:
         unet: UNet2DModel = torch.compile(unet)  # type: ignore
     except Exception:
-        print(f"Failed to compile U-Net")
+        print("Failed to compile U-Net")
 
     # Split train set into training and validation subset
     dataset_size = len(train_set)
@@ -378,9 +345,7 @@ def main(**kwargs):
                     fbp, I_0, n_angles = sample_fbp_sparse(x)
                     loss = loss_fn(x, fbp, I_0, unet, n_angles)
                 else:
-                    fbp, I_0 = sample_fbp_dense(
-                        x, op, proj_geom_lr, vol_geom_lr, device
-                    )
+                    fbp, I_0 = sample_fbp_dense(x, angles, device)
                     loss = loss_fn(x, fbp, I_0, unet)
 
             if not torch.isfinite(loss):
@@ -417,9 +382,7 @@ def main(**kwargs):
                         fbp, I_0, n_angles = sample_fbp_sparse(x)
                         vloss = loss_fn(x, fbp, I_0, unet, n_angles)
                     else:
-                        fbp, I_0 = sample_fbp_dense(
-                            x, op, proj_geom_lr, vol_geom_lr, device
-                        )
+                        fbp, I_0 = sample_fbp_dense(x, angles, device)
                         vloss = loss_fn(x, fbp, I_0, unet)
                 val_losses.append(vloss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))

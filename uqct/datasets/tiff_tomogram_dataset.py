@@ -4,18 +4,9 @@ import os
 
 import numpy as np
 import torch
-# from chip.utils.fourier import fft_2D, ifft_2D
-# from chip.utils import add_defects
-# import torch.nn.functional as F
 from PIL import Image
 
-# from chip.utils.utils import create_gaussian_filter
 from uqct.datasets.base_dataset import BaseImageDataset
-
-# from torch.utils.data import Dataset
-# from torchvision.transforms.functional import resize, InterpolationMode
-# from torchvision import transforms
-
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -36,7 +27,6 @@ class TIFFWrapper:
         self.folder = folder
         self.im_size = im_size
         self.images = {}
-        sizes = []
         idx_to_file_list = []
         global_index_to_local_list = []
         coordinates_list = []
@@ -62,11 +52,9 @@ class TIFFWrapper:
 
     def __getitem__(self, idx):
         file_id = self.idx_to_file[idx]
-        local_index = self.global_index_to_local[idx]
         coors = self.coordinates[idx].int().numpy()
 
         filename = self.folder[file_id]
-        # image = Image.open(os.path.join(self.path, filename))
         image = self.get_image(filename)
         cropped_image = image.crop(
             (coors[0], coors[1], coors[0] + self.im_size, coors[1] + self.im_size)
@@ -93,21 +81,14 @@ class TIFFDataset(BaseImageDataset):
         clip_range=None,
         val_range=None,
         rotation_angle=None,
-        contrast=None,
-        train_transform=False,
-        crop=None,
     ):
         self.im_size = im_size
         self.images = TIFFWrapper(path, im_size)
         super().__init__(
-            path,
             rescale=rescale,
             clip_range=clip_range,
             val_range=val_range,
             rotation_angle=rotation_angle,
-            contrast=contrast,
-            train_transform=train_transform,
-            crop=crop,
         )
 
     def __getitem__(self, idx):
