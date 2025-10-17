@@ -86,10 +86,12 @@ def pearson_chi_square(
     angles: torch.Tensor,
     l: int = 5,
 ) -> torch.Tensor:
-    """MSE loss.
+    """Element-wise Pearson chi-squared statistic, not summed.
+
+        (counts - lam)^2 /  stop_grad(lam).
 
     Arguments:
-        predictions (torch.Tensor): (..., width, height)
+        images (torch.Tensor): (..., width, height)
         counts (torch.Tensor): (..., n_angles, n_detectors)
         intensities (torch.Tensor): (..., n_angles, 1)
         angles (torch.Tensor): (n_angles)
@@ -109,9 +111,10 @@ def nll(
     angles: torch.Tensor,
     l: int = 5,
 ) -> torch.Tensor:
-    """
+    """Poisson negative log-likelihood.
+
     Arguments:
-        predictions (torch.Tensor): (..., width, height)
+        images (torch.Tensor): (..., width, height)
         counts (torch.Tensor): (..., n_angles, n_detectors)
         intensities (torch.Tensor): (..., n_angles, 1)
         angles (torch.Tensor): (n_angles)
@@ -132,22 +135,19 @@ def log_lam(
     angles: torch.Tensor,
     l: int = 5,
 ) -> torch.Tensor:
+    """
+    Arguments:
+        images (torch.Tensor): (..., width, height)
+        counts (torch.Tensor): (..., n_angles, n_detectors)
+        intensities (torch.Tensor): (..., n_angles, 1)
+        angles (torch.Tensor): (n_angles)
+        l: (int)
+    Returns:
+        torch.Tensor: (..., n_angles, side_length)
+    """
     assert images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1, (
         f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
     )
-
-    if intensities.ndim == 1:
-        intensities = intensities.unsqueeze(-1)
-    max_ndim = max(images.ndim, counts.ndim, intensities.ndim)
-
-    def inflate(x):
-        while x.ndim < max_ndim:
-            x = x.unsqueeze(0)
-        return x
-
-    images = inflate(images)
-    intensities = inflate(intensities)
-    counts = inflate(counts)
 
     intensities = intensities.clip(1e-9)
     sino = radon(images.contiguous(), angles).clip(1e-9)
@@ -295,6 +295,7 @@ def fbp(
     return out.view(*batch_dims, sino_size[-1], sino_size[-1])
 
 
+# TODO: Appears in U-Net
 def sample_observations(
     images: torch.Tensor,
     intensities: torch.Tensor,
@@ -319,7 +320,7 @@ def sample_observations(
     return counts_lr
 
 
-def sinogram(
+def sinogram_from_counts(
     counts: torch.Tensor, intensities: torch.Tensor | float, l=5.0
 ) -> torch.Tensor:
     """
@@ -328,56 +329,6 @@ def sinogram(
     scale = l / counts.shape[-1]  # Normalize by the image size
     sino = torch.log(counts / intensities + 1e-6) / -scale
     return sino
-
-
-# TODO: Phase out this function?
-def fbp_ct(measurements, angles, exposure, l=5.0, weighted=False, clip=True):
-    sino = sinogram(measurements, exposure, l)
-
-    if weighted:
-        weights = exposure / exposure.sum(
-            dim=-2, keepdim=True
-        )  # * np.pi  # Normalize exposure to sum to 1
-        sinogram_weighted = sino * weights
-        recon_weighted = fbp(sinogram_weighted, angles)
-        recon_weighted *= len(angles)
-
-        recon = (
-            recon_weighted  # if nll_weighted < nll_unweighted  else recon_unweighted
-        )
-    else:
-        recon = fbp(sino, angles)
-    if clip:
-        recon = torch.clip(recon, min=0, max=1)
-
-    return recon
-
-
-def uniform_allocation(num_angles=360, exposure=1e5, device=None):
-    """
-    Create a uniform allocation vector for the angles.
-    """
-    angles = (
-        torch.from_numpy(np.linspace(0, 180, num_angles, endpoint=False))
-        .float()
-        .to(device)
-    )
-    allocation = torch.ones(num_angles, device=device) * exposure / num_angles
-    return allocation.unsqueeze(-1), angles
-
-
-def random_allocation(num_angles=360, exposure=1e5, device=None):
-    angles = (
-        torch.from_numpy(np.linspace(0, 180, num_angles, endpoint=False))
-        .float()
-        .to(device)
-    )
-    allocation = (
-        torch.distributions.Dirichlet(torch.ones(num_angles, device=device))
-        .sample()
-        .unsqueeze(-1)
-    )  # Dirichlet distribution for exposure
-    return allocation * exposure, angles
 
 
 class Experiment:
@@ -811,7 +762,9 @@ def forward_and_fbp_2d(
             -1
         )  # (n_angles, 128)
         intensity_lr = intensity * 2
-        sino = sinogram(counts_lr, intensity_lr, l).clamp_min_(0)  # (n_angles, 128)
+        sino = sinogram_from_counts(counts_lr, intensity_lr, l).clamp_min_(
+            0
+        )  # (n_angles, 128)
 
         proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(
             angle_sets[i], counts_lr.shape[-1]
@@ -844,7 +797,7 @@ def fbp_2d(
     """
     fbps = []
     for angle_set_i, counts_i, intensity_i in zip(angle_sets, counts, intensities):
-        sino = sinogram(
+        sino = sinogram_from_counts(
             counts_i, torch.tensor(intensity_i, device=counts_i.device)
         ).clamp_min(0)
         proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(

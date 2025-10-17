@@ -37,6 +37,7 @@ class FBPUNet(nn.Module):
         )
         self.unet = unet.eval()  # inference only
 
+    # TODO: Take experiment
     def forward(
         self,
         fbp_lr: torch.Tensor,  # (N,H,W) or (N,1,H,W) in [0,1]

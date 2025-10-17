@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
-from uqct.ct import fbp, forward_and_fbp_2d, sample_observations, sinogram
+from uqct.ct import fbp, forward_and_fbp_2d, sample_observations, sinogram_from_counts
 from uqct.datasets.utils import get_dataset
 
 L = 5
@@ -47,7 +47,7 @@ def sample_fbp_dense(
     intensities = intensities.reshape(-1, 1, 1, 1).expand(-1, -1, len(angles), -1)
     counts_lr = sample_observations(x, intensities, angles)
     intensities_lr = intensities * 2
-    sino = sinogram(counts_lr, intensities_lr, L).clip(0)
+    sino = sinogram_from_counts(counts_lr, intensities_lr, L).clip(0)
     out = fbp(sino, angles).clip(0, 1)
     return out, intensities_lr[:, 0, 0, 0]
 
@@ -231,9 +231,9 @@ def load_model_ckpt(
 )
 def main(**kwargs):
     if kwargs["sparse"]:
-        print(f"Running SPARSE training")
+        print("Running SPARSE training")
     else:
-        print(f"Running DENSE training")
+        print("Running DENSE training")
 
     # Device & perf
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -274,7 +274,7 @@ def main(**kwargs):
     try:
         unet: UNet2DModel = torch.compile(unet)  # type: ignore
     except Exception:
-        print(f"Failed to compile U-Net")
+        print("Failed to compile U-Net")
 
     # Split train set into training and validation subset
     dataset_size = len(train_set)

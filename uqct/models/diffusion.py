@@ -8,7 +8,7 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import optim
 from tqdm.auto import tqdm
 
-from uqct.ct import Experiment, fbp, fbp_2d, pearson_chi_square, sinogram
+from uqct.ct import Experiment, fbp, fbp_2d, pearson_chi_square, sinogram_from_counts
 from uqct.debugging import plot_img
 
 DatasetName = Literal["lung", "composite", "lamino"]
@@ -404,7 +404,7 @@ def main(dataset: DatasetName, sparse: bool):
             counts_separate,
         )
     else:
-        sino = sinogram(counts.cumsum(-3), intensities.cumsum(-3))
+        sino = sinogram_from_counts(counts.cumsum(-3), intensities.cumsum(-3))
         fbps = fbp(sino, angles).clip(0, 1)  # shape: (2, 10, 128, 128)
         plot_img(*fbps.reshape(-1, 128, 128), share_range=True)
 
