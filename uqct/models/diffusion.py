@@ -21,7 +21,7 @@ class Diffusion:
         experiment: Experiment,
         num_steps: int = 50,
         buffer: int = 20,
-        sgd_steps: int = 500,
+        sgd_steps: int = 100,
         lr: float = 0.01,
         batch_size: int = 64,
         verbose: bool = False,
