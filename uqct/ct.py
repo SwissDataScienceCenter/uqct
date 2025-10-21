@@ -295,7 +295,6 @@ def fbp(
     return out.view(*batch_dims, sino_size[-1], sino_size[-1])
 
 
-# TODO: Appears in U-Net
 def sample_observations(
     images: torch.Tensor,
     intensities: torch.Tensor,

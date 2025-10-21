@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Literal
 
@@ -9,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-
+from uqct.ct import Experiment, fbp, sinogram_from_counts
 from uqct.datasets.utils import get_dataset
 from uqct.metrics import get_metrics
 from uqct.training.unet import (
@@ -21,9 +22,30 @@ from uqct.training.unet import (
     sample_fbp_sparse,
 )
 
+class FBPUNetEnsemble:
+    def __init__(self, ckpt_dir: Path | None, sparse: bool) -> None:
+        if ckpt_dir and ckpt_dir.exists():
+            self.unets = tuple(FBPUNet(ckpt, sparse) for ckpt in ckpt_dir.iterdir())
+        else:
+            # TODO
+            pass
+        pass
+
+
+
+        
+
 
 class FBPUNet(nn.Module):
-    def __init__(self, ckpt_path: Path, sparse: bool):
+    def __init__(
+        self,
+        ckpt_path: Path,
+        sparse: bool,
+        *,
+        batch_size: int = 64,
+        num_workers: int = 4,
+        out_device: torch.device | None = None,
+    ) -> None:
         super().__init__()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         unet = build_unet(sparse).to(device)  # type: ignore
@@ -36,15 +58,65 @@ class FBPUNet(nn.Module):
             f"Loaded checkpoint: epoch={ckpt.get('epoch', '?')}, val_loss={ckpt.get('val_loss', '?')}"
         )
         self.unet = unet.eval()  # inference only
+        self.sparse = sparse
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.out_device = out_device
 
-    # TODO: Take experiment
-    def forward(
+    @staticmethod
+    def _prepare_inputs_from_experiment(
+        experiment: Experiment,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        counts = experiment.counts
+        intensities = experiment.intensities
+
+        if not experiment.sparse:
+            if counts.ndim >= 4:
+                counts = counts.sum(dim=-3)
+            if intensities.ndim >= 4:
+                intensities = intensities.sum(dim=-3)
+
+        if counts.device.type != "cpu":
+            counts = counts.detach().to(torch.float32).cpu()
+        else:
+            counts = counts.detach().to(torch.float32)
+
+        if intensities.ndim == counts.ndim - 1:
+            intensities = intensities.unsqueeze(-1)
+
+        if intensities.device.type != "cpu":
+            intensities = intensities.detach().to(torch.float32).cpu()
+        else:
+            intensities = intensities.detach().to(torch.float32)
+
+        angles = experiment.angles.detach().to(counts.device, dtype=torch.float32)
+
+        sino = sinogram_from_counts(counts, intensities).clamp_min_(0.0)
+        fbp_lr = fbp(sino, angles).clamp_(0.0, 1.0)
+
+        batch_shape = fbp_lr.shape[:-2]
+        num_samples = int(math.prod(batch_shape)) if batch_shape else 1
+        fbp_lr = fbp_lr.reshape(num_samples, *fbp_lr.shape[-2:])
+
+        intensity_vals = intensities.mean(dim=(-2, -1)).reshape(num_samples)
+
+        if experiment.sparse:
+            angle_mask = intensities.squeeze(-1) > 0
+            class_labels = angle_mask.reshape(num_samples, -1).sum(dim=-1).to(torch.long)
+        else:
+            class_labels = None
+
+        return fbp_lr, intensity_vals, class_labels
+
+    def predict(
         self,
-        fbp_lr: torch.Tensor,  # (N,H,W) or (N,1,H,W) in [0,1]
-        intensity_lr: torch.Tensor,  # (N,1,1)
+        fbp_lr: torch.Tensor | None = None,  # (N,H,W) or (N,1,H,W) in [0,1]
+        intensity_lr: torch.Tensor | None = None,  # (N,) or (N,1,1)
         class_labels: torch.Tensor | None = None,
-        batch_size: int = 64,
-        num_workers: int = 4,
+        *,
+        experiment: Experiment | None = None,
+        batch_size: int | None = None,
+        num_workers: int | None = None,
         out_device: torch.device | None = None,
     ) -> torch.Tensor:
         """
@@ -53,17 +125,36 @@ class FBPUNet(nn.Module):
         Returns (N,H,W) in [0,1].
         """
         device = next(self.unet.parameters()).device
-        if fbp_lr.ndim == 3:
-            fbp_lr = fbp_lr.unsqueeze(1)  # (N,1,H,W)
+        batch_size = batch_size or self.batch_size
+        num_workers = num_workers if num_workers is not None else self.num_workers
+        out_device = out_device if out_device is not None else self.out_device
 
-        if class_labels is None:
-            dataset = torch.utils.data.TensorDataset(
-                fbp_lr.to("cpu"), intensity_lr.to("cpu")
-            )
+        if experiment is not None:
+            fbp_lr, intensity_lr, inferred_labels = self._prepare_inputs_from_experiment(experiment)
+            if class_labels is None:
+                class_labels = inferred_labels
+        elif fbp_lr is None or intensity_lr is None:
+            raise ValueError("Provide either tensors (fbp_lr, intensity_lr) or an Experiment")
+
+        if fbp_lr is None or intensity_lr is None:
+            raise RuntimeError("Inputs were not initialized")
+
+        if fbp_lr.ndim == 3:
+            fbp_lr = fbp_lr.unsqueeze(1)
+
+        if intensity_lr.ndim == 1:
+            intensity_lr = intensity_lr.unsqueeze(1)
+        elif intensity_lr.ndim > 2:
+            intensity_lr = intensity_lr.reshape(intensity_lr.shape[0], -1)
+
+        fbp_cpu = fbp_lr.to("cpu")
+        intensity_cpu = intensity_lr.to("cpu")
+        class_cpu = class_labels.to("cpu") if class_labels is not None else None
+
+        if class_cpu is None:
+            dataset = torch.utils.data.TensorDataset(fbp_cpu, intensity_cpu)
         else:
-            dataset = torch.utils.data.TensorDataset(
-                fbp_lr.to("cpu"), intensity_lr.to("cpu"), class_labels.to("cpu")
-            )
+            dataset = torch.utils.data.TensorDataset(fbp_cpu, intensity_cpu, class_cpu)
 
         loader = torch.utils.data.DataLoader(
             dataset,
@@ -75,7 +166,7 @@ class FBPUNet(nn.Module):
         preds = []
         torch.set_grad_enabled(False)
         for batch in loader:
-            if class_labels is None:
+            if class_cpu is None:
                 fbp_b, intensity_b = batch
                 cls_b = None
             else:
@@ -103,9 +194,10 @@ class FBPUNet(nn.Module):
                     return_dict=False,
                 )[0]
 
-            if out_device:
-                y = y.to(out_device)
-            preds.append(((y + 1.0) / 2.0).clamp(0.0, 1.0).to(out_device))
+            pred = ((y + 1.0) / 2.0).clamp(0.0, 1.0)
+            if out_device is not None:
+                pred = pred.to(out_device)
+            preds.append(pred)
 
         return torch.cat(preds, dim=0)
 
@@ -166,7 +258,6 @@ def main(
 
     # Load model
     model = FBPUNet(ckpt_path, sparse_model)
-    model.eval()
 
     # Build LR FBP and predict
     # Keep a separate tensor for DISPLAY so we don't lose values when class_labels=None
@@ -182,7 +273,7 @@ def main(
     class_labels = n_angles_disp if sparse_model else None
 
     # (N,128,128)
-    preds = model(fbp, intensity_lr, class_labels=class_labels)
+    preds = model.predict(fbp, intensity_lr, class_labels=class_labels)
 
     # Prepare for plotting (uniform 256×256 display)
     gt_lr = F.interpolate(gt, size=(128, 128), mode="area").squeeze(1).to(fbp.device)
