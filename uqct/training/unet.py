@@ -17,12 +17,20 @@ from tqdm.auto import tqdm
 from uqct.ct import fbp, forward_and_fbp_2d, sample_observations, sinogram_from_counts
 from uqct.datasets.utils import get_dataset
 
+try:
+    import lovely_tensors as lt
+
+    lt.monkey_patch()
+except Exception as _:
+    pass
+
 L = 5
 N_ANGLES = 200
 ANGULAR_RANGE = 180
 N_BINS_HR = 256
-MIN_TOTAL_INTENSITY = 1e4 * N_BINS_HR
-MAX_TOTAL_INTENSITY = 1e9 * N_BINS_HR
+N_BINS_LR = 128
+MIN_TOTAL_INTENSITY = 1e4
+MAX_TOTAL_INTENSITY = 1e9
 
 
 def sample_intensities(
@@ -43,33 +51,34 @@ def sample_fbp_dense(
     angles: torch.Tensor,
     device: torch.device,
 ):
-    intensities = sample_intensities(x.shape[0], device=device) / N_ANGLES / N_BINS_HR
+    total_intensities = sample_intensities(x.shape[0], device=device)
+    intensities = total_intensities / N_ANGLES / N_BINS_HR
     intensities = intensities.reshape(-1, 1, 1, 1).expand(-1, -1, len(angles), -1)
     counts_lr = sample_observations(x, intensities, angles)
     intensities_lr = intensities * 2
     sino = sinogram_from_counts(counts_lr, intensities_lr, L).clip(0)
-    out = fbp(sino, angles).clip(0, 1)
-    return out, intensities_lr[:, 0, 0, 0]
+    out = fbp(sino, angles).clip(0, 1).to(device)
+    return out, total_intensities
 
 
 def sample_fbp_sparse(
     images: torch.Tensor,
+    device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    intensities = sample_intensities(len(images)) / N_ANGLES / N_BINS_HR
+    total_intensities = sample_intensities(len(images))
     n_angles = np.random.randint(1, N_ANGLES + 1, (len(images),))
     split_indices = np.cumsum(n_angles[:-1])
     total = int(n_angles.sum())
     angle_sets = np.split(np.random.rand(total) * ANGULAR_RANGE, split_indices)
-    fbp, intensities = forward_and_fbp_2d(images, angle_sets, intensities.tolist(), l=L)
+    fbp = forward_and_fbp_2d(images, angle_sets, total_intensities.tolist(), l=L)
     return (
-        fbp,
-        intensities,
-        torch.tensor(n_angles, device=images.device),
+        fbp.to(device),
+        total_intensities.to(device),
+        torch.tensor(n_angles, device=device),
     )
 
 
 def build_unet(sparse: bool = False, dropout: float = 0.37) -> UNet2DModel:
-    # Same architecture as training (uqct.training.unet: main)
     channels = (128, 128, 256, 256, 512, 512)
     down_block_types = (
         "DownBlock2D",
@@ -138,33 +147,33 @@ def save_ckpt(
 
 def loss_fn(
     x: torch.Tensor,
-    fbp: torch.Tensor,
-    I_0: torch.Tensor,
+    fbps: torch.Tensor,
+    total_intensities: torch.Tensor,
     unet: UNet2DModel,
     n_angles: torch.Tensor | None = None,
 ) -> torch.Tensor:
     x = x * 2.0 - 1.0
-    fbp = fbp * 2.0 - 1.0
-    if fbp.ndim == 3:
-        fbp.unsqueeze_(1)
+    fbps = fbps * 2.0 - 1.0
+    if fbps.ndim == 3:
+        fbps.unsqueeze_(1)
     if x.ndim == 3:
         x.unsqueeze_(1)
 
     _n_angles = n_angles if n_angles is not None else N_ANGLES
-    exposure_norm = (
-        (I_0 * _n_angles * N_BINS_HR - 2 * MIN_TOTAL_INTENSITY)
-        / (2 * (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY))
+    total_intensities_norm = (
+        (total_intensities - MIN_TOTAL_INTENSITY)
+        / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
         * 999
-    )  # [0, 999]
+    )
 
     if n_angles is None:
         pred = unet(
-            fbp,
-            timestep=exposure_norm.flatten(),
+            fbps,
+            timestep=total_intensities_norm.flatten(),
             return_dict=False,
         )[0]
     else:
-        pred = unet(fbp, exposure_norm, class_labels=_n_angles - 1)[0]
+        pred = unet(fbps, total_intensities_norm, class_labels=_n_angles - 1)[0]
     x_lr = F.interpolate(x, size=pred.shape[-2:], mode="area")  # 256x256 -> 128x128
     return F.mse_loss(pred, x_lr)
 
@@ -226,7 +235,7 @@ def load_model_ckpt(
 @click.option(
     "--sparse",
     is_flag=True,
-    default=True,
+    default=False,
     help="Train for the sparse setting (dense if omitted).",
 )
 def main(**kwargs):
@@ -271,10 +280,10 @@ def main(**kwargs):
     # Create U-Net
     unet = build_unet(kwargs["sparse"], kwargs["dropout"])
     unet = unet.to(device)  # type: ignore
-    try:
-        unet: UNet2DModel = torch.compile(unet)  # type: ignore
-    except Exception:
-        print("Failed to compile U-Net")
+    # try:
+    #     unet: UNet2DModel = torch.compile(unet)  # type: ignore
+    # except Exception:
+    #     print("Failed to compile U-Net")
 
     # Split train set into training and validation subset
     dataset_size = len(train_set)
@@ -342,11 +351,11 @@ def main(**kwargs):
                 enabled=(device.type == "cuda"),
             ):
                 if kwargs["sparse"]:
-                    fbp, I_0, n_angles = sample_fbp_sparse(x)
-                    loss = loss_fn(x, fbp, I_0, unet, n_angles)
+                    fbp, intensities, n_angles = sample_fbp_sparse(x, device)
+                    loss = loss_fn(x, fbp, intensities, unet, n_angles)
                 else:
-                    fbp, I_0 = sample_fbp_dense(x, angles, device)
-                    loss = loss_fn(x, fbp, I_0, unet)
+                    fbp, intensities = sample_fbp_dense(x, angles, device)
+                    loss = loss_fn(x, fbp, intensities, unet)
 
             if not torch.isfinite(loss):
                 print("Non-finite loss, skipping batch.")
@@ -379,11 +388,11 @@ def main(**kwargs):
                     enabled=(device.type == "cuda"),
                 ):
                     if kwargs["sparse"]:
-                        fbp, I_0, n_angles = sample_fbp_sparse(x)
-                        vloss = loss_fn(x, fbp, I_0, unet, n_angles)
+                        fbp, intensities, n_angles = sample_fbp_sparse(x)
+                        vloss = loss_fn(x, fbp, intensities, unet, n_angles)
                     else:
-                        fbp, I_0 = sample_fbp_dense(x, angles, device)
-                        vloss = loss_fn(x, fbp, I_0, unet)
+                        fbp, intensities = sample_fbp_dense(x, angles, device)
+                        vloss = loss_fn(x, fbp, intensities, unet)
                 val_losses.append(vloss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))
         writer.add_scalar("val/loss_epoch", mean_val_loss, epoch)

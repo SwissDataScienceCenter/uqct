@@ -774,13 +774,13 @@ def fbp_single_from_forward(
 def forward_and_fbp_2d(
     image: torch.Tensor,
     angle_sets: list[np.ndarray],
-    intensities: list[float],
+    total_intensities: list[float],
     filter_name: Literal[
         "ramp", "shepp-logan", "cosine", "hamming", "hann", None
     ] = "ramp",
     circle: bool = True,
     l: int = 5,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
     TODO
 
@@ -790,18 +790,17 @@ def forward_and_fbp_2d(
     image = image.squeeze(1)
     radons = forward_angle_sets_2d(image, angle_sets)
     fbps = list()
-    intensities_lr = list()
+    n_bins = radons[0].shape[-1]
     for i, radon in enumerate(radons):
         n_angles = len(angle_sets[i])
-        intensity = intensities[i]
-        scale = l / image.shape[-1]
+        intensity = total_intensities[i] / n_angles / n_bins
+        scale = l / n_bins
 
         counts = poisson(intensity * torch.exp(-scale * radon))  # (n_angles, 256)
         counts_lr = counts.view(n_angles, image.shape[-1] // 2, 2).sum(
             -1
         )  # (n_angles, 128)
         intensity_lr = intensity * 2
-        intensities_lr.append(intensity_lr)
         sino = sinogram_from_counts(counts_lr, intensity_lr, l).clamp_min_(
             0
         )  # (n_angles, 128)
@@ -818,9 +817,7 @@ def forward_and_fbp_2d(
             circle=circle,
         ).clip(0, 1)
         fbps.append(fbp)
-    return torch.stack(fbps).to(image.device), torch.tensor(
-        intensities_lr, device=image.device
-    )
+    return torch.stack(fbps).to(image.device)
 
 
 def fbp_2d(
