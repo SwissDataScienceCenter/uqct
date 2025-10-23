@@ -60,10 +60,10 @@ def sample_fbp_sparse(
     split_indices = np.cumsum(n_angles[:-1])
     total = int(n_angles.sum())
     angle_sets = np.split(np.random.rand(total) * ANGULAR_RANGE, split_indices)
-    fbp, I_0 = forward_and_fbp_2d(images, angle_sets, intensities.tolist(), l=L)
+    fbp, intensities = forward_and_fbp_2d(images, angle_sets, intensities.tolist(), l=L)
     return (
         fbp,
-        I_0,
+        intensities,
         torch.tensor(n_angles, device=images.device),
     )
 
@@ -152,8 +152,8 @@ def loss_fn(
 
     _n_angles = n_angles if n_angles is not None else N_ANGLES
     exposure_norm = (
-        (I_0 * _n_angles * N_BINS_HR - MIN_TOTAL_INTENSITY)
-        / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
+        (I_0 * _n_angles * N_BINS_HR - 2 * MIN_TOTAL_INTENSITY)
+        / (2 * (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY))
         * 999
     )  # [0, 999]
 
@@ -226,7 +226,7 @@ def load_model_ckpt(
 @click.option(
     "--sparse",
     is_flag=True,
-    default=False,
+    default=True,
     help="Train for the sparse setting (dense if omitted).",
 )
 def main(**kwargs):

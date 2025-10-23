@@ -58,7 +58,6 @@ def poisson(input):
     """
     if torch.max(input) > 1e9 and input.device.type != "cpu":
         # https://github.com/pytorch/pytorch/issues/86782
-        # print(f"Warning: Sampling from poisson distribution with max value {torch.max(input):.2e}, sampling on cpu to avoid incorrect results")
         return torch.poisson(input.cpu()).to(input.device)
     return torch.poisson(input)
 
@@ -245,7 +244,7 @@ def fbp(
     if astra_radon_image.dtype not in (torch.float32, torch.float64):
         astra_radon_image = astra_radon_image.float()
     # ASTRA expects CPU-linked arrays
-    astra_radon_image = astra_radon_image.contiguous()  # .cpu()
+    astra_radon_image = astra_radon_image.cpu().contiguous()  # .cpu()
 
     B, _, N = astra_radon_image.shape
 
@@ -253,15 +252,18 @@ def fbp(
     sino_filt = _apply_filter_batch(astra_radon_image, filter_name)  # (B, M, N)
 
     # Reorder for ASTRA: (n_det_rows, n_angles, n_det_cols)
-    sino_3d = sino_filt.permute(
-        0, 2, 1
-    ).contiguous()  # torch tensor (B, N, M) CPU float
+    sino_3d = (
+        sino_filt.permute(0, 2, 1).cpu().contiguous()
+    )  # torch tensor (B, N, M) CPU float
 
     # Preallocate output and link both
-    vol = torch.zeros(
-        (B, sino_size[-1], sino_size[-1]),
-        dtype=torch.float32,
-        device=astra_radon_image.device,
+    vol = (
+        torch.zeros(
+            (B, sino_size[-1], sino_size[-1]),
+            dtype=torch.float32,
+        )
+        .cpu()
+        .contiguous()
     )
 
     sino_id = astra.data3d.link("-sino", proj_geom_3d, sino_3d)
@@ -285,9 +287,7 @@ def fbp(
     vol.mul_(float(scale))
 
     if circle:
-        mask = _circular_mask(
-            sino_size[-1], device=vol.device, dtype=vol.dtype
-        )  # (H,W)
+        mask = circular_mask(sino_size[-1], device=vol.device, dtype=vol.dtype)  # (H,W)
         vol *= mask.unsqueeze(0)
 
     out = vol[0] if single else vol
@@ -349,19 +349,61 @@ class Experiment:
         angles: torch.Tensor,
         sparse: bool,
     ):
+        def _broadcast_dim(a: int, b: int, label: str) -> int:
+            if a == b or a == 1 or b == 1:
+                return a if a != 1 else b
+            raise ValueError(
+                f"Incompatible {label} dimensions for counts {counts.shape} and intensities {intensities.shape}"
+            )
+
+        trailing_dims = 2 if sparse else 3
+        if counts.ndim < trailing_dims or intensities.ndim < trailing_dims:
+            raise ValueError(
+                f"Counts {counts.shape} and intensities {intensities.shape} are not compatible "
+                f"with sparse={sparse}"
+            )
+
+        try:
+            torch.broadcast_shapes(
+                counts.shape[:-trailing_dims], intensities.shape[:-trailing_dims]
+            )
+        except RuntimeError as exc:
+            raise ValueError(
+                f"Incompatible batch dimensions for counts {counts.shape} and intensities {intensities.shape}"
+            ) from exc
+
+        if sparse:
+            n_angles = _broadcast_dim(counts.shape[-2], intensities.shape[-2], "angle")
+            _broadcast_dim(counts.shape[-1], intensities.shape[-1], "detector")
+        else:
+            _broadcast_dim(counts.shape[-3], intensities.shape[-3], "time")
+            n_angles = _broadcast_dim(counts.shape[-2], intensities.shape[-2], "angle")
+            _broadcast_dim(counts.shape[-1], intensities.shape[-1], "detector")
+
+        if angles.ndim != 1 or angles.shape[0] != n_angles:
+            raise ValueError(
+                f"Angles shape {angles.shape} does not match broadcasted angle dimension {n_angles}"
+            )
         self.angles = angles
         self.intensities = intensities
         self.counts = counts
         if sparse:
-            self.total_exposure = intensities.sum((-2, -1))
+            self.total_exposure = intensities.sum((-2, -1)) * self.counts.shape[-1]
             self.batch_dims = counts.shape[:-2]
         else:
-            self.total_exposure = intensities.sum((-3, -2, -1))
+            self.total_exposure = intensities.sum((-3, -2, -1)) * self.counts.shape[-1]
             self.batch_dims = counts.shape[:-3]
         self.sparse = sparse
 
     def __str__(self) -> str:
-        return f"Experiments:\n\nsparse: {self.sparse}\n\tintensities: {self.intensities}\n\ncounts: {self.counts}\n\tangles: {self.angles}"
+        return f"Experiment:\n\tsparse: {self.sparse}\n\tintensities: {self.intensities}\n\tcounts: {self.counts}\n\tangles: {self.angles}"
+
+    def to(self, device: torch.device) -> "Experiment":
+        self.angles = self.angles.to(device)
+        self.intensities = self.intensities.to(device)
+        self.counts = self.counts.to(device)
+        self.total_exposure = self.total_exposure.to(device)
+        return self
 
 
 def get_astra_geometry_3d(
@@ -583,7 +625,7 @@ def _apply_filter_batch(
     return sino_filt[0] if single else sino_filt
 
 
-def _circular_mask(img_size: int, device=None, dtype=torch.float32) -> torch.Tensor:
+def circular_mask(img_size: int, device=None, dtype=torch.float32) -> torch.Tensor:
     device = device or torch.device("cpu")
     yy, xx = torch.meshgrid(
         torch.arange(img_size, device=device),
@@ -674,7 +716,6 @@ def forward_angle_sets_2d(
     return results
 
 
-@torch.no_grad()
 def fbp_single_from_forward(
     vol_geom: dict[str, Any],
     proj_geom: dict[str, Any],
@@ -725,7 +766,7 @@ def fbp_single_from_forward(
 
     vol_t = torch.from_numpy(vol_np).to(out_device)
     if circle:
-        vol_t *= _circular_mask(im_size, device=vol_t.device, dtype=vol_t.dtype).bool()
+        vol_t *= circular_mask(im_size, device=vol_t.device, dtype=vol_t.dtype).bool()
     return vol_t
 
 
@@ -748,12 +789,11 @@ def forward_and_fbp_2d(
     """
     image = image.squeeze(1)
     radons = forward_angle_sets_2d(image, angle_sets)
-    fbps = []
-    I_0s = []
+    fbps = list()
+    intensities_lr = list()
     for i, radon in enumerate(radons):
         n_angles = len(angle_sets[i])
         intensity = intensities[i]
-        I_0s.append(intensity)
         scale = l / image.shape[-1]
 
         counts = poisson(intensity * torch.exp(-scale * radon))  # (n_angles, 256)
@@ -761,6 +801,7 @@ def forward_and_fbp_2d(
             -1
         )  # (n_angles, 128)
         intensity_lr = intensity * 2
+        intensities_lr.append(intensity_lr)
         sino = sinogram_from_counts(counts_lr, intensity_lr, l).clamp_min_(
             0
         )  # (n_angles, 128)
@@ -777,10 +818,11 @@ def forward_and_fbp_2d(
             circle=circle,
         ).clip(0, 1)
         fbps.append(fbp)
-    return torch.stack(fbps).to(image.device), torch.tensor(I_0s, device=image.device)
+    return torch.stack(fbps).to(image.device), torch.tensor(
+        intensities_lr, device=image.device
+    )
 
 
-@torch.no_grad()
 def fbp_2d(
     angle_sets: list[np.ndarray],
     intensities: list[float] | list[torch.Tensor],
@@ -796,12 +838,16 @@ def fbp_2d(
     """
     fbps = []
     for angle_set_i, counts_i, intensity_i in zip(angle_sets, counts, intensities):
+        if not isinstance(intensity_i, torch.Tensor):
+            intensity_i = torch.tensor(intensity_i)
+        print(f"{intensity_i=}")
         sino = sinogram_from_counts(
-            counts_i, torch.tensor(intensity_i, device=counts_i.device)
+            counts_i, intensity_i.clone().to(counts_i.device)
         ).clamp_min(0)
         proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(
             angle_set_i, counts_i.shape[-1]
         )
+        print(f"{sino=}")
         fbp = fbp_single_from_forward(
             vol_geom=vol_geom_lr,
             proj_geom=proj_geom_lr,
