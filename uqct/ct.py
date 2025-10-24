@@ -78,31 +78,6 @@ def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
     return poisson(exposure * torch.exp(-scale * projections))
 
 
-def pearson_chi_square(
-    images: torch.Tensor,
-    counts: torch.Tensor,
-    intensities: torch.Tensor,
-    angles: torch.Tensor,
-    l: int = 5,
-) -> torch.Tensor:
-    """Element-wise Pearson chi-squared statistic, not summed.
-
-        (counts - lam)^2 /  stop_grad(lam).
-
-    Arguments:
-        images (torch.Tensor): (..., width, height)
-        counts (torch.Tensor): (..., n_angles, n_detectors)
-        intensities (torch.Tensor): (..., n_angles, 1)
-        angles (torch.Tensor): (n_angles)
-        l: (int)
-    Returns:
-        torch.Tensor: (..., n_angles, side_length)
-    """
-    log_lam_ = log_lam(images, counts, intensities, angles, l)
-    lam = torch.exp(log_lam_)
-    return (counts - lam) ** 2 / lam.detach()
-
-
 def nll(
     images: torch.Tensor,
     counts: torch.Tensor,
@@ -152,8 +127,8 @@ def log_lam(
     sino = radon(images.contiguous(), angles).clip(1e-9)
     scale = l / images.shape[-1]
 
-    log_lam = (torch.log(intensities) - scale * sino).double()
-    return log_lam
+    log_lam_ = (torch.log(intensities) - scale * sino).double()
+    return log_lam_
 
 
 def nll_mixture(
@@ -306,11 +281,11 @@ def sample_observations(
     Important: Images should be high-res images to avoid inverse crime.
 
     Arguments:
-        images (torch.Tensor): (..., H, W)
-        intensities (torch.Tensor): (..., n_angles, 1)
-        angles (torch.Tensor): (n_angles,)
+        images (torch.Tensor): `(..., H, W)`
+        intensities (torch.Tensor): `(..., n_angles, 1)`
+        angles (torch.Tensor): `(n_angles,)`
     Returns:
-        counts (torch.Tensor): (..., n_angles, n_detectors)
+        counts (torch.Tensor): `(..., n_angles, n_detectors)`
     """
     scale = l / images.shape[-1]
     sino = radon(images, angles)
@@ -332,14 +307,14 @@ def sinogram_from_counts(
 
 class Experiment:
     """In the dense settings we have
-        counts (torch.Tensor): (..., T, n_angles, n_detectors)
-        intensities (torch.Tensor): (..., T, n_angles, 1)
-        angles (torch.Tensor): (n_angles)
+        counts (torch.Tensor): `(..., T, n_angles, n_detectors)`
+        intensities (torch.Tensor): `(..., T, n_angles, 1)`
+        angles (torch.Tensor): `(n_angles)`
 
     In the sparse setting
-        counts (torch.Tensor): (...,  n_angles, n_detectors)
-        intensities (torch.Tensor): (..., n_angles, 1)
-        angles (torch.Tensor): (n_angles)
+        counts (torch.Tensor): `(...,  n_angles, n_detectors)`
+        intensities (torch.Tensor): `(..., n_angles, 1)`
+        angles (torch.Tensor): `(n_angles)`
     """
 
     def __init__(
@@ -396,7 +371,7 @@ class Experiment:
         self.sparse = sparse
 
     def __str__(self) -> str:
-        return f"Experiment:\n\tsparse: {self.sparse}\n\tintensities: {self.intensities}\n\tcounts: {self.counts}\n\tangles: {self.angles}"
+        return f"Experiment:\n  sparse: {self.sparse}\n  intensities: {self.intensities}\n  counts: {self.counts}\n  angles: {self.angles}"
 
     def to(self, device: torch.device) -> "Experiment":
         self.angles = self.angles.to(device)
@@ -451,8 +426,8 @@ def get_astra_geometry_from_sinogram(
 class AstraParallelOp3D:
     """
     Torch ⇄ ASTRA 3D parallel-beam operator (GPU preferred).
-    Volume: (nz, ny, nx)
-    Sinogram: (n_angles, n_det_y, n_det_x)
+    Volume: `(nz, ny, nx)`
+    Sinogram: `(n_angles, n_det_y, n_det_x)`
     """
 
     def __init__(self, proj_geom: dict[str, Any], vol_geom: dict[str, Any]):
@@ -730,7 +705,7 @@ def fbp_single_from_forward(
     - Filters along detector axis
     - ASTRA 2D BP
     - Scales by number of angles (π/(2·Nθ))
-    Returns: (im_size, im_size) on the SAME device as sino_t.
+    Returns: `(im_size, im_size)` on the SAME device as sino_t.
     """
     if sino_t.ndim != 2:
         raise ValueError("sino_t must be (n_angles, n_det)")
@@ -831,7 +806,7 @@ def fbp_2d(
 ) -> torch.Tensor:
     """
     Arguments:
-        image (torch.Tensor): (B, side_length, side_length)
+        image (torch.Tensor): `(B, side_length, side_length)`
     """
     fbps = []
     for angle_set_i, counts_i, intensity_i in zip(angle_sets, counts, intensities):

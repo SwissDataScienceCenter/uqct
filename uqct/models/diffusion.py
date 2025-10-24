@@ -8,7 +8,15 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import optim
 from tqdm.auto import tqdm
 
-from uqct.ct import Experiment, fbp, fbp_2d, pearson_chi_square, sinogram_from_counts
+from uqct.ct import (
+    Experiment,
+    fbp,
+    fbp_2d,
+    nll,
+    norm_l1,
+    pearson_chi_square,
+    sinogram_from_counts,
+)
 from uqct.debugging import plot_img
 
 DatasetName = Literal["lung", "composite", "lamino"]
@@ -18,16 +26,14 @@ class Diffusion:
     def __init__(
         self,
         dataset: DatasetName,
-        experiment: Experiment,
         num_steps: int = 50,
         buffer: int = 20,
         sgd_steps: int = 100,
-        lr: float = 0.01,
+        lr: float = 0.001,
         batch_size: int = 64,
         verbose: bool = False,
     ):
         self.verbose = verbose
-        self.experiment = experiment
         self.device = (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
@@ -48,7 +54,6 @@ class Diffusion:
         )
 
         # Guidance
-        self.loss_fct = get_guidance_loss_fn(experiment)
         self.sgd_steps = sgd_steps
         self.lr = lr
 
@@ -120,29 +125,40 @@ class Diffusion:
                 x_t, _ = self.step(t, int(target_t.item()), x_t)
             return x_t
 
-    def sample(self, replicates: int = 10) -> torch.Tensor:
-        side_length = self.experiment.counts.shape[-1]
-        if self.experiment.sparse:
-            # (rep, ..., n_angles, side_length, side_length)
+    def sample(
+        self,
+        experiment: Experiment,
+        replicates: int = 10,
+        guidance_loss_fn: Callable | None = None,
+        l2_ball_radius: float = float("inf"),
+    ) -> torch.Tensor:
+        """
+        Returns
+            torch.Tensor: `(..., n_angles, replicates, 1, side_length, side_length)` (sparse) or `(..., n_rounds, replicates, 1, side_length, side_length)` (dense).
+        """
+        # TODO: Try restricting guidance output to a l2-ball around the current mean.
+
+        side_length = experiment.counts.shape[-1]
+        if experiment.sparse:
+            # (rep, ..., n_angles, 1, side_length, side_length)
             x_t = torch.randn(
                 replicates,
-                *self.experiment.batch_dims,
-                self.experiment.counts.shape[-2],
+                *experiment.batch_dims,
+                experiment.counts.shape[-2],
                 side_length,
                 side_length,
                 device=self.device,
             )
-            out_shape = x_t.shape
         else:
             x_t = torch.randn(
                 replicates,
-                *self.experiment.batch_dims,
-                self.experiment.counts.shape[-3],
+                *experiment.batch_dims,
+                experiment.counts.shape[-3],
                 side_length,
                 side_length,
                 device=self.device,
             )
-            out_shape = x_t.shape
+        rep_first_shape = x_t.shape
 
         timesteps = torch.linspace(0, 500, self.num_steps + 1).int()
         it = tqdm(range(self.num_steps), disable=not self.verbose)
@@ -155,17 +171,22 @@ class Diffusion:
             self.noise_scheduler.previous_timestep = lambda _: target_t  # type: ignore
 
             _, x_0_pred, _ = self.predict_x_0(int(t.item()), x_t)
-            x_t = x_0_pred.view(out_shape)
+            x_t = x_0_pred.view(rep_first_shape)
 
-            x_t, guidance_loss, optimizer = guide(
-                x_t,
-                self.loss_fct,
-                sgd_steps=self.sgd_steps,
-                lr=self.lr,
-                optimizer=optimizer,
-                verbose=False,
-            )
-            it.set_postfix({"loss": f"{guidance_loss:.3f}"})
+            if guidance_loss_fn is not None:
+                lr = self.lr
+                if self.num_steps - i < 20:
+                    lr = self.lr * (self.num_steps - i) / 25
+                x_t, guidance_loss, optimizer = guide(
+                    x_t,
+                    guidance_loss_fn,
+                    sgd_steps=self.sgd_steps,
+                    lr=lr,
+                    optimizer=optimizer,
+                    l2_ball_radius=l2_ball_radius,
+                    verbose=False,
+                )
+                it.set_postfix({"loss": f"{guidance_loss:.3f}"})
 
             x_t = self.noise_scheduler.add_noise(
                 x_t,
@@ -175,7 +196,20 @@ class Diffusion:
 
         x_t = self.reverse(x_t, self.buffer, 0, num_steps=self.buffer)
         _, x_t, _ = self.predict_x_0(0, x_t)
-        return denorm_image(x_t).reshape(out_shape)
+        out = denorm_image(x_t).reshape(rep_first_shape)
+
+        # Massage from
+        #    (replicates, ..., n_angles or n_rounds, side_length, side_length)
+        # to (..., n_angles or n_rounds, replicates, 1, side_length, side_length),
+        n_batch_dims = len(experiment.batch_dims)
+        out_perm = (
+            *tuple(range(1, n_batch_dims + 1)),
+            n_batch_dims + 1,
+            0,
+            x_t.ndim - 2,
+            x_t.ndim - 1,
+        )
+        return out.permute(out_perm).unsqueeze(-3)
 
 
 def find_ckpt(dataset: DatasetName) -> Path:
@@ -248,7 +282,7 @@ def get_guidance_loss_fn(
         )
 
         def loss_fn(image: torch.Tensor) -> torch.Tensor:
-            squares = pearson_chi_square(
+            squares = nll(
                 image,
                 experiment.counts.unsqueeze(-3),
                 experiment.intensities.unsqueeze(-3),
@@ -261,9 +295,7 @@ def get_guidance_loss_fn(
         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
 
         def loss_fn(image: torch.Tensor) -> torch.Tensor:
-            return pearson_chi_square(
-                image, counts_csum, intensities_csum, experiment.angles
-            ).mean()
+            return nll(image, counts_csum, intensities_csum, experiment.angles).mean()
 
     return loss_fn
 
@@ -274,6 +306,7 @@ def guide(
     sgd_steps: int = 50,
     lr: float = 0.1,
     optimizer: None | optim.Adam = None,
+    l2_ball_radius: float = float("inf"),
     verbose: bool = False,
 ) -> tuple[torch.Tensor, float, optim.Adam]:
     circle_mask = torch.ones(*x_t.shape[-2:], device=x_t.device)
@@ -313,7 +346,9 @@ def guide(
         loss.backward()
         optimizer.step()
         with torch.no_grad():
+            y.data = project_to_l2_ball(y, y_0, l2_ball_radius)
             y.data[..., ~mask] = 0.0
+
         it.set_postfix({"loss": f"{loss.item():.3f}"})
     optimizer.zero_grad(set_to_none=True)
     x_t_guided = norm_image(y).clip(-1, 1)
@@ -328,6 +363,30 @@ def denorm_image(
     image: torch.Tensor, min_v: float = 0.0, max_v: float = 1.0
 ) -> torch.Tensor:
     return ((image + 1) / 2).clip(min_v, max_v)
+
+
+def project_to_l2_ball(
+    y: torch.Tensor,
+    y_0: torch.Tensor,
+    l2_ball_radius: float | torch.Tensor,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """
+    Project y onto the L2 ball of radius l2_ball_radius centered at y_0,
+    where each sample is a (r, r) block in the last three dimensions.
+
+    Shapes:
+        y, y_0: (..., r, r)  (same shape, broadcast okay if compatible)
+        l2_ball_radius: float or tensor broadcastable to (..., 1, 1)
+
+    Returns:
+        y_proj with the same shape as y.
+    """
+    diff = y - y_0
+    norms = torch.linalg.vector_norm(diff, ord=2, dim=(-2, -1), keepdims=True)
+    scale = torch.clamp(l2_ball_radius / (norms + eps), max=1.0)
+    y_proj = y_0 + diff * scale
+    return y_proj
 
 
 @click.command()
@@ -365,52 +424,36 @@ def main(dataset: DatasetName, sparse: bool):
     n_gt = min(2, len(test_set))
     gt = torch.stack([test_set[i] for i in range(n_gt)], dim=0).to(device)
 
-    n_angles = 60
-    angles = torch.from_numpy(np.linspace(0, 360, n_angles, endpoint=False)).to(device)
-    n_rounds = 5
-    total_intensity_rounds = torch.logspace(4, 9, n_rounds).to(device)
-    n_detectors = gt.shape[-1] // 2
+    n_angles = 50
+    angles = torch.from_numpy(np.linspace(0, 180, n_angles, endpoint=False)).to(device)
+    total_intensity = 1e5
+    n_detectors_hr = gt.shape[-1]
+    intensities = torch.tensor(total_intensity, device=device)
     if sparse:
-        intensities = total_intensity_rounds.sum().view(1, 1, 1, 1).expand(
-            -1, -1, n_angles, -1
-        ) / (n_angles * n_detectors)
-        counts = sample_observations(gt, intensities / 2, angles)
+        intensities = intensities.view(1, 1, 1).expand(-1, n_angles, -1) / (
+            n_angles * n_detectors_hr
+        )
     else:
-        intensities = total_intensity_rounds.view(1, n_rounds, 1, 1).expand(
-            -1, -1, n_angles, -1
-        ) / (n_angles * n_detectors)
-        counts = sample_observations(gt, intensities / 2, angles)
-
-    experiment = Experiment(counts, intensities, angles, sparse)
+        n_rounds = 5
+        intensities = intensities.view(1, 1, 1, 1).expand(
+            -1, n_rounds, n_angles, -1
+        ) / (n_angles * n_detectors_hr * n_rounds)
+    counts = sample_observations(gt, intensities, angles)
+    intensities_lr = intensities * 2
+    experiment = Experiment(counts, intensities_lr, angles, sparse)
     diffusion = Diffusion(
         dataset,
-        experiment,
         num_steps=50,
         buffer=10,
         sgd_steps=100,
-        lr=0.01,
+        lr=0.001,
         verbose=True,
     )
 
-    if sparse:
-        angle_sets = n_gt * [angles[:i].cpu().numpy() for i in range(1, n_angles + 1)]
-        counts_separate = []
-        for i in range(n_gt):
-            for j in range(1, n_angles + 1):
-                counts_separate.append(counts[i, :, :j].reshape(-1, n_detectors))
-        fbps = fbp_2d(
-            angle_sets,
-            n_gt * intensities.flatten().tolist(),
-            counts_separate,
-        )
-    else:
-        sino = sinogram_from_counts(counts.cumsum(-3), intensities.cumsum(-3))
-        fbps = fbp(sino, angles).clip(0, 1)  # shape: (2, 10, 128, 128)
-        plot_img(*fbps.reshape(-1, 128, 128), share_range=True)
-
-    sample = diffusion.sample(1)
-    print(sample.shape)
-    plot_img(*sample.reshape(-1, 128, 128), share_range=True)
+    guidance_loss_fn = get_guidance_loss_fn(experiment)
+    sample = diffusion.sample(experiment, 3, guidance_loss_fn, 256 * 0.1)
+    print(sample)
+    plot_img(*gt, *sample.reshape(-1, 128, 128), share_range=True)
 
 
 if __name__ == "__main__":

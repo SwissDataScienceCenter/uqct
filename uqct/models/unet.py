@@ -2,28 +2,30 @@ from __future__ import annotations
 
 import math
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
 import torch
+from diffusers.models.unets.unet_2d import UNet2DModel
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm.auto import tqdm
+
 from uqct.ct import (
     Experiment,
+    circular_mask,
     fbp,
     sample_observations,
     sinogram_from_counts,
-    circular_mask,
 )
-from torch.utils.data import TensorDataset, DataLoader
 from uqct.datasets.utils import DatasetName, get_dataset
-from uqct.utils import get_checkpoint_dir
 from uqct.training.unet import (
     MAX_TOTAL_INTENSITY,
     MIN_TOTAL_INTENSITY,
-    N_ANGLES,
-    N_BINS_HR,
     build_unet,
     sample_intensities,
 )
+from uqct.utils import get_checkpoint_dir
 
 
 class FBPUNetEnsemble:
@@ -73,30 +75,33 @@ class FBPUNetEnsemble:
         *,
         out_device: torch.device | None = None,
         aggregate: Literal["none", "mean", "median"] = "mean",
+        verbose: bool = False,
     ) -> torch.Tensor:
         """
         Generate ensemble predictions for an `Experiment`.
 
         Parameters
         ----------
-        experiment : Experiment
+        `experiment` : `Experiment`
             Experiment providing the measurement tensors required for inference.
-        out_device : torch.device | None
+        `out_device` : `torch.device | None`
             Target device for the output tensor. Defaults to each model's configured output device.
-        aggregate : Literal["none", "mean", "median"]
+        `aggregate` : `Literal["none", "mean", "median"]`
             Aggregation strategy applied across ensemble members.
+        `verbose` : `bool`
+            Whether to show a progress bar.
 
         Returns
         -------
-        torch.Tensor
-            Tensor of shape `(..., rounds, M, 1, H, W)` (dense) or `(..., M, 1, H, W)` (sparse) when `aggregate="none"` with `M`
-            ensemble members, otherwise `(..., rounds, 1, H, W)` (dense) or `(..., 1, H, W)` (sparse) after aggregation, all values clipped to `[0, 1]`.
+        `torch.Tensor`
+            Tensor of shape `(..., rounds, M, 1, H, W)` (dense) or `(..., M, 1, H, W)` (sparse) when `aggregate="none"` with `M` ensemble members, otherwise `(..., rounds, 1, H, W)` (dense) or `(..., 1, H, W)` (sparse) after aggregation, all values clipped to `[0, 1]`.
         """
         fbp_lr, intensity_lr, class_labels = FBPUNet._prepare_inputs_from_experiment(
             experiment
         )
         preds = []
-        for unet in self.unets:
+        pbar = tqdm(self.unets) if verbose else self.unets
+        for unet in pbar:
             preds.append(
                 unet._predict_from_tensors(
                     fbp_lr, intensity_lr, class_labels, out_device=out_device
@@ -138,15 +143,8 @@ class FBPUNet:
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         unet = build_unet(sparse).to(device)  # type: ignore
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        sd = ckpt["unet"]
-        if any(k.startswith("_orig_mod.") for k in sd.keys()):
-            sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
-        unet.load_state_dict(sd, strict=True)
-        if verbose:
-            print(
-                f"Loaded checkpoint: epoch={ckpt.get('epoch', '?')}, val_loss={ckpt.get('val_loss', '?')}"
-            )
+        load_unet_ckpt(unet, ckpt_path, verbose)
+
         self.unet = unet.eval()  # inference only
         self.sparse = sparse
         self.batch_size = batch_size
@@ -330,7 +328,21 @@ class FBPUNet:
         )
 
 
+def load_unet_ckpt(unet: UNet2DModel, ckpt_path: Path, verbose: bool = False) -> None:
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    sd = ckpt["unet"]
+    if any(k.startswith("_orig_mod.") for k in sd.keys()):
+        sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
+    unet.load_state_dict(sd, strict=True)
+    if verbose:
+        print(
+            f"Loaded checkpoint: epoch={ckpt.get('epoch', '?')}, val_loss={ckpt.get('val_loss', '?')}"
+        )
+
+
 if __name__ == "__main__":
+    from uqct.debugging import plot_img
+
     try:
         import lovely_tensors as lt
 
@@ -345,7 +357,7 @@ if __name__ == "__main__":
         angles_cpu = angles.to("cpu")
         batch = samples_cpu.shape[0]
         intensities = sample_intensities(batch, device=samples_cpu.device) / (
-            N_ANGLES * N_BINS_HR
+            len(angles) * samples.shape[-1]
         )
         intensities = intensities.reshape(-1, 1, 1, 1).expand(-1, 1, len(angles_cpu), 1)
         counts = sample_observations(samples_cpu, intensities, angles_cpu)
@@ -370,7 +382,7 @@ if __name__ == "__main__":
 
         try:
             intensities = sample_intensities(batch, device=samples_cpu.device) / (
-                N_ANGLES * N_BINS_HR
+                len(angles) * samples.shape[-1]
             )
             intensities = intensities.reshape(-1, 1, 1, 1).expand(
                 -1, 1, len(angles_cpu), 1
@@ -384,14 +396,14 @@ if __name__ == "__main__":
         return Experiment(counts, intensities_lr, angles_cpu, sparse=True)
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    model_label = "sparse"
-    dataset = "lung"
+    model_label = "dense"
+    dataset = "lamino"
 
     _, test_set = get_dataset(dataset, True)
     num_examples = min(10, len(test_set))
 
     gt = torch.stack([test_set[i] for i in range(num_examples)], dim=0).to(device)
-    angles = torch.from_numpy(np.linspace(0, 180, 50, endpoint=False))
+    angles = torch.from_numpy(np.linspace(0, 180, 200, endpoint=False))
 
     ckpt_dir = get_checkpoint_dir()
     ckpt_path = (
@@ -407,6 +419,30 @@ if __name__ == "__main__":
     else:
         exp = build_dense_experiment(gt, angles)
     exp.to(device)
-    model = FBPUNetEnsemble("lung", model_label == "sparse")
-    preds = model.predict(exp, aggregate="none")
+    model = FBPUNetEnsemble("lung", model_label == "sparse", batch_size=32)
+
+    # # TODO: Remove
+    # model = FBPUNet(dataset, 0, model_label == "sparse")
+    # ckpt_path = Path(
+    #     "runs/unet_dense/2025-10-23_20-24_lamino_48_500_3e-05_0.37_0.0043_0/ckpts/best.pt"
+    # )
+    # assert ckpt_path.exists()
+    # load_unet_ckpt(model.unet, ckpt_path)
+
+    gt_lr = torch.nn.functional.interpolate(gt, (128, 128), mode="area")
+    # fbps, _, _ = model._prepare_inputs_from_experiment(exp)
+    preds = model.predict(exp, aggregate="none", verbose=True)
     print(preds)
+    breakpoint()
+
+    # fbps = fbps.view(gt_lr.shape).to(device)
+    # preds = preds.view(gt_lr.shape)
+    # l1_pred = torch.nn.functional.l1_loss(preds, gt_lr)
+    # l1_fbp = torch.nn.functional.l1_loss(fbps, gt_lr)
+    # print(f"Performance: {l1_pred=}, {l1_fbp=}")
+    #
+    # plot_img(
+    #     *preds[:, 0],
+    #     *fbps[:, 0],
+    #     *gt,
+    # )
