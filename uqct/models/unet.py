@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import numpy as np
 import torch
@@ -36,6 +36,7 @@ class FBPUNetEnsemble:
         *,
         batch_size: int = 64,
         num_workers: int = 4,
+        device: torch.device = torch.device("cpu"),
     ) -> None:
         self.dataset = dataset
         self.sparse = sparse
@@ -49,6 +50,7 @@ class FBPUNetEnsemble:
                 sparse,
                 batch_size=batch_size,
                 num_workers=num_workers,
+                model_device=device,
             )
 
         with ThreadPoolExecutor() as executor:
@@ -61,6 +63,12 @@ class FBPUNetEnsemble:
             )
         else:
             self._device = torch.device("cpu")
+
+    def reinit(self, dataset: DatasetName, sparse: bool) -> Self:
+        self.__init__(
+            dataset, sparse, batch_size=self.batch_size, num_workers=self.num_workers
+        )
+        return self
 
     def to(self, device: torch.device | str) -> FBPUNetEnsemble:
         target = torch.device(device)
@@ -101,12 +109,18 @@ class FBPUNetEnsemble:
         )
         preds = []
         pbar = tqdm(self.unets) if verbose else self.unets
+        maybe_cuda = (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
         for unet in pbar:
+            prev_device = unet.unet.device
+            unet.to(maybe_cuda)
             preds.append(
                 unet._predict_from_tensors(
                     fbp_lr, intensity_lr, class_labels, out_device=out_device
                 )
             )
+            unet.to(prev_device)
 
         stacked = torch.stack(preds, dim=-4)
         if stacked.dtype == torch.float16 and stacked.device.type == "cpu":
@@ -129,6 +143,7 @@ class FBPUNet:
         *,
         batch_size: int = 64,
         num_workers: int = 4,
+        model_device: torch.device = torch.device("cpu"),
         out_device: torch.device | None = None,
         verbose: bool = False,
     ) -> None:
@@ -141,8 +156,7 @@ class FBPUNet:
         prefix = f"unet_{label}_128_{dataset}_{member}"
         ckpt_path = ckpt_dir / f"{prefix}.pt"
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        unet = build_unet(sparse).to(device)  # type: ignore
+        unet = build_unet(sparse).to(model_device)  # type: ignore
         load_unet_ckpt(unet, ckpt_path, verbose)
 
         self.unet = unet.eval()  # inference only
@@ -150,6 +164,10 @@ class FBPUNet:
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.out_device = out_device
+
+    def to(self, device: torch.device) -> "FBPUNet":
+        self.unet.to(device)  # type: ignore
+        return self
 
     @staticmethod
     def _prepare_inputs_from_experiment(
@@ -193,7 +211,8 @@ class FBPUNet:
             fbp_i = fbp(sino_i, angles_i)
             fbps.append(fbp_i)
             intensities.append(intensities_i.sum((-2, -1)))
-        fbps = torch.stack(fbps, dim=-4)
+        fbps = torch.stack(fbps, dim=-4).clamp(0, 1)
+        fbps.mul_(circular_mask(fbps.shape[-1]))
         intensities = torch.stack(intensities, dim=-2) * experiment.counts.shape[-1]
         class_labels = (
             torch.arange(1, num_angles + 1)
@@ -254,7 +273,7 @@ class FBPUNet:
             dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            pin_memory=(device.type == "cuda"),
+            pin_memory=False,
         )
 
         preds = []
@@ -291,9 +310,7 @@ class FBPUNet:
             preds.append(pred)
 
         out = torch.cat(preds, dim=0).view(out_shape)
-
         out.mul_(circular_mask(out_shape[-1]).to(out.device))
-
         return out
 
     def predict(
@@ -351,26 +368,31 @@ if __name__ == "__main__":
         pass
 
     def build_dense_experiment(
-        samples: torch.Tensor, angles: torch.Tensor
+        images: torch.Tensor, angles: torch.Tensor, n_rounds: int = 10
     ) -> Experiment:
-        samples_cpu = samples.to("cpu")
+        samples_cpu = images.to("cpu")
         angles_cpu = angles.to("cpu")
         batch = samples_cpu.shape[0]
-        intensities = sample_intensities(batch, device=samples_cpu.device) / (
-            len(angles) * samples.shape[-1]
+        intensities = sample_intensities(
+            batch,
+            MIN_TOTAL_INTENSITY * n_rounds,
+            MAX_TOTAL_INTENSITY,
+            device=samples_cpu.device,
+        ) / (n_rounds * len(angles) * images.shape[-1])
+        intensities = intensities.view(-1, 1, 1, 1).expand(
+            -1, n_rounds, len(angles), -1
         )
-        intensities = intensities.reshape(-1, 1, 1, 1).expand(-1, 1, len(angles_cpu), 1)
         counts = sample_observations(samples_cpu, intensities, angles_cpu)
-        intensities_lr = (intensities * 2).squeeze(1)
-        return Experiment(counts, intensities_lr.unsqueeze(1), angles_cpu, sparse=False)
+        intensities_lr = intensities * 2
+        return Experiment(counts, intensities_lr, angles_cpu, sparse=False)
 
     def build_sparse_experiment(
-        samples: torch.Tensor,
+        images: torch.Tensor,
         angles: torch.Tensor,
         *,
         seed: int | None = 0,
     ) -> Experiment:
-        samples_cpu = samples.to("cpu")
+        samples_cpu = images.to("cpu")
         angles_cpu = angles.to("cpu")
         batch = samples_cpu.shape[0]
 
@@ -381,9 +403,12 @@ if __name__ == "__main__":
             prev_state = None
 
         try:
-            intensities = sample_intensities(batch, device=samples_cpu.device) / (
-                len(angles) * samples.shape[-1]
-            )
+            intensities = sample_intensities(
+                batch,
+                MIN_TOTAL_INTENSITY * len(angles),
+                MAX_TOTAL_INTENSITY,
+                device=samples_cpu.device,
+            ) / (len(angles) * images.shape[-1])
             intensities = intensities.reshape(-1, 1, 1, 1).expand(
                 -1, 1, len(angles_cpu), 1
             )
@@ -396,11 +421,11 @@ if __name__ == "__main__":
         return Experiment(counts, intensities_lr, angles_cpu, sparse=True)
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    model_label = "dense"
+    model_label = "sparse"
     dataset = "lamino"
 
     _, test_set = get_dataset(dataset, True)
-    num_examples = min(10, len(test_set))
+    num_examples = min(3, len(test_set))
 
     gt = torch.stack([test_set[i] for i in range(num_examples)], dim=0).to(device)
     angles = torch.from_numpy(np.linspace(0, 180, 200, endpoint=False))
@@ -419,30 +444,44 @@ if __name__ == "__main__":
     else:
         exp = build_dense_experiment(gt, angles)
     exp.to(device)
-    model = FBPUNetEnsemble("lung", model_label == "sparse", batch_size=32)
+    gt_lr = torch.nn.functional.interpolate(gt, (128, 128), mode="area")
+
+    model = FBPUNetEnsemble(dataset, model_label == "sparse", batch_size=16)
+    fbps, _, _ = model.unets[0]._prepare_inputs_from_experiment(exp)
+    preds = model.predict(exp, aggregate="mean", verbose=True)
+    print(preds)
+
+    if model_label == "sparse":
+        time_points = (50, 100, 150, 199)
+        preds = preds[:, time_points]
+        fbps = fbps[:, time_points]
+    else:
+        rounds = (0, 3, 6, 9)
+        preds = preds[:, rounds]
+        fbps = fbps[:, rounds]
+    plot_img(
+        *preds.view(-1, 128, 128),
+        *fbps.view(-1, 128, 128),
+        *gt,
+    )
 
     # # TODO: Remove
-    # model = FBPUNet(dataset, 0, model_label == "sparse")
+    model = FBPUNet(dataset, 0, model_label == "sparse")
+    assert ckpt_path.exists()
     # ckpt_path = Path(
-    #     "runs/unet_dense/2025-10-23_20-24_lamino_48_500_3e-05_0.37_0.0043_0/ckpts/best.pt"
+    #     f"runs/unet_dense/2025-10-23_20-24_lamino_48_500_3e-05_0.37_0.0043_{i}/ckpts/best.pt"
     # )
-    # assert ckpt_path.exists()
+    # ckpt_path = Path(
+    #     f""
+    # )
     # load_unet_ckpt(model.unet, ckpt_path)
-
-    gt_lr = torch.nn.functional.interpolate(gt, (128, 128), mode="area")
+    #
     # fbps, _, _ = model._prepare_inputs_from_experiment(exp)
-    preds = model.predict(exp, aggregate="none", verbose=True)
-    print(preds)
-    breakpoint()
-
-    # fbps = fbps.view(gt_lr.shape).to(device)
-    # preds = preds.view(gt_lr.shape)
+    # fbps = fbps.view(-1, 128, 128).to(device)
+    # preds = model.predict(exp)
+    # preds = preds.view(-1, 128, 128).to(device)
+    #
     # l1_pred = torch.nn.functional.l1_loss(preds, gt_lr)
     # l1_fbp = torch.nn.functional.l1_loss(fbps, gt_lr)
     # print(f"Performance: {l1_pred=}, {l1_fbp=}")
-    #
-    # plot_img(
-    #     *preds[:, 0],
-    #     *fbps[:, 0],
-    #     *gt,
-    # )
+    # plot_img(*fbps, *preds, *gt)
