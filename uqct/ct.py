@@ -92,43 +92,20 @@ def nll(
         counts (torch.Tensor): (..., n_angles, n_detectors)
         intensities (torch.Tensor): (..., n_angles, 1)
         angles (torch.Tensor): (n_angles)
-        l: (int)
-    Returns:
-        torch.Tensor: (..., n_angles, side_length)
-    """
-    log_lam_ = log_lam(images, counts, intensities, angles, l)
-    lam = torch.exp(log_lam_)
-    nll = -(counts * log_lam_ - lam - torch.lgamma(counts + 1))
-    return nll
-
-
-def log_lam(
-    images: torch.Tensor,
-    counts: torch.Tensor,
-    intensities: torch.Tensor,
-    angles: torch.Tensor,
-    l: int = 5,
-) -> torch.Tensor:
-    """
-    Arguments:
-        images (torch.Tensor): (..., width, height)
-        counts (torch.Tensor): (..., n_angles, n_detectors)
-        intensities (torch.Tensor): (..., n_angles, 1)
-        angles (torch.Tensor): (n_angles)
-        l: (int)
+        l (int)
     Returns:
         torch.Tensor: (..., n_angles, side_length)
     """
     assert images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1, (
         f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
     )
-
     intensities = intensities.clip(1e-9)
     sino = radon(images.contiguous(), angles).clip(1e-9)
     scale = l / images.shape[-1]
-
     log_lam_ = (torch.log(intensities) - scale * sino).double()
-    return log_lam_
+    lam = torch.exp(log_lam_)
+    nll = -(counts * log_lam_ - lam - torch.lgamma(counts + 1))
+    return nll
 
 
 def nll_mixture(
@@ -219,7 +196,7 @@ def fbp(
     if astra_radon_image.dtype not in (torch.float32, torch.float64):
         astra_radon_image = astra_radon_image.float()
     # ASTRA expects CPU-linked arrays
-    astra_radon_image = astra_radon_image.cpu().contiguous()  # .cpu()
+    astra_radon_image = astra_radon_image.contiguous()
 
     B, _, N = astra_radon_image.shape
 
@@ -227,19 +204,12 @@ def fbp(
     sino_filt = _apply_filter_batch(astra_radon_image, filter_name)  # (B, M, N)
 
     # Reorder for ASTRA: (n_det_rows, n_angles, n_det_cols)
-    sino_3d = (
-        sino_filt.permute(0, 2, 1).cpu().contiguous()
-    )  # torch tensor (B, N, M) CPU float
+    sino_3d = sino_filt.permute(0, 2, 1).contiguous()  # torch tensor (B, N, M) float
 
     # Preallocate output and link both
-    vol = (
-        torch.zeros(
-            (B, sino_size[-1], sino_size[-1]),
-            dtype=torch.float32,
-        )
-        .cpu()
-        .contiguous()
-    )
+    vol = torch.zeros(
+        (B, sino_size[-1], sino_size[-1]), dtype=torch.float32, device=sino_filt.device
+    ).contiguous()
 
     sino_id = astra.data3d.link("-sino", proj_geom_3d, sino_3d)
     vol_id = astra.data3d.link("-vol", vol_geom_3d, vol)
@@ -838,11 +808,12 @@ if __name__ == "__main__":
     n_angles = 200
     n_detectors = r
     rates = 100.0
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-    preds = torch.rand(b, n_pred, r, r)
-    counts = poisson(torch.full((b, n_angles, n_detectors), rates))
-    intensities = torch.rand(n_angles, 1)
-    angles = torch.rand(n_angles) * 180
+    preds = torch.rand(b, n_pred, r, r, device=device)
+    counts = poisson(torch.full((b, n_angles, n_detectors), rates, device=device))
+    intensities = torch.rand(n_angles, 1, device=device)
+    angles = torch.rand(n_angles, device=device) * 180
     nlls = nll_mixture(preds, counts, intensities, angles)
     assert nlls.shape[0] == b and nlls.ndim == 1
     rad = radon(preds, angles)
@@ -860,3 +831,6 @@ if __name__ == "__main__":
         and rad.shape[1] == n_angles
         and rad.shape[2] == n_detectors
     )
+
+    fbp_ = fbp(rad, angles)
+    breakpoint()
