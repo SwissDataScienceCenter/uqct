@@ -212,7 +212,7 @@ class FBPUNet:
             fbps.append(fbp_i)
             intensities.append(intensities_i.sum((-2, -1)))
         fbps = torch.stack(fbps, dim=-4).clamp(0, 1)
-        fbps.mul_(circular_mask(fbps.shape[-1]))
+        fbps.mul_(circular_mask(fbps.shape[-1]).to(fbps.device))
         intensities = torch.stack(intensities, dim=-2) * experiment.counts.shape[-1]
         class_labels = (
             torch.arange(1, num_angles + 1)
@@ -421,7 +421,7 @@ if __name__ == "__main__":
         return Experiment(counts, intensities_lr, angles_cpu, sparse=True)
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    model_label = "sparse"
+    model_label = "dense"
     dataset = "lamino"
 
     _, test_set = get_dataset(dataset, True)

@@ -195,6 +195,7 @@ def fbp(
     astra_radon_image = sino.detach()
     if astra_radon_image.dtype not in (torch.float32, torch.float64):
         astra_radon_image = astra_radon_image.float()
+
     # ASTRA expects CPU-linked arrays
     astra_radon_image = astra_radon_image.contiguous()
 
@@ -204,21 +205,23 @@ def fbp(
     sino_filt = _apply_filter_batch(astra_radon_image, filter_name)  # (B, M, N)
 
     # Reorder for ASTRA: (n_det_rows, n_angles, n_det_cols)
-    sino_3d = sino_filt.permute(0, 2, 1).contiguous()  # torch tensor (B, N, M) float
+    sino_3d = sino_filt.permute(0, 2, 1)  # torch tensor (B, N, M) float
+
+    # Fix for: BP3D_CUDA crashes with n_angles=1 on CUDA crashes
+    out_device = sino_3d.device
+    if sino_3d.shape[-2] == 1:
+        sino_3d = sino_3d.cpu()
 
     # Preallocate output and link both
+    sino_3d = sino_3d.contiguous()
     vol = torch.zeros(
-        (B, sino_size[-1], sino_size[-1]), dtype=torch.float32, device=sino_filt.device
+        (B, sino_size[-1], sino_size[-1]), dtype=torch.float32, device=out_device
     ).contiguous()
-
     sino_id = astra.data3d.link("-sino", proj_geom_3d, sino_3d)
     vol_id = astra.data3d.link("-vol", vol_geom_3d, vol)
 
     try:
-        try:
-            cfg = astra.astra_dict("BP3D_CUDA")
-        except Exception:
-            cfg = astra.astra_dict("BP3D")
+        cfg = astra.astra_dict("BP3D_CUDA")
         cfg["ReconstructionDataId"] = vol_id
         cfg["ProjectionDataId"] = sino_id
         alg_id = astra.algorithm.create(cfg)
@@ -227,6 +230,7 @@ def fbp(
     finally:
         astra.data3d.delete([sino_id, vol_id])
 
+    vol = vol.to(out_device)
     # Scale to match skimage.iradon
     scale = np.pi / (2.0 * float(N))
     vol.mul_(float(scale))
@@ -416,12 +420,22 @@ class AstraParallelOp3D:
         self, vol_t: torch.Tensor, out_sino_t: torch.Tensor | None = None
     ) -> torch.Tensor:
         # vol_t: (nz, ny, nx)
+
+        # Fix for: FP3D_CUDA crashes with n_angles=1 on CUDA crashes
+        out_device = vol_t.device
+        if self.n_angles == 1:
+            sino_device = torch.device("cpu")
+        else:
+            sino_device = out_device
+
         if out_sino_t is None:
             out_sino_t = torch.empty(
                 (self.n_det_y, self.n_angles, self.n_det_x),
-                device=vol_t.device,
+                device=sino_device,
                 dtype=torch.float32,
             )
+        else:
+            out_sino_t.to(sino_device)
 
         vol_id = astra.data3d.link("-vol", self.vol_geom, vol_t.detach())
         sino_id = astra.data3d.link("-sino", self.proj_geom, out_sino_t.detach())
@@ -433,7 +447,7 @@ class AstraParallelOp3D:
         astra.algorithm.delete(alg_id)
         astra.data3d.delete(sino_id)
         astra.data3d.delete(vol_id)
-        return out_sino_t
+        return out_sino_t.to(out_device)
 
     def adjoint(
         self, sino_t: torch.Tensor, out_vol_t: torch.Tensor | None = None
@@ -443,6 +457,12 @@ class AstraParallelOp3D:
             out_vol_t = torch.zeros(
                 (self.nz, self.ny, self.nx), device=sino_t.device, dtype=torch.float32
             )
+
+        # Fix for: BP3D_CUDA crashes with n_angles=1 on CUDA crashes
+        out_device = sino_t.device
+        if sino_t.shape[-2] == 1:
+            sino_t = sino_t.cpu()
+        sino_t.contiguous()
 
         vol_id = astra.data3d.link("-vol", self.vol_geom, out_vol_t.detach())
         sino_id = astra.data3d.link("-sino", self.proj_geom, sino_t.detach())
@@ -454,7 +474,7 @@ class AstraParallelOp3D:
         astra.algorithm.delete(alg_id)
         astra.data3d.delete(sino_id)
         astra.data3d.delete(vol_id)
-        return out_vol_t
+        return out_vol_t.to(out_device)
 
 
 def make_radon_layer(op: AstraParallelOp3D) -> Callable[[torch.Tensor], torch.Tensor]:
@@ -802,10 +822,11 @@ def fbp_2d(
 
 
 if __name__ == "__main__":
-    b = 2
-    r = 4
+    b = 3
+    r = 128
     n_pred = 5
-    n_angles = 200
+    # n_angles = 200
+    n_angles = 1
     n_detectors = r
     rates = 100.0
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -833,4 +854,3 @@ if __name__ == "__main__":
     )
 
     fbp_ = fbp(rad, angles)
-    breakpoint()
