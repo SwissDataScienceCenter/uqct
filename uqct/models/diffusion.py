@@ -208,18 +208,16 @@ def find_ckpt(dataset: DatasetName) -> Path:
     ckpt_dir_candidates = [
         Path(x) / f"ddpm_unconditional_128_{dataset}.pt"
         for x in (
-            "/mydata/chip/shared/checkpoints/diffusion",
+            "/mydata/chip/shared/checkpoints/uqct/diffusion",
             "checkpoints/diffusion",
             "../checkpoints/diffusion",
         )
     ]
-    ckpt_path = ckpt_dir_candidates[0]
-    for ckpt_path in ckpt_dir_candidates[1:]:
+
+    for ckpt_path in ckpt_dir_candidates:
         if ckpt_path.exists():
-            break
-    if not ckpt_path.exists():
-        raise ValueError(f"Could not find diffusion checkpoint for dataset {dataset}")
-    return ckpt_path
+            return ckpt_path
+    raise ValueError(f"Could not find diffusion checkpoint for dataset {dataset}")
 
 
 def load_unet(ckpt_path: Path) -> UNet2DModel:
