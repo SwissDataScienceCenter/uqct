@@ -33,12 +33,7 @@ class Tomogram(torch.nn.Module):
             image = self.image
 
         if self.circle:
-            # Create a circular mask
-            y, x = torch.meshgrid(
-                torch.linspace(-1, 1, image.shape[-2], device=image.device),
-                torch.linspace(-1, 1, image.shape[-1], device=image.device),
-            )
-            mask = x**2 + y**2 <= 1
+            mask = circular_mask(image.shape[-1], device=image.device, dtype=image.dtype)  # (H,W)
             image = image * mask
         return image
 
@@ -61,21 +56,6 @@ def poisson(input):
         return torch.poisson(input.cpu()).to(input.device)
     return torch.poisson(input)
 
-
-def forward_ct(images, angles, exposure, l=5.0, sinogram_fct=None):
-    """
-    forward model
-    """
-    # batch_dims = images.shape[:-2]
-    projections = (
-        sinogram_fct(images, angles.flatten())
-        if sinogram_fct
-        else radon(images, angles.flatten())
-    )
-
-    scale = l / images.shape[-1]  # Normalize by the image size
-
-    return poisson(exposure * torch.exp(-scale * projections))
 
 
 def nll(
@@ -100,11 +80,9 @@ def nll(
         f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
     )
     intensities = intensities.clip(1e-9)
-    sino = radon(images.contiguous(), angles).clip(1e-9)
+    sino = radon(images, angles)
     scale = l / images.shape[-1]
-    log_lam_ = (torch.log(intensities) - scale * sino).double()
-    lam = torch.exp(log_lam_)
-    nll = -(counts * log_lam_ - lam - torch.lgamma(counts + 1))
+    nll = - counts * (torch.log(intensities) - scale * sino ) + intensities * torch.exp(-scale * sino) + torch.lgamma(counts + 1)
     return nll
 
 
@@ -275,7 +253,7 @@ def sinogram_from_counts(
     Computes the sinogram from the measurements.
     """
     scale = l / counts.shape[-1]  # Normalize by the image size
-    sino = torch.log(counts / intensities + 1e-6) / -scale
+    sino = - torch.log(counts.clip(1e-9) / intensities) / scale
     return sino
 
 
