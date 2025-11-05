@@ -325,6 +325,9 @@ class Experiment:
     def __str__(self) -> str:
         return f"Experiment:\n  sparse: {self.sparse}\n  intensities: {self.intensities}\n  counts: {self.counts}\n  angles: {self.angles}"
 
+    def __repr__(self) -> str:
+        return self.__str__()
+
     def to(self, device: torch.device) -> "Experiment":
         self.angles = self.angles.to(device)
         self.intensities = self.intensities.to(device)

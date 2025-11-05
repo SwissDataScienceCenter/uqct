@@ -211,11 +211,13 @@ class FBPUNet:
             fbp_i = fbp(sino_i, angles_i)
             fbps.append(fbp_i)
             intensities.append(intensities_i.sum((-2, -1)))
-        fbps = torch.stack(fbps, dim=-4).clamp(0, 1)
+        fbps = torch.stack(fbps, dim=-3).clamp(0, 1)
         fbps.mul_(circular_mask(fbps.shape[-1]).to(fbps.device))
-        intensities = torch.stack(intensities, dim=-2) * experiment.counts.shape[-1]
+        intensities = (
+            torch.stack(intensities, dim=-1).unsqueeze(-1) * experiment.counts.shape[-1]
+        )
         class_labels = (
-            torch.arange(1, num_angles + 1)
+            torch.arange(0, num_angles)
             .view(*((intensities.ndim - 2) * (1,)), num_angles)
             .expand(*intensities.shape[:-2], -1)
         )
@@ -251,11 +253,11 @@ class FBPUNet:
         device = next(self.unet.parameters()).device
 
         out_shape = fbp_lr.shape
-        batch_dims = fbp_lr.shape[:-3]
+        batch_dims = fbp_lr.shape[:-2]
         batch_prod = math.prod(batch_dims)
 
-        fbp_lr = fbp_lr.view(batch_prod, *fbp_lr.shape[-3:])
-        total_intensity = total_intensity.view(batch_prod, 1)
+        fbp_lr = fbp_lr.view(batch_prod, 1, *fbp_lr.shape[-2:])
+        total_intensity = total_intensity.flatten()
         if class_labels is not None:
             class_labels = class_labels.flatten()
 
@@ -378,7 +380,8 @@ if __name__ == "__main__":
             MIN_TOTAL_INTENSITY * n_rounds,
             MAX_TOTAL_INTENSITY,
             device=samples_cpu.device,
-        ) / (n_rounds * len(angles) * images.shape[-1])
+        )
+        intensities /= n_rounds * len(angles) * images.shape[-1]
         intensities = intensities.view(-1, 1, 1, 1).expand(
             -1, n_rounds, len(angles), -1
         )
@@ -425,10 +428,11 @@ if __name__ == "__main__":
     dataset = "lamino"
 
     _, test_set = get_dataset(dataset, True)
-    num_examples = min(3, len(test_set))
+    num_examples = min(2, len(test_set))
 
     gt = torch.stack([test_set[i] for i in range(num_examples)], dim=0).to(device)
-    angles = torch.from_numpy(np.linspace(0, 180, 200, endpoint=False))
+    n_angles = 200
+    angles = torch.from_numpy(np.linspace(0, 180, n_angles, endpoint=False))
 
     ckpt_dir = get_checkpoint_dir()
     ckpt_path = (
@@ -453,6 +457,8 @@ if __name__ == "__main__":
 
     if model_label == "sparse":
         time_points = (50, 100, 150, 199)
+        preds = preds.view(num_examples, n_angles, 128, 128)
+        fbps = fbps.view(num_examples, n_angles, 128, 128)
         preds = preds[:, time_points]
         fbps = fbps[:, time_points]
     else:
@@ -460,9 +466,10 @@ if __name__ == "__main__":
         preds = preds[:, rounds]
         fbps = fbps[:, rounds]
     plot_img(
+        *gt,
         *preds.view(-1, 128, 128),
         *fbps.view(-1, 128, 128),
-        *gt,
+        name=f"unet_{model_label}",
     )
 
     # # TODO: Remove

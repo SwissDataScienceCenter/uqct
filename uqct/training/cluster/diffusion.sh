@@ -30,4 +30,5 @@ DATASET=${DATASETS[$SLURM_ARRAY_TASK_ID]}
 	--dataset "$DATASET" \
 	--epochs 500 \
 	--batch-size 64 \
-	--learning-rate 0.0001
+	--learning-rate 0.0001 \
+    --cond

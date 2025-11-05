@@ -4,12 +4,16 @@ from typing import Callable, Literal
 import click
 import torch
 from diffusers.models.unets.unet_2d import UNet2DModel
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler, DDPMSchedulerOutput
+from diffusers.utils.torch_utils import randn_tensor
 from torch import optim
 from tqdm.auto import tqdm
 
 from uqct.ct import Experiment, nll
 from uqct.debugging import plot_img
+from uqct.models.unet import FBPUNet
+from uqct.training.diffusion import UNet2DModelAux
+from uqct.training.unet import N_ANGLES, norm_intensities
 
 DatasetName = Literal["lung", "composite", "lamino"]
 
@@ -19,116 +23,232 @@ class Diffusion:
         self,
         dataset: DatasetName,
         num_steps: int = 50,
-        buffer: int = 20,
         sgd_steps: int = 100,
         lr: float = 0.001,
         batch_size: int = 64,
+        cond: bool = False,
         verbose: bool = False,
     ):
         self.verbose = verbose
         self.device = (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
+        self.cond = cond
 
         # U-Net
         self.batch_size = batch_size
-        ckpt_path = find_ckpt(dataset)
-        self.unet = load_unet(ckpt_path)
+        ckpt_path = find_ckpt(dataset, self.cond)
+        self.unet = load_unet(ckpt_path, cond)
         self.unet.eval()
         for param in self.unet.parameters():  # type: ignore
             param.requires_grad = False
 
         # Diffusion
         self.num_steps = num_steps
-        self.buffer = buffer
-        self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=1000, clip_sample=False
-        )
+        self.noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
+        self.noise_scheduler.set_timesteps(num_inference_steps=num_steps)
 
         # Guidance
         self.sgd_steps = sgd_steps
         self.lr = lr
 
-    def predict_x_0(
-        self, t: int, x_t: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def predict_noise_cond(
+        self,
+        t: int,
+        x_t: torch.Tensor,
+        fbps_norm: torch.Tensor,
+        intensities_norm: torch.Tensor,
+        n_angles_norm: torch.Tensor,
+    ) -> torch.Tensor:
+        device = x_t.device
+
+        noise_preds = []
+        in_shape = x_t.shape
+        hw = x_t.shape[-2:]
+        x_t_flat = x_t.view(-1, 1, *hw)
+        fbps_norm = fbps_norm.reshape(-1, 1, *hw)
+        intensities_norm = intensities_norm.flatten()
+        n_angles_norm = n_angles_norm.flatten()
+        timesteps = torch.LongTensor([t]).expand(len(x_t_flat)).to(device)
+
+        # Split into batches of size <= self.batch_size
+        with torch.inference_mode():
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=(device.type == "cuda"),
+            ):
+                for batch_idx in range(0, len(x_t_flat), self.batch_size):
+                    x_t_b = x_t_flat[batch_idx : batch_idx + self.batch_size]
+                    fbps_b = fbps_norm[batch_idx : batch_idx + self.batch_size]
+                    timesteps_b = timesteps[batch_idx : batch_idx + self.batch_size]
+                    intensities_norm_b = intensities_norm[
+                        batch_idx : batch_idx + self.batch_size
+                    ]
+                    n_angles_norm_b = n_angles_norm[
+                        batch_idx : batch_idx + self.batch_size
+                    ]
+                    noise_pred = self.unet(
+                        x_t_b,
+                        fbps_b,
+                        timesteps_b,
+                        intensities_norm_b,
+                        n_angles_norm_b,
+                    )
+                    noise_preds.append(noise_pred)
+        noise_pred = torch.cat(noise_preds, dim=0).view(in_shape)
+        return noise_pred
+
+    def predict_noise(
+        self,
+        t: int,
+        x_t: torch.Tensor,
+    ) -> torch.Tensor:
         device = x_t.device
         timesteps = torch.LongTensor([t]).to(device)
 
-        noise_preds, x0_preds, x_t_prevs = [], [], []
+        noise_preds = []
         in_shape = x_t.shape
         x_t_flat = x_t.view(-1, 1, x_t.shape[-1], x_t.shape[-1])
 
         # Split into batches of size <= self.batch_size
-        for batch in x_t_flat.split(self.batch_size):
-            with torch.inference_mode():
-                with torch.autocast(
-                    device_type=device.type,
-                    dtype=torch.float16,
-                    enabled=(device.type == "cuda"),
-                ):
+        with torch.inference_mode():
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=(device.type == "cuda"),
+            ):
+                for batch in x_t_flat.split(self.batch_size):
                     noise_pred = self.unet(
                         batch,
                         timesteps,
                         return_dict=False,
                     )[0]
-
-            step_result = self.noise_scheduler.step(
-                noise_pred, int(timesteps.item()), batch.reshape(noise_pred.shape)
-            )
-            x_0_pred = step_result.pred_original_sample  # type: ignore
-            x_t_previous = step_result.prev_sample  # type: ignore
-
-            noise_preds.append(noise_pred)
-            x0_preds.append(x_0_pred)
-            x_t_prevs.append(x_t_previous)
-
-        # Concatenate all batch results
+                    noise_preds.append(noise_pred)
         noise_pred = torch.cat(noise_preds, dim=0).view(in_shape)
-        x_0_pred = torch.cat(x0_preds, dim=0).view(in_shape)
-        x_t_previous = torch.cat(x_t_prevs, dim=0).view(in_shape)
+        return noise_pred
 
-        return noise_pred, x_0_pred, x_t_previous
+    def step(
+        self,
+        model_output: torch.Tensor,
+        timestep: int,
+        sample: torch.Tensor,
+        guidance_loss_fn: Callable | None = None,
+        optimizer: optim.Adam | None = None,
+        generator=None,
+    ) -> DDPMSchedulerOutput:
+        """
+        This is the DDPM reference implementation of the reverse diffusion step.
 
-    def step(self, t: torch.Tensor, target_t: int, x_t: torch.Tensor):
-        device = x_t.device
-        noise_pred, x_0_pred, _ = self.predict_x_0(int(t.item()), x_t)
-        new_timestep = torch.LongTensor([target_t]).to(device)
-        new_x_t = self.noise_scheduler.add_noise(
-            x_0_pred,
-            torch.randn_like(x_0_pred),
-            new_timestep,  # type: ignore
-        ).to(device)
-        return new_x_t, noise_pred
+        Args:
+            model_output (`torch.Tensor`):
+                The direct output from learned diffusion model.
+            timestep (`float`):
+                The current discrete timestep in the diffusion chain.
+            sample (`torch.Tensor`):
+                A current instance of a sample created by the diffusion process.
+            generator (`torch.Generator`, *optional*):
+                A random number generator.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~schedulers.scheduling_ddpm.DDPMSchedulerOutput`] or `tuple`.
+
+        Returns:
+            [`~schedulers.scheduling_ddpm.DDPMSchedulerOutput`]
+        """
+        t = timestep
+
+        prev_t = self.noise_scheduler.previous_timestep(t)
+
+        predicted_variance = None
+
+        # 1. compute alphas, betas
+        alpha_prod_t = self.noise_scheduler.alphas_cumprod[t]
+        alpha_prod_t_prev = (
+            self.noise_scheduler.alphas_cumprod[prev_t]
+            if prev_t >= 0
+            else self.noise_scheduler.one
+        )
+        beta_prod_t = 1 - alpha_prod_t
+        beta_prod_t_prev = 1 - alpha_prod_t_prev
+        current_alpha_t = alpha_prod_t / alpha_prod_t_prev
+        current_beta_t = 1 - current_alpha_t
+
+        # 2. compute predicted original sample from predicted noise also called
+        # "predicted x_0" of formula (15) from https://arxiv.org/pdf/2006.11239.pdf
+        pred_original_sample = (
+            sample - beta_prod_t ** (0.5) * model_output
+        ) / alpha_prod_t ** (0.5)
+
+        # 3. Clip or threshold "predicted x_0"
+        pred_original_sample = pred_original_sample.clamp(-1.0, 1.0)
+
+        if guidance_loss_fn is not None:
+            pred_original_sample = guide(
+                pred_original_sample,
+                guidance_loss_fn,
+                sgd_steps=self.sgd_steps,
+                lr=self.lr * (timestep / 1000),
+                optimizer=optimizer,
+                verbose=False,
+            )
+
+        # 4. Compute coefficients for pred_original_sample x_0 and current sample x_t
+        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
+        pred_original_sample_coeff = (
+            alpha_prod_t_prev ** (0.5) * current_beta_t
+        ) / beta_prod_t
+        current_sample_coeff = current_alpha_t ** (0.5) * beta_prod_t_prev / beta_prod_t
+
+        # 5. Compute predicted previous sample µ_t
+        # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
+        pred_prev_sample = (
+            pred_original_sample_coeff * pred_original_sample
+            + current_sample_coeff * sample
+        )
+
+        # 6. Add noise
+        variance = 0
+        if t > 0:
+            device = model_output.device
+            variance_noise = randn_tensor(
+                model_output.shape,
+                generator=generator,
+                device=device,
+                dtype=model_output.dtype,
+            )
+            variance = (
+                self.noise_scheduler._get_variance(  # type: ignore
+                    t, predicted_variance=predicted_variance
+                )
+                ** 0.5
+            ) * variance_noise
+
+        pred_prev_sample = pred_prev_sample + variance
+
+        return DDPMSchedulerOutput(
+            prev_sample=pred_prev_sample, pred_original_sample=pred_original_sample
+        )
 
     def reverse(
         self,
-        x_t_start: torch.Tensor,
-        t_start: int,
-        t_end: int,
-        num_steps=50,
+        image: torch.Tensor,
     ) -> torch.Tensor:
         with torch.no_grad():
-            x_t = x_t_start.clone()
-            timesteps = torch.linspace(t_start, t_end, num_steps + 1).int()
-            for i in tqdm(range(1, len(timesteps)), disable=not self.verbose):
-                t = timesteps[i - 1]
-                target_t = timesteps[i]
-                x_t, _ = self.step(t, int(target_t.item()), x_t)
-            return x_t
+            for t in tqdm(self.noise_scheduler.timesteps, disable=not self.verbose):
+                noise_pred, _, _ = self.predict_noise(t, image)
+                image = self.step(noise_pred, t, image).prev_sample
+            return denorm_image(image)
 
     def sample(
         self,
         experiment: Experiment,
         replicates: int = 10,
         guidance_loss_fn: Callable | None = None,
-        l2_ball_radius: float = float("inf"),
     ) -> torch.Tensor:
         """
         Returns
             torch.Tensor: `(..., n_angles, replicates, 1, side_length, side_length)` (sparse) or `(..., n_rounds, replicates, 1, side_length, side_length)` (dense).
         """
-        # TODO: Try restricting guidance output to a l2-ball around the current mean.
 
         side_length = experiment.counts.shape[-1]
         if experiment.sparse:
@@ -152,42 +272,37 @@ class Diffusion:
             )
         rep_first_shape = x_t.shape
 
-        timesteps = torch.linspace(0, 500, self.num_steps + 1).int()
-        it = tqdm(range(self.num_steps), disable=not self.verbose)
-        optimizer = None
+        it = tqdm(self.noise_scheduler.timesteps, disable=not self.verbose)
 
-        for i in it:
-            t = timesteps[-i - 1]
-            target_t = timesteps[-i - 2]
-            new_timestep = torch.LongTensor([target_t]).to(self.device)
-            self.noise_scheduler.previous_timestep = lambda _: target_t  # type: ignore
-
-            _, x_0_pred, _ = self.predict_x_0(int(t.item()), x_t)
-            x_t = x_0_pred.view(rep_first_shape)
-
-            if guidance_loss_fn is not None:
-                lr = self.lr
-                if self.num_steps - i < 20:
-                    lr = self.lr * (self.num_steps - i) / 25
-                x_t, guidance_loss, optimizer = guide(
-                    x_t,
-                    guidance_loss_fn,
-                    sgd_steps=self.sgd_steps,
-                    lr=lr,
-                    optimizer=optimizer,
-                    l2_ball_radius=l2_ball_radius,
-                    verbose=False,
+        fbps, intensities, class_labels = FBPUNet._prepare_inputs_from_experiment(
+            experiment
+        )
+        if class_labels is None:  # Dense
+            n_angles = torch.full(experiment.batch_dims, N_ANGLES, device=self.device)
+            fbps = fbps.squeeze(-3)
+        else:  # Sparse
+            n_angles = class_labels + 1
+        fbps_norm = ((fbps - 0.5) * 2).expand_as(x_t).to(self.device)
+        intensities_norm = 2 * ((norm_intensities(intensities) / 999) - 0.5).to(
+            self.device
+        )
+        n_angles_norm = ((n_angles - N_ANGLES / 2) / (N_ANGLES / 2)).to(self.device)
+        intensities_norm = intensities_norm.view(1, *intensities_norm.shape).expand(
+            replicates, *(-1 for _ in range(intensities_norm.ndim))
+        )
+        n_angles_norm = n_angles_norm.view(1, *n_angles_norm.shape).expand(
+            replicates, *(-1 for _ in range(n_angles_norm.ndim))
+        )
+        for t in it:
+            if self.cond:
+                noise_pred = self.predict_noise_cond(
+                    t, x_t, fbps_norm, intensities_norm, n_angles_norm
                 )
-                it.set_postfix({"loss": f"{guidance_loss:.3f}"})
+            else:
+                noise_pred = self.predict_noise(t, x_t)
 
-            x_t = self.noise_scheduler.add_noise(
-                x_t,
-                torch.randn_like(x_t),
-                new_timestep,  # type: ignore
-            )
-
-        x_t = self.reverse(x_t, self.buffer, 0, num_steps=self.buffer)
-        _, x_t, _ = self.predict_x_0(0, x_t)
+            guidance_loss_fn_ = guidance_loss_fn if (20 < t < 1000) else None
+            x_t = self.step(noise_pred, t, x_t, guidance_loss_fn_).prev_sample
         out = denorm_image(x_t).reshape(rep_first_shape)
 
         # Massage from
@@ -204,9 +319,14 @@ class Diffusion:
         return out.permute(out_perm).unsqueeze(-3)
 
 
-def find_ckpt(dataset: DatasetName) -> Path:
+def find_ckpt(dataset: DatasetName, cond: bool) -> Path:
+    filename = (
+        f"ddpm_conditional_128_{dataset}.pt"
+        if cond
+        else f"ddpm_unconditional_128_{dataset}.pt"
+    )
     ckpt_dir_candidates = [
-        Path(x) / f"ddpm_unconditional_128_{dataset}.pt"
+        Path(x) / filename
         for x in (
             "/mydata/chip/shared/checkpoints/uqct/diffusion",
             "checkpoints/diffusion",
@@ -220,34 +340,37 @@ def find_ckpt(dataset: DatasetName) -> Path:
     raise ValueError(f"Could not find diffusion checkpoint for dataset {dataset}")
 
 
-def load_unet(ckpt_path: Path) -> UNet2DModel:
+def load_unet(ckpt_path: Path, cond: bool) -> UNet2DModel | UNet2DModelAux:
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     channels = (128, 128, 256, 256, 512, 512)
-    down_block_types = (
-        "DownBlock2D",
-        "DownBlock2D",
-        "DownBlock2D",
-        "DownBlock2D",
-        "AttnDownBlock2D",
-        "DownBlock2D",
-    )
-    up_block_types = (
-        "UpBlock2D",
-        "AttnUpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-    )
-    unet = UNet2DModel(
-        sample_size=128,
-        in_channels=1,
-        out_channels=1,
-        layers_per_block=2,
-        block_out_channels=channels,
-        down_block_types=down_block_types,
-        up_block_types=up_block_types,
-    )
+    if cond:
+        unet = UNet2DModelAux(2, 0.0, device)
+    else:
+        down_block_types = (
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "AttnDownBlock2D",
+            "DownBlock2D",
+        )
+        up_block_types = (
+            "UpBlock2D",
+            "AttnUpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        )
+        unet = UNet2DModel(
+            sample_size=128,
+            in_channels=1,
+            out_channels=1,
+            layers_per_block=2,
+            block_out_channels=channels,
+            down_block_types=down_block_types,
+            up_block_types=up_block_types,
+        )
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
     sd = ckpt["unet"]
@@ -272,20 +395,21 @@ def get_guidance_loss_fn(
         )
 
         def loss_fn(image: torch.Tensor) -> torch.Tensor:
-            squares = nll(
+            nlls = nll(
                 image,
                 experiment.counts.unsqueeze(-3),
                 experiment.intensities.unsqueeze(-3),
                 experiment.angles,
             )
-            return squares[..., mask, :].mean()
+            return nlls[..., mask, :].mean((-2, -1)).sum()
 
     else:
         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
 
         def loss_fn(image: torch.Tensor) -> torch.Tensor:
-            return nll(image, counts_csum, intensities_csum, experiment.angles).mean()
+            nlls = nll(image, counts_csum, intensities_csum, experiment.angles)
+            return nlls.mean((-2, -1)).sum()
 
     return loss_fn
 
@@ -296,9 +420,8 @@ def guide(
     sgd_steps: int = 50,
     lr: float = 0.1,
     optimizer: None | optim.Adam = None,
-    l2_ball_radius: float = float("inf"),
     verbose: bool = False,
-) -> tuple[torch.Tensor, float, optim.Adam]:
+) -> torch.Tensor:
     circle_mask = torch.ones(*x_t.shape[-2:], device=x_t.device)
     radius = x_t.shape[-1] // 2
     y, x = torch.meshgrid(
@@ -336,13 +459,12 @@ def guide(
         loss.backward()
         optimizer.step()
         with torch.no_grad():
-            y.data = project_to_l2_ball(y, y_0, l2_ball_radius)
             y.data[..., ~mask] = 0.0
 
         it.set_postfix({"loss": f"{loss.item():.3f}"})
     optimizer.zero_grad(set_to_none=True)
     x_t_guided = norm_image(y).clip(-1, 1)
-    return x_t_guided, loss.item(), optimizer
+    return x_t_guided
 
 
 def norm_image(image: torch.Tensor) -> torch.Tensor:
@@ -353,30 +475,6 @@ def denorm_image(
     image: torch.Tensor, min_v: float = 0.0, max_v: float = 1.0
 ) -> torch.Tensor:
     return ((image + 1) / 2).clip(min_v, max_v)
-
-
-def project_to_l2_ball(
-    y: torch.Tensor,
-    y_0: torch.Tensor,
-    l2_ball_radius: float | torch.Tensor,
-    eps: float = 1e-12,
-) -> torch.Tensor:
-    """
-    Project y onto the L2 ball of radius l2_ball_radius centered at y_0,
-    where each sample is a (r, r) block in the last three dimensions.
-
-    Shapes:
-        y, y_0: (..., r, r)  (same shape, broadcast okay if compatible)
-        l2_ball_radius: float or tensor broadcastable to (..., 1, 1)
-
-    Returns:
-        y_proj with the same shape as y.
-    """
-    diff = y - y_0
-    norms = torch.linalg.vector_norm(diff, ord=2, dim=(-2, -1), keepdims=True)
-    scale = torch.clamp(l2_ball_radius / (norms + eps), max=1.0)
-    y_proj = y_0 + diff * scale
-    return y_proj
 
 
 @click.command()
@@ -392,7 +490,13 @@ def project_to_l2_ball(
     type=bool,
     help="Whether to generate samples for the sparse setting",
 )
-def main(dataset: DatasetName, sparse: bool):
+@click.option(
+    "--cond",
+    default=False,
+    type=bool,
+    help="Whether to use a conditional diffusion model",
+)
+def main(dataset: DatasetName, sparse: bool, cond: bool):
     import lovely_tensors as lt
     import numpy as np
 
@@ -414,36 +518,42 @@ def main(dataset: DatasetName, sparse: bool):
     n_gt = min(2, len(test_set))
     gt = torch.stack([test_set[i] for i in range(n_gt)], dim=0).to(device)
 
-    n_angles = 50
+    if sparse:
+        n_angles = 50
+    else:
+        n_angles = 200
+
     angles = torch.from_numpy(np.linspace(0, 180, n_angles, endpoint=False)).to(device)
     total_intensity = 1e5
     n_detectors_hr = gt.shape[-1]
     intensities = torch.tensor(total_intensity, device=device)
     if sparse:
-        intensities = intensities.view(1, 1, 1).expand(-1, n_angles, -1) / (
+        intensities = intensities.view(1, 1, 1, 1).expand(n_gt, -1, n_angles, -1) / (
             n_angles * n_detectors_hr
         )
     else:
-        n_rounds = 5
+        n_rounds = 1
         intensities = intensities.view(1, 1, 1, 1).expand(
-            -1, n_rounds, n_angles, -1
+            n_gt, n_rounds, n_angles, -1
         ) / (n_angles * n_detectors_hr * n_rounds)
     counts = sample_observations(gt, intensities, angles)
     intensities_lr = intensities * 2
     experiment = Experiment(counts, intensities_lr, angles, sparse)
     diffusion = Diffusion(
         dataset,
-        num_steps=50,
-        buffer=10,
-        sgd_steps=100,
-        lr=0.001,
+        num_steps=100,
+        sgd_steps=10,
+        lr=0.1,
+        batch_size=16,
+        cond=cond,
         verbose=True,
     )
 
     guidance_loss_fn = get_guidance_loss_fn(experiment)
-    sample = diffusion.sample(experiment, 3, guidance_loss_fn, 256 * 0.1)
+    sample = diffusion.sample(experiment, 3, guidance_loss_fn)
+    # sample = diffusion.reverse(torch.randn(5, 1, 128, 128, device=device))
     print(sample)
-    plot_img(*gt, *sample.reshape(-1, 128, 128), share_range=True)
+    plot_img(*gt, *sample.reshape(-1, 128, 128), name="diffusion", share_range=True)
 
 
 if __name__ == "__main__":
