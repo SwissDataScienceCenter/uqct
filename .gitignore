@@ -214,3 +214,5 @@ notes
 cseqs
 tools
 .DS_Store
+.vscode/
+caches
