@@ -496,7 +496,8 @@ def denorm_image(
     type=bool,
     help="Whether to use a conditional diffusion model",
 )
-def main(dataset: DatasetName, sparse: bool, cond: bool):
+@click.option("--total-intensity", default=1e7, type=float, help="Total intensity")
+def main(dataset: DatasetName, sparse: bool, cond: bool, total_intensity):
     import lovely_tensors as lt
     import numpy as np
 
@@ -524,7 +525,6 @@ def main(dataset: DatasetName, sparse: bool, cond: bool):
         n_angles = 200
 
     angles = torch.from_numpy(np.linspace(0, 180, n_angles, endpoint=False)).to(device)
-    total_intensity = 1e5
     n_detectors_hr = gt.shape[-1]
     intensities = torch.tensor(total_intensity, device=device)
     if sparse:
@@ -542,7 +542,7 @@ def main(dataset: DatasetName, sparse: bool, cond: bool):
     diffusion = Diffusion(
         dataset,
         num_steps=100,
-        sgd_steps=10,
+        sgd_steps=0,
         lr=0.1,
         batch_size=16,
         cond=cond,

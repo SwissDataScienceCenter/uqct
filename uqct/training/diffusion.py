@@ -18,6 +18,7 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
 from uqct.datasets.utils import get_dataset
+from uqct.debugging import plot_img
 from uqct.training.unet import N_ANGLES, norm_intensities, sample_fbp_sparse
 
 
@@ -121,7 +122,7 @@ def loss_fn_either(
     device: torch.device = torch.device("cpu"),
 ) -> torch.Tensor:
     if hasattr(unet, "unet"):
-        fbp, intensities, n_angles = sample_fbp_sparse(x_0, device)
+        fbp, intensities, n_angles = sample_fbp_sparse(x_0 * 0.5 + 0.5, device)
         x_0 = F.interpolate(x_0.to(unet.device), size=(128, 128), mode="area")
         loss = loss_fn_cond(x_0, fbp, intensities, n_angles, unet, noise_scheduler)  # type: ignore
     else:
