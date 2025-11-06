@@ -171,13 +171,15 @@ class FBPUNet:
 
     @staticmethod
     def _prepare_inputs_from_experiment(
-        experiment: Experiment,
+        experiment: Experiment, schedule: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
         Parameters
         ----------
         experiment : Experiment
             Experiment containing counts, intensities, and angles used to build model inputs.
+        schedule : torch.Tensor
+            Schedule of angles (sparse) or rounds (dense). It is expected to be an tensor of positive integers with shape (N,).
 
         Returns
         -------
@@ -189,6 +191,10 @@ class FBPUNet:
             Tensor of shape `(...,)` with integer class labels when the model is sparse, otherwise `None`.
         """
         if not experiment.sparse:
+            if schedule is not None:
+                raise NotImplementedError(
+                    "Support for schedules is not yet supported for the dense setting."
+                )
             counts = experiment.counts.cumsum(dim=-3)
             intensities = experiment.intensities.cumsum(dim=-3)
             sino = sinogram_from_counts(counts, intensities).clamp_min(0.0)
@@ -203,7 +209,9 @@ class FBPUNet:
         num_angles = len(experiment.angles)
         fbps = list()
         intensities = list()
-        for i in range(1, num_angles + 1):
+        if schedule is None:
+            schedule = torch.arange(1, num_angles + 1)
+        for i in schedule:
             angles_i = experiment.angles[:i]
             counts_i = experiment.counts[..., :i, :]
             intensities_i = experiment.intensities[..., :i, :]
@@ -217,8 +225,8 @@ class FBPUNet:
             torch.stack(intensities, dim=-1).unsqueeze(-1) * experiment.counts.shape[-1]
         )
         class_labels = (
-            torch.arange(0, num_angles)
-            .view(*((intensities.ndim - 2) * (1,)), num_angles)
+            (schedule - 1)
+            .view(*((intensities.ndim - 2) * (1,)), len(schedule))
             .expand(*intensities.shape[:-2], -1)
         )
         return fbps, intensities, class_labels

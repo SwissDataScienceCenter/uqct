@@ -33,7 +33,9 @@ class Tomogram(torch.nn.Module):
             image = self.image
 
         if self.circle:
-            mask = circular_mask(image.shape[-1], device=image.device, dtype=image.dtype)  # (H,W)
+            mask = circular_mask(
+                image.shape[-1], device=image.device, dtype=image.dtype
+            )  # (H,W)
             image = image * mask
         return image
 
@@ -55,7 +57,6 @@ def poisson(input):
         # https://github.com/pytorch/pytorch/issues/86782
         return torch.poisson(input.cpu()).to(input.device)
     return torch.poisson(input)
-
 
 
 def nll(
@@ -82,7 +83,11 @@ def nll(
     intensities = intensities.clip(1e-9)
     sino = radon(images, angles)
     scale = l / images.shape[-1]
-    nll = - counts * (torch.log(intensities) - scale * sino ) + intensities * torch.exp(-scale * sino) + torch.lgamma(counts + 1)
+    nll = (
+        -counts * (torch.log(intensities) - scale * sino)
+        + intensities * torch.exp(-scale * sino)
+        + torch.lgamma(counts + 1)
+    )
     return nll
 
 
@@ -253,7 +258,7 @@ def sinogram_from_counts(
     Computes the sinogram from the measurements.
     """
     scale = l / counts.shape[-1]  # Normalize by the image size
-    sino = - torch.log(counts.clip(1e-9) / intensities) / scale
+    sino = -torch.log(counts.clip(1e-9) / intensities) / scale
     return sino
 
 
@@ -800,6 +805,11 @@ def fbp_2d(
         ).clip(0, 1)
         fbps.append(fbp)
     return torch.stack(fbps).to(counts[0].device)
+
+
+def apply_circular_mask(x: torch.Tensor) -> torch.Tensor:
+    mask = circular_mask(x.shape[-1], device=x.device)
+    return x * mask
 
 
 if __name__ == "__main__":

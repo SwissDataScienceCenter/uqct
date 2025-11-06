@@ -3,13 +3,14 @@ from typing import Callable, Literal
 
 import click
 import torch
+import torch.nn.functional as F
 from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler, DDPMSchedulerOutput
 from diffusers.utils.torch_utils import randn_tensor
 from torch import optim
 from tqdm.auto import tqdm
 
-from uqct.ct import Experiment, nll
+from uqct.ct import Experiment, apply_circular_mask, circular_mask, nll
 from uqct.debugging import plot_img
 from uqct.models.unet import FBPUNet
 from uqct.training.diffusion import UNet2DModelAux
@@ -181,6 +182,12 @@ class Diffusion:
 
         # 3. Clip or threshold "predicted x_0"
         pred_original_sample = pred_original_sample.clamp(-1.0, 1.0)
+        mask = circular_mask(
+            pred_original_sample.shape[-1],
+            device=pred_original_sample.device,
+            dtype=torch.bool,
+        )
+        pred_original_sample[..., ~mask] = -1.0
 
         if guidance_loss_fn is not None:
             pred_original_sample = guide(
@@ -243,6 +250,7 @@ class Diffusion:
         self,
         experiment: Experiment,
         replicates: int = 10,
+        schedule: torch.Tensor | None = None,
         guidance_loss_fn: Callable | None = None,
     ) -> torch.Tensor:
         """
@@ -253,10 +261,13 @@ class Diffusion:
         side_length = experiment.counts.shape[-1]
         if experiment.sparse:
             # (rep, ..., n_angles, 1, side_length, side_length)
+            n_angles_schedule = (
+                len(schedule) if schedule is not None else experiment.counts.shape[-2]
+            )
             x_t = torch.randn(
                 replicates,
                 *experiment.batch_dims,
-                experiment.counts.shape[-2],
+                n_angles_schedule,
                 side_length,
                 side_length,
                 device=self.device,
@@ -275,7 +286,7 @@ class Diffusion:
         it = tqdm(self.noise_scheduler.timesteps, disable=not self.verbose)
 
         fbps, intensities, class_labels = FBPUNet._prepare_inputs_from_experiment(
-            experiment
+            experiment, schedule
         )
         if class_labels is None:  # Dense
             n_angles = torch.full(experiment.batch_dims, N_ANGLES, device=self.device)
@@ -304,6 +315,7 @@ class Diffusion:
             guidance_loss_fn_ = guidance_loss_fn if (20 < t < 1000) else None
             x_t = self.step(noise_pred, t, x_t, guidance_loss_fn_).prev_sample
         out = denorm_image(x_t).reshape(rep_first_shape)
+        out = apply_circular_mask(out)
 
         # Massage from
         #    (replicates, ..., n_angles or n_rounds, side_length, side_length)
@@ -383,16 +395,17 @@ def load_unet(ckpt_path: Path, cond: bool) -> UNet2DModel | UNet2DModelAux:
 
 
 def get_guidance_loss_fn(
-    experiment: Experiment,
+    experiment: Experiment, schedule: torch.Tensor | None = None
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Create a loss function that takes as input a batch of images and returns the Poisson NLL loss."""
     if experiment.sparse:
         n_angles = experiment.counts.shape[-2]
-        mask = torch.tril(
-            torch.ones(
-                n_angles, n_angles, dtype=torch.bool, device=experiment.counts.device
-            )
-        )
+        device = experiment.counts.device
+        if schedule is None:
+            schedule = torch.arange(1, n_angles + 1, device=device)
+        mask = torch.arange(n_angles, device=device).expand(
+            len(schedule), -1
+        ) < schedule.to(device).unsqueeze(1)
 
         def loss_fn(image: torch.Tensor) -> torch.Tensor:
             nlls = nll(
@@ -404,6 +417,9 @@ def get_guidance_loss_fn(
             return nlls[..., mask, :].mean((-2, -1)).sum()
 
     else:
+        assert schedule is not None, (
+            "Schedules are currently unsupported for the dense setting."
+        )
         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
 
@@ -519,10 +535,7 @@ def main(dataset: DatasetName, sparse: bool, cond: bool, total_intensity):
     n_gt = min(2, len(test_set))
     gt = torch.stack([test_set[i] for i in range(n_gt)], dim=0).to(device)
 
-    if sparse:
-        n_angles = 50
-    else:
-        n_angles = 200
+    n_angles = 200
 
     angles = torch.from_numpy(np.linspace(0, 180, n_angles, endpoint=False)).to(device)
     n_detectors_hr = gt.shape[-1]
@@ -531,29 +544,32 @@ def main(dataset: DatasetName, sparse: bool, cond: bool, total_intensity):
         intensities = intensities.view(1, 1, 1, 1).expand(n_gt, -1, n_angles, -1) / (
             n_angles * n_detectors_hr
         )
+        schedule = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128, 200])
     else:
         n_rounds = 1
         intensities = intensities.view(1, 1, 1, 1).expand(
             n_gt, n_rounds, n_angles, -1
         ) / (n_angles * n_detectors_hr * n_rounds)
+        schedule = None
     counts = sample_observations(gt, intensities, angles)
     intensities_lr = intensities * 2
     experiment = Experiment(counts, intensities_lr, angles, sparse)
     diffusion = Diffusion(
         dataset,
         num_steps=100,
-        sgd_steps=0,
-        lr=0.1,
+        sgd_steps=10,
+        lr=0.025,
         batch_size=16,
         cond=cond,
         verbose=True,
     )
 
-    guidance_loss_fn = get_guidance_loss_fn(experiment)
-    sample = diffusion.sample(experiment, 3, guidance_loss_fn)
+    guidance_loss_fn = get_guidance_loss_fn(experiment, schedule)
+    sample = diffusion.sample(experiment, 3, schedule, guidance_loss_fn)
     # sample = diffusion.reverse(torch.randn(5, 1, 128, 128, device=device))
     print(sample)
-    plot_img(*gt, *sample.reshape(-1, 128, 128), name="diffusion", share_range=True)
+    gt_lr = F.interpolate(gt, (128, 128), mode="area")
+    plot_img(*gt_lr, *sample.reshape(-1, 128, 128), name="diffusion", share_range=True)
 
 
 if __name__ == "__main__":
