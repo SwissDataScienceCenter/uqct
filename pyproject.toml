@@ -1,7 +1,3 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "uqct"
 version = "0.0.1"
@@ -10,4 +6,51 @@ authors = [
   { name = "Matteo Gätzner" },
   { name = "Johannes Kirschner" },
 ]
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+  "scikit-image",
+  "h5py",
+  "xarray",
+  "nibabel",
+  "huggingface_hub",
+  "diffusers",
+  "tensorboard",
+  "wandb",
+  "lovely-tensors",
+  "opencv-python",
+  "astra-toolbox==2.4.0",
+  "ruff>=0.14.4",
+]
+
+[tool.uv]
+default-groups = ["base"]
+dependency-metadata = [
+    { name = "astra-toolbox", version = "2.4.0", requires-dist = [], requires-python = ">=3.6" },
+]
+
+
+[dependency-groups]
+base = [
+  "torch==2.9.0",
+  "torchvision",
+  "tqdm",
+  "numpy==2.3.3",
+  "pandas",
+  "scipy",
+  "matplotlib",
+  "jupyterlab",
+  "ipywidgets",
+  "notebook",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["uqct"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I", "N", "UP"]
+ignore = ["N812", "E501"]
