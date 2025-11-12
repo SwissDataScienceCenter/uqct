@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Callable, Literal
+import math
 
 import click
 import torch
@@ -25,7 +26,7 @@ class Diffusion:
         dataset: DatasetName,
         num_steps: int = 50,
         sgd_steps: int = 100,
-        lr: float = 0.001,
+        lr: float | None = None,
         batch_size: int = 64,
         cond: bool = False,
         verbose: bool = False,
@@ -52,6 +53,18 @@ class Diffusion:
         # Guidance
         self.sgd_steps = sgd_steps
         self.lr = lr
+
+    def set_lr_from_experiment(self, experiment: Experiment) -> float:
+        """Computes and returns a best guess of the optimal learning rate.
+        The internal `lr` parameter gets set to this value."""
+        sparse2coef = {True: (-0.1655, 0.0188), False: {-0.0786, 0.01}}
+        beta_0, beta_1 = sparse2coef[experiment.sparse]
+        total_intensity = experiment.intensities.view(
+            math.prod(experiment.batch_dims), -1, 1
+        )[0].sum()
+        total_intensity *= experiment.counts.shape[-1]
+        self.lr = beta_1 * math.log(total_intensity) + beta_0
+        return self.lr
 
     def predict_noise_cond(
         self,
@@ -257,6 +270,8 @@ class Diffusion:
         Returns
             torch.Tensor: `(..., n_angles, replicates, 1, side_length, side_length)` (sparse) or `(..., n_rounds, replicates, 1, side_length, side_length)` (dense).
         """
+        if self.lr is None:
+            self.set_lr_from_experiment(experiment)
 
         side_length = experiment.counts.shape[-1]
         if experiment.sparse:
@@ -288,16 +303,19 @@ class Diffusion:
         fbps, intensities, class_labels = FBPUNet._prepare_inputs_from_experiment(
             experiment, schedule
         )
+        fbps = fbps.to(self.device)
+        intensities = intensities.to(self.device)
         if class_labels is None:  # Dense
             n_angles = torch.full(experiment.batch_dims, N_ANGLES, device=self.device)
             fbps = fbps.squeeze(-3)
         else:  # Sparse
+            class_labels = class_labels.to(self.device)
             n_angles = class_labels + 1
-        fbps_norm = ((fbps - 0.5) * 2).expand_as(x_t).to(self.device)
-        intensities_norm = 2 * ((norm_intensities(intensities) / 999) - 0.5).to(
-            self.device
+        fbps_norm = ((fbps - 0.5) * 2).expand_as(x_t)
+        intensities_norm = (2 * ((norm_intensities(intensities) / 999) - 0.5)).clip(
+            -1, 1
         )
-        n_angles_norm = ((n_angles - N_ANGLES / 2) / (N_ANGLES / 2)).to(self.device)
+        n_angles_norm = ((n_angles - N_ANGLES / 2) / (N_ANGLES / 2)).clip(-1, 1)
         intensities_norm = intensities_norm.view(1, *intensities_norm.shape).expand(
             replicates, *(-1 for _ in range(intensities_norm.ndim))
         )
@@ -352,7 +370,9 @@ def find_ckpt(dataset: DatasetName, cond: bool) -> Path:
     raise ValueError(f"Could not find diffusion checkpoint for dataset {dataset}")
 
 
-def load_unet(ckpt_path: Path, cond: bool) -> UNet2DModel | UNet2DModelAux:
+def load_unet(
+    ckpt_path: Path, cond: bool, verbose: bool = False
+) -> UNet2DModel | UNet2DModelAux:
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     channels = (128, 128, 256, 256, 512, 512)
     if cond:
@@ -390,7 +410,8 @@ def load_unet(ckpt_path: Path, cond: bool) -> UNet2DModel | UNet2DModelAux:
         sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
     unet.load_state_dict(sd, strict=True)
     unet = unet.to(device)  # type: ignore
-    print(f"Loaded checkpoint: epoch={ckpt['epoch']}, val_loss={ckpt['val_loss']}")
+    if verbose:
+        print(f"Loaded checkpoint: epoch={ckpt['epoch']}, val_loss={ckpt['val_loss']}")
     return unet
 
 
@@ -417,7 +438,7 @@ def get_guidance_loss_fn(
             return nlls[..., mask, :].mean((-2, -1)).sum()
 
     else:
-        assert schedule is not None, (
+        assert schedule is None, (
             "Schedules are currently unsupported for the dense setting."
         )
         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
@@ -530,8 +551,7 @@ def main(dataset: DatasetName, sparse: bool, cond: bool, total_intensity):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    _, test_set = get_dataset(dataset, True)
-
+    train_set, test_set = get_dataset(dataset, True)
     n_gt = min(2, len(test_set))
     gt = torch.stack([test_set[i] for i in range(n_gt)], dim=0).to(device)
 
@@ -544,7 +564,7 @@ def main(dataset: DatasetName, sparse: bool, cond: bool, total_intensity):
         intensities = intensities.view(1, 1, 1, 1).expand(n_gt, -1, n_angles, -1) / (
             n_angles * n_detectors_hr
         )
-        schedule = torch.tensor([1, 2, 4, 8, 16, 32, 64, 128, 200])
+        schedule = torch.tensor([1, 25, 50, 75, 100, 125, 150, 175, 200])
     else:
         n_rounds = 1
         intensities = intensities.view(1, 1, 1, 1).expand(
@@ -558,14 +578,13 @@ def main(dataset: DatasetName, sparse: bool, cond: bool, total_intensity):
         dataset,
         num_steps=100,
         sgd_steps=10,
-        lr=0.025,
         batch_size=16,
         cond=cond,
         verbose=True,
     )
 
     guidance_loss_fn = get_guidance_loss_fn(experiment, schedule)
-    sample = diffusion.sample(experiment, 3, schedule, guidance_loss_fn)
+    sample = diffusion.sample(experiment, 1, schedule, guidance_loss_fn)
     # sample = diffusion.reverse(torch.randn(5, 1, 128, 128, device=device))
     print(sample)
     gt_lr = F.interpolate(gt, (128, 128), mode="area")
