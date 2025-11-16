@@ -475,7 +475,7 @@ def guide(
     y_0 = denorm_image(x_t)
 
     if optimizer is None:
-        y = torch.nn.Parameter(y_0)
+        y = torch.nn.Parameter(y_0).requires_grad_()
         optimizer = optim.Adam([y], lr=lr)
     else:
         y = optimizer.param_groups[0]["params"][0]
@@ -484,11 +484,11 @@ def guide(
     it = tqdm(range(sgd_steps), disable=not verbose)
     lowest_loss = float("inf")
     cur_patience = patience
-    best_y = None
+    best_y = y.data.clone()
     for _ in it:
         optimizer.zero_grad()
-        yp = y * mask
-        loss = loss_fct(yp.clip(0))
+        yp = (y * mask).clip(0)
+        loss = loss_fct(yp)
 
         # Punish out of range
         low = yp[yp < 0]
@@ -506,7 +506,7 @@ def guide(
         loss = loss.item()
         if loss < lowest_loss:
             lowest_loss = loss
-            best_y = y.detach().clone()
+            best_y = yp.data.clone()
             if cur_patience is not None:
                 cur_patience = patience
 
@@ -518,7 +518,7 @@ def guide(
         if cur_patience is not None and cur_patience <= 0:
             break
 
-    x_t_guided = norm_image(best_y).clip(-1, 1)
+    x_t_guided = norm_image(best_y.data.detach()).clip(-1, 1)
     return x_t_guided
 
 

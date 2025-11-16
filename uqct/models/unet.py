@@ -11,7 +11,6 @@ import tempfile
 import numpy as np
 import torch
 from diffusers.models.unets.unet_2d import UNet2DModel
-from torch.utils.data import DataLoader, TensorDataset
 from tqdm.auto import tqdm
 
 from uqct.ct import (
@@ -213,32 +212,14 @@ class FBPUNet:
         if class_labels is not None:
             class_labels = class_labels.flatten()
 
-        fbp_cpu = fbp_lr.to("cpu")
-        intensity_cpu = total_intensity.to("cpu")
-        class_cpu = class_labels.to("cpu") if class_labels is not None else None
-
-        if class_cpu is None:
-            dataset = TensorDataset(fbp_cpu, intensity_cpu)
-        else:
-            dataset = TensorDataset(fbp_cpu, intensity_cpu, class_cpu)
-
         out_device = out_device if out_device is not None else self.out_device
-        loader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            num_workers=self.num_workers,
-            pin_memory=False,
-        )
-
         preds = []
-        torch.set_grad_enabled(False)
-        for batch in loader:
-            if class_cpu is None:
-                fbp_b, intensity_b = batch
-                cls_b = None
-            else:
-                fbp_b, intensity_b, cls_b = batch
-
+        for i in range(0, len(fbp_lr), self.batch_size):
+            fbp_b = fbp_lr[i : i + self.batch_size]
+            intensity_b = total_intensity[i : i + self.batch_size]
+            cls_b = None
+            if class_labels is not None:
+                cls_b = class_labels[i : i + self.batch_size]
             x = fbp_b.to(device, non_blocking=True) * 2.0 - 1.0
             intensity_norm = (
                 (intensity_b.to(device, non_blocking=True) - MIN_TOTAL_INTENSITY)
@@ -246,17 +227,18 @@ class FBPUNet:
                 * 999
             )
 
-            with torch.autocast(
-                device_type=device.type,
-                dtype=torch.float16,
-                enabled=(device.type == "cuda"),
-            ):
-                y = self.unet(
-                    x,
-                    timestep=intensity_norm.flatten(),
-                    class_labels=(cls_b.to(device) if cls_b is not None else None),
-                    return_dict=False,
-                )[0]
+            with torch.inference_mode():
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=torch.float16,
+                    enabled=(device.type == "cuda"),
+                ):
+                    y = self.unet(
+                        x,
+                        timestep=intensity_norm.flatten(),
+                        class_labels=(cls_b.to(device) if cls_b is not None else None),
+                        return_dict=False,
+                    )[0]
 
             pred = ((y + 1.0) / 2.0).clamp(0.0, 1.0)
             if out_device is not None:
@@ -309,7 +291,6 @@ def load_unet_ckpt(unet: UNet2DModel, ckpt_path: Path, verbose: bool = False) ->
         if any(k.startswith("_orig_mod.") for k in sd.keys()):
             sd = {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
         unet.load_state_dict(sd, strict=True)
-        unet.to(dtype=torch.float16)  # type: ignore
         if verbose:
             print(
                 f"Loaded checkpoint: epoch={ckpt.get('epoch', '?')}, val_loss={ckpt.get('val_loss', '?')}"
