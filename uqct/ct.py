@@ -3,6 +3,7 @@ from typing import Any, Callable, Literal
 
 import astra
 import numpy as np
+import numpy.typing as npt
 import torch
 
 
@@ -328,7 +329,7 @@ class Experiment:
         self.sparse = sparse
 
     def __str__(self) -> str:
-        return f"Experiment:\n  sparse: {self.sparse}\n  intensities: {self.intensities}\n  counts: {self.counts}\n  angles: {self.angles}"
+        return f"Experiment(sparse={self.sparse}, intensities={self.intensities}, counts={self.counts}, angles={self.angles})"
 
     def __repr__(self) -> str:
         return self.__str__()
@@ -576,7 +577,11 @@ def _apply_filter_batch(
     return sino_filt[0] if single else sino_filt
 
 
-def circular_mask(img_size: int, device=None, dtype=torch.float32) -> torch.Tensor:
+def circular_mask(
+    img_size: int,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
     device = device or torch.device("cpu")
     yy, xx = torch.meshgrid(
         torch.arange(img_size, device=device),
@@ -810,6 +815,81 @@ def fbp_2d(
 def apply_circular_mask(x: torch.Tensor) -> torch.Tensor:
     mask = circular_mask(x.shape[-1], device=x.device)
     return x * mask
+
+
+def prepare_inputs_from_experiment(
+    experiment: Experiment, schedule: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """
+    Parameters
+    ----------
+    experiment : Experiment
+        Experiment containing counts, intensities, and angles used to build model inputs.
+    schedule : torch.Tensor
+        Schedule of angles (sparse) or rounds (dense). It is expected to be an tensor of positive integers with shape (N,).
+
+    Returns
+    -------
+    torch.Tensor:
+        Tensor of shape `(..., 1, H, W)` or `(..., H, W)` containing filtered backprojection inputs in `[0, 1]`.
+    torch.Tensor:
+        Tensor of shape `(..., 1)` containing intensity per sample.
+    torch.Tensor | None:
+        Tensor of shape `(...,)` with integer class labels when the model is sparse, otherwise `None`.
+    """
+    if not experiment.sparse:
+        if schedule is not None:
+            raise NotImplementedError(
+                "Support for schedules is not yet supported for the dense setting."
+            )
+        counts = experiment.counts.cumsum(dim=-3)
+        intensities = experiment.intensities.cumsum(dim=-3)
+        sino = sinogram_from_counts(counts, intensities).clamp_min(0.0)
+        fbp_lr = fbp(sino, experiment.angles).clamp(0.0, 1.0)
+        n_angles = None
+        return (
+            fbp_lr.unsqueeze(-3),
+            intensities.sum(-2) * counts.shape[-1],
+            n_angles,
+        )
+
+    num_angles = len(experiment.angles)
+    fbps = list()
+    intensities = list()
+    if schedule is None:
+        schedule = torch.arange(1, num_angles + 1)
+    for i in schedule:
+        angles_i = experiment.angles[:i]
+        counts_i = experiment.counts[..., :i, :]
+        intensities_i = experiment.intensities[..., :i, :]
+        sino_i = sinogram_from_counts(counts_i, intensities_i)
+        fbp_i = fbp(sino_i, angles_i)
+        fbps.append(fbp_i)
+        intensities.append(intensities_i.sum((-2, -1)))
+    fbps = torch.stack(fbps, dim=-3).clamp(0, 1)
+    fbps.mul_(circular_mask(fbps.shape[-1]).to(fbps.device))
+    intensities = (
+        torch.stack(intensities, dim=-1).unsqueeze(-1) * experiment.counts.shape[-1]
+    )
+    class_labels = (
+        (schedule - 1)
+        .view(*((intensities.ndim - 2) * (1,)), len(schedule))
+        .expand(*intensities.shape[:-2], -1)
+    )
+    return fbps, intensities, class_labels
+
+
+def lr_from_experiment(experiment: Experiment) -> float:
+    """Computes and returns a best guess of the optimal learning rate.
+    The internal `lr` parameter gets set to this value."""
+    sparse2coef = {True: (-0.1655, 0.0188), False: {-0.0786, 0.01}}
+    beta_0, beta_1 = sparse2coef[experiment.sparse]
+    total_intensity = experiment.intensities.view(
+        math.prod(experiment.batch_dims), -1, 1
+    )[0].sum()
+    total_intensity *= experiment.counts.shape[-1]
+    lr = beta_1 * math.log(total_intensity) + beta_0
+    return lr
 
 
 if __name__ == "__main__":

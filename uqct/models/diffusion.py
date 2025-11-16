@@ -1,6 +1,5 @@
 from pathlib import Path
 from typing import Callable, Literal
-import math
 
 import click
 import torch
@@ -11,9 +10,15 @@ from diffusers.utils.torch_utils import randn_tensor
 from torch import optim
 from tqdm.auto import tqdm
 
-from uqct.ct import Experiment, apply_circular_mask, circular_mask, nll
+from uqct.ct import (
+    Experiment,
+    apply_circular_mask,
+    circular_mask,
+    nll,
+    prepare_inputs_from_experiment,
+    lr_from_experiment,
+)
 from uqct.debugging import plot_img
-from uqct.models.unet import FBPUNet
 from uqct.training.diffusion import UNet2DModelAux
 from uqct.training.unet import N_ANGLES, norm_intensities
 
@@ -53,18 +58,6 @@ class Diffusion:
         # Guidance
         self.sgd_steps = sgd_steps
         self.lr = lr
-
-    def set_lr_from_experiment(self, experiment: Experiment) -> float:
-        """Computes and returns a best guess of the optimal learning rate.
-        The internal `lr` parameter gets set to this value."""
-        sparse2coef = {True: (-0.1655, 0.0188), False: {-0.0786, 0.01}}
-        beta_0, beta_1 = sparse2coef[experiment.sparse]
-        total_intensity = experiment.intensities.view(
-            math.prod(experiment.batch_dims), -1, 1
-        )[0].sum()
-        total_intensity *= experiment.counts.shape[-1]
-        self.lr = beta_1 * math.log(total_intensity) + beta_0
-        return self.lr
 
     def predict_noise_cond(
         self,
@@ -203,6 +196,7 @@ class Diffusion:
         pred_original_sample[..., ~mask] = -1.0
 
         if guidance_loss_fn is not None:
+            assert self.lr is not None
             pred_original_sample = guide(
                 pred_original_sample,
                 guidance_loss_fn,
@@ -271,7 +265,7 @@ class Diffusion:
             torch.Tensor: `(..., n_angles, replicates, 1, side_length, side_length)` (sparse) or `(..., n_rounds, replicates, 1, side_length, side_length)` (dense).
         """
         if self.lr is None:
-            self.set_lr_from_experiment(experiment)
+            self.lr = lr_from_experiment(experiment)
 
         side_length = experiment.counts.shape[-1]
         if experiment.sparse:
@@ -300,7 +294,7 @@ class Diffusion:
 
         it = tqdm(self.noise_scheduler.timesteps, disable=not self.verbose)
 
-        fbps, intensities, class_labels = FBPUNet._prepare_inputs_from_experiment(
+        fbps, intensities, class_labels = prepare_inputs_from_experiment(
             experiment, schedule
         )
         fbps = fbps.to(self.device)
@@ -457,8 +451,16 @@ def guide(
     sgd_steps: int = 50,
     lr: float = 0.1,
     optimizer: None | optim.Adam = None,
+    patience: None | int = None,
     verbose: bool = False,
 ) -> torch.Tensor:
+    """
+    Arguments:
+        x_t (`torch.Tensor`): Shape (..., H, W) images with pixel values in range [-1, 1]
+
+    Returns:
+        `torch.Tensor`: Guided shape (..., H, W) images with pixel values in range [-1, 1]
+    """
     circle_mask = torch.ones(*x_t.shape[-2:], device=x_t.device)
     radius = x_t.shape[-1] // 2
     y, x = torch.meshgrid(
@@ -480,6 +482,9 @@ def guide(
         with torch.no_grad():
             y.copy_(y_0)
     it = tqdm(range(sgd_steps), disable=not verbose)
+    lowest_loss = float("inf")
+    cur_patience = patience
+    best_y = None
     for _ in it:
         optimizer.zero_grad()
         yp = y * mask
@@ -498,9 +503,22 @@ def guide(
         with torch.no_grad():
             y.data[..., ~mask] = 0.0
 
-        it.set_postfix({"loss": f"{loss.item():.3f}"})
-    optimizer.zero_grad(set_to_none=True)
-    x_t_guided = norm_image(y).clip(-1, 1)
+        loss = loss.item()
+        if loss < lowest_loss:
+            lowest_loss = loss
+            best_y = y.detach().clone()
+            if cur_patience is not None:
+                cur_patience = patience
+
+        elif cur_patience is not None:
+            cur_patience -= 1
+
+        it.set_postfix({"loss": f"{loss:1.2e}", "lowest_loss": f"{lowest_loss:1.2e}"})
+
+        if cur_patience is not None and cur_patience <= 0:
+            break
+
+    x_t_guided = norm_image(best_y).clip(-1, 1)
     return x_t_guided
 
 

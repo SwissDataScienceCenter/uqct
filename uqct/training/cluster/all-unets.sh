@@ -7,7 +7,7 @@
 #SBATCH --gpus=1
 #SBATCH --gres=gpumem:20g
 #SBATCH --time=96:00:00
-#SBATCH --array=0-29
+#SBATCH --array=0-19
 
 module eth_proxy load
 
@@ -22,7 +22,7 @@ export PYTHONPATH="${GITROOT}"
 cd "${GITROOT}"
 
 # Experiment settings
-DATASETS=(composite lung lamino)
+DATASETS=(composite lamino)
 dataset_idx=$((SLURM_ARRAY_TASK_ID / 10))
 seed=$((SLURM_ARRAY_TASK_ID % 10))
 DATASET=${DATASETS[$dataset_idx]}
@@ -32,7 +32,7 @@ SEED=$seed
 CKPT_BASE=/cluster/scratch/mgaetzner/uqct/runs/unet_sparse
 
 # (Optional) Construct checkpoint folder path
-CKPT="${CKPT_BASE}/2025-09-17_17-37_${DATASET}_64_500_0.0001_0.37_0.0043_${SEED}/"
+# CKPT="${CKPT_BASE}/2025-09-17_17-37_${DATASET}_64_500_0.0001_0.37_0.0043_${SEED}/"
 # CKPT=""
 
 # Run

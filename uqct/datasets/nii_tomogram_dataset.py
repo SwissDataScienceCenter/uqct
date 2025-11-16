@@ -3,6 +3,7 @@ import math
 import nibabel as nib
 import torch
 from PIL import Image
+import numpy as np
 
 from uqct.datasets.base_dataset import BaseImageDataset
 
@@ -14,7 +15,9 @@ class NIIWrapper:
         self.path = path
         self.im_size = im_size
 
-        self.all_images = nib.load(path).get_fdata()[file_range[0] : file_range[1]]  # type: ignore
+        self.all_images = np.asanyarray(nib.loadsave.load(path).dataobj)[
+            file_range[0] : file_range[1]
+        ]
         idx_to_slice_list = []
         global_index_to_local_list = []
         coordinates_list = []
@@ -52,7 +55,6 @@ class NIIWrapper:
 
 
 class NiiDataset(BaseImageDataset):
-
     def __init__(
         self,
         path,
@@ -65,21 +67,33 @@ class NiiDataset(BaseImageDataset):
     ):
         self.im_size = im_size
         self.images = NIIWrapper(path, im_size, file_range)
+
+        x = self.images.all_images.astype(np.float32)
+
+        if clip_range:
+            x = np.clip(x, clip_range[0], clip_range[1])
+            val_range = clip_range
+
+        if val_range:
+            x -= val_range[0]
+            x /= val_range[1] - val_range[0]
+        self.images.all_images = torch.from_numpy(x.astype(np.float32))
+
         super().__init__(
             rescale=rescale,
-            clip_range=clip_range,
-            val_range=val_range,
+            # clip_range=clip_range,
+            # val_range=val_range,
             rotation_angle=rotation_angle,
         )
 
     def __getitem__(self, idx):
-        image = torch.tensor(self.images[idx]).float()
+        image = self.images[idx].float()
 
         if len(image.shape) == 2:
             image = image.unsqueeze(0)
 
         image = self.transform(image)
-        return image
+        return image.clip(0, 1)
 
     def __len__(self):
         return len(self.images)

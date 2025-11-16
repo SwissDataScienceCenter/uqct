@@ -62,7 +62,7 @@ class TIFFWrapper:
         return cropped_image
 
     def get_image(self, path):
-        if not path in self.images:
+        if path not in self.images:
             image = Image.open(os.path.join(self.path, path))
             self.images[path] = image
         return self.images[path]
@@ -72,7 +72,6 @@ class TIFFWrapper:
 
 
 class TIFFDataset(BaseImageDataset):
-
     def __init__(
         self,
         path,
@@ -92,13 +91,13 @@ class TIFFDataset(BaseImageDataset):
         )
 
     def __getitem__(self, idx):
-        image = torch.tensor(np.array(self.images[idx])).float()
+        image = torch.from_numpy(np.array(self.images[idx]).astype(np.float32))
 
         if len(image.shape) == 2:
             image = image.unsqueeze(0)
 
         image = self.transform(image)
-        return image
+        return image.clip(0, 1)
 
     def __len__(self):
         return len(self.images)

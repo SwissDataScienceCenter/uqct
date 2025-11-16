@@ -30,7 +30,7 @@ KWARGS_LAMINO = {
     "path": DATA_DIR / "lamino_tiff",
     "rescale": 128,
     "im_size": 256,
-    "val_range": (0.0, 234.59),
+    "val_range": (0.0, 247.86),
     "rotation_angle": 30,
 }
 
@@ -45,9 +45,9 @@ KWARGS_COMPOSITE = {
     "path": DATA_DIR / "composite/SampleG-FBI22-Stitch-0-1-2.txm.nii",
     "rescale": 128,
     "im_size": 256,
-    "val_range": (0.0, 10646.63),
+    "val_range": (0.0, 42101.37),
     "file_range": [20, 360],
-    "clip_range": [3e4, 5e4],
+    # "clip_range": [3e4, 5e4],
     "rotation_angle": 30,
 }
 
@@ -79,7 +79,6 @@ def get_dataset(
 
     if dataset_type == "nii" and "clip_range" not in kwargs:
         kwargs["im_size"] = 512
-        kwargs["clip_range"] = [3e4, 5e4]
 
     dataset = dataset_class(**kwargs)
     torch.manual_seed(0)
