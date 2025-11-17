@@ -29,10 +29,10 @@ class BaseImageDataset(Dataset):
             self.add_clip_range(*clip_range)
         if rescale:
             self.add_scale(width=rescale)
-        self.transforms.append(lambda x: x * get_circle(x, rescale).view(x.shape[-2:]))
-
         if val_range:
             self.add_normalize_range(val_range[0], val_range[1])
+
+        self.transforms.append(lambda x: x * get_circle(x, rescale).view(x.shape[-2:]))
 
     @abstractmethod
     def __getitem__(self, idx: int) -> torch.Tensor | np.ndarray:

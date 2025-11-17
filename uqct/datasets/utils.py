@@ -45,9 +45,8 @@ KWARGS_COMPOSITE = {
     "path": DATA_DIR / "composite/SampleG-FBI22-Stitch-0-1-2.txm.nii",
     "rescale": 128,
     "im_size": 256,
-    "val_range": (0.0, 42101.37),
     "file_range": [20, 360],
-    # "clip_range": [3e4, 5e4],
+    "val_range": [3e4, 4e4],
     "rotation_angle": 30,
 }
 

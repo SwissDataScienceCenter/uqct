@@ -14,7 +14,6 @@ class NIIWrapper:
     def __init__(self, path, im_size=512, file_range=[0, -1]):
         self.path = path
         self.im_size = im_size
-
         self.all_images = np.asanyarray(nib.loadsave.load(path).dataobj)[
             file_range[0] : file_range[1]
         ]
@@ -70,6 +69,9 @@ class NiiDataset(BaseImageDataset):
 
         x = self.images.all_images.astype(np.float32)
 
+        if clip_range is None:
+            clip_range = val_range
+
         if clip_range:
             x = np.clip(x, clip_range[0], clip_range[1])
             val_range = clip_range
@@ -100,4 +102,16 @@ class NiiDataset(BaseImageDataset):
 
 
 if __name__ == "__main__":
-    pass
+    kwargs = {
+        "path": "data/composite/SampleG-FBI22-Stitch-0-1-2.txm.nii",
+        "rescale": 128,
+        "im_size": 256,
+        "val_range": (2.25e4, 42101.37),
+        "file_range": [20, 360],
+        # "clip_range": [3e4, 5e4],
+        "rotation_angle": 30,
+    }
+
+    breakpoint()
+    ds = NiiDataset(**kwargs)
+    print(ds)
