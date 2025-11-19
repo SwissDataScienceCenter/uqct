@@ -889,7 +889,7 @@ def lr_from_experiment(experiment: Experiment) -> float:
     )[0].sum()
     total_intensity *= experiment.counts.shape[-1]
     lr = beta_1 * math.log(total_intensity) + beta_0
-    return lr
+    return min(max(float(lr), 0.0001), 1)
 
 
 if __name__ == "__main__":
