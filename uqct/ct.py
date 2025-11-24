@@ -84,11 +84,8 @@ def nll(
     intensities = intensities.clip(1e-9)
     sino = radon(images, angles)
     scale = l / images.shape[-1]
-    nll = (
-        -counts * (torch.log(intensities) - scale * sino)
-        + intensities * torch.exp(-scale * sino)
-        + torch.lgamma(counts + 1)
-    )
+    log_lam = torch.log(intensities) - scale * sino
+    nll = torch.exp(log_lam) - counts * log_lam + torch.lgamma(counts + 1)
     return nll
 
 
@@ -101,21 +98,84 @@ def nll_mixture(
 ) -> torch.Tensor:
     """
     Arguments:
-        images (torch.Tensor): (..., n_preds, H, W)
-        counts (torch.Tensor): (..., n_angles, n_detectors)
-        intensities (torch.Tensor): (..., n_angles, 1)
-        angles (torch.Tensor): (n_angles,)
-        l: (int)
+        images (`torch.Tensor`): (..., n_preds, H, W)
+        counts (`torch.Tensor`): (..., n_angles, n_detectors)
+        intensities (`torch.Tensor`): (..., n_angles, 1)
+        angles (`torch.Tensor`): (n_angles,)
+        l: (`int`)
     Returns:
-        torch.Tensor: (...)
+        `torch.Tensor`: (...)
     """
+
     n_pred = images.shape[-3]
+
     # (..., n_pred, n_angles, side_length)
-    nlls = nll(images, counts.unsqueeze(-3), intensities, angles, l)
-    nlls -= math.log(n_pred)
+    nlls = -nll(
+        images, counts.unsqueeze(-3), intensities.unsqueeze(-3), angles, l
+    ).double()
     nlls = nlls.sum((-1, -2))  # (..., n_pred)
-    mix = torch.logsumexp(nlls, dim=-1)  # (...)
-    return mix
+    nlls -= math.log(n_pred)
+    mix = -torch.logsumexp(nlls, dim=-1)  # (...)
+    return mix.float()
+
+
+def nll_mixture_angle_schedule(
+    images: torch.Tensor,
+    counts: torch.Tensor,
+    intensities: torch.Tensor,
+    angles: torch.Tensor,
+    schedule: torch.Tensor,
+    l: int = 5,
+) -> torch.Tensor:
+    r"""Compute nll only over angle-based partitions of observations.
+    E.g. If schedule = [3, 7, 10] and n_angles = 20, then
+    images[..., 0] is used for all outputs involving counts[..., 3:7],
+    images[..., 1] for counts[..., 7:10],
+    images[..., 2] for counts[..., 10:].
+
+    Arguments:
+        images (`torch.Tensor`): (..., s, n_preds, H, W)
+        counts (`torch.Tensor`): (..., n_angles, n_detectors)
+        intensities (`torch.Tensor`): (..., n_angles, 1)
+        angles (`torch.Tensor`): (n_angles,)
+        schedule (`torch.Tensor`): (s,) with s <= n_angles
+        l: (`int`)
+    Returns:
+        `torch.Tensor`: (...). Let (...) = (d_1, ..., d_k),
+        the returned tensor has shape (d_1, ..., d_k, s).
+
+    Notes: Ignoring batch dimensions, output[i] equals
+    $$
+        -\sum_{s=schedule[i]}^{schedule[i+1] if i < len(schedule) else n_angles}
+            \log(\frac{1}{n_pred} \sum_{j=1}^{n_pred} p_s(y_s | images[i, j]))
+    $$
+    """
+
+    device = images.device
+    n_angles = counts.shape[-2]
+    if schedule is None:
+        schedule = torch.arange(1, n_angles + 1, device=device)
+
+    # (s, n_angles)
+    schedule_lb = schedule.unsqueeze(1)
+    schedule_ub = torch.cat(
+        [schedule[1:], torch.tensor((n_angles,), device=device)]
+    ).unsqueeze(1)
+    angular_range = torch.arange(n_angles, device=device).expand(len(schedule), -1)
+    mask = angular_range >= schedule_lb
+    mask &= angular_range < schedule_ub
+
+    n_pred = images.shape[-3]
+    counts_expanded = counts.unsqueeze(-3).unsqueeze(-3)
+    intensities = intensities.unsqueeze(-3).unsqueeze(-3)
+
+    # (..., s, n_pred, n_angles, side_length)
+    nlls = nll(images, counts_expanded, intensities, angles, l).double()
+    mix_input = -nlls.sum(-1) - math.log(n_pred)  # (..., s, n_pred, n_angles)
+    mix = -torch.logsumexp(mix_input, dim=-2)
+    mix[..., ~mask] = 0
+    out = mix.sum(-1)
+    return out.float()
 
 
 def radon(images: torch.Tensor, angles: torch.Tensor):
@@ -129,7 +189,7 @@ def radon(images: torch.Tensor, angles: torch.Tensor):
     """
     batch_dims = images.size()[:-2]
     img_shape = images.size()[-2:]
-    images = images.view(-1, *img_shape)
+    images = images.reshape(-1, *img_shape)
 
     proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(angles, images)
 
@@ -893,35 +953,92 @@ def lr_from_experiment(experiment: Experiment) -> float:
 
 
 if __name__ == "__main__":
-    b = 3
+    import lovely_tensors as lt
+
+    lt.monkey_patch()
+
+    b = 1
     r = 128
-    n_pred = 5
-    # n_angles = 200
+    n_pred = 3
     n_angles = 1
     n_detectors = r
     rates = 100.0
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-    preds = torch.rand(b, n_pred, r, r, device=device)
-    counts = poisson(torch.full((b, n_angles, n_detectors), rates, device=device))
-    intensities = torch.rand(n_angles, 1, device=device)
-    angles = torch.rand(n_angles, device=device) * 180
-    nlls = nll_mixture(preds, counts, intensities, angles)
-    assert nlls.shape[0] == b and nlls.ndim == 1
-    rad = radon(preds, angles)
-    assert (
-        rad.shape[0] == b
-        and rad.shape[1] == n_pred
-        and rad.shape[2] == n_angles
-        and rad.shape[3] == n_detectors
-    )
-    rad = radon(preds[0, 0], angles)
-    assert rad.shape[0] == n_angles and rad.shape[1] == n_detectors
-    rad = radon(preds[0], angles)
-    assert (
-        rad.shape[0] == n_pred
-        and rad.shape[1] == n_angles
-        and rad.shape[2] == n_detectors
-    )
+    # schedule = torch.tensor([1, 25, 90, n_angles - 1], device=device)
+    # schedule = torch.arange(n_angles, device=device)
+    # preds = torch.ones(b, len(schedule), n_pred, r, r, device=device)
+    # counts = poisson(torch.full((b, n_angles, n_detectors), rates, device=device))
+    # angles = torch.rand(n_angles, device=device) * 180
 
-    fbp_ = fbp(rad, angles)
+    schedule = torch.tensor([0], device=device)
+    preds = torch.ones(b, len(schedule), n_pred, r, r, device=device) * torch.arange(
+        1, n_pred + 1, device=device
+    ).reshape(n_pred, 1, 1)
+    counts = torch.full((b, n_angles, n_detectors), 42, device=device)
+    intensities = torch.ones((b, n_angles, 1), device=device)
+    angles = torch.tensor([90], device=device)
+
+    print(f"{preds=}")
+    print(f"{counts=}")
+    print(f"{intensities=}")
+    print(f"{angles=}")
+
+    nlls_sched = nll_mixture_angle_schedule(
+        preds, counts, intensities, angles, schedule
+    )
+    nlls_list = []
+    for t in range(n_angles):
+        nll_t = nll_mixture(
+            preds[:, t, ...],
+            counts[:, t : t + 1],
+            intensities[:, t : t + 1],
+            angles[t : t + 1],
+        )
+        nlls_list.append(nll_t)
+    nlls_manual = torch.stack(nlls_list, dim=1)
+    diff = nlls_sched - nlls_manual
+    print(diff)
+
+    from scipy.special import logsumexp, loggamma
+
+    def nll_mix(x: float, log_lams: list[float]) -> float:
+        def lam2nll(log_lam: float) -> float:
+            return math.exp(log_lam) - x * log_lam + loggamma(x + 1)
+
+        ll_lam = -128 * np.array([lam2nll(log_lam) for log_lam in log_lams]) - math.log(
+            len(log_lams)
+        )
+        print(f"gt: {ll_lam=}")
+        return -logsumexp(ll_lam.astype(np.float64))  # type: ignore
+
+    radons = [128.0, 128.0 * 2, 128.0 * 3]
+    scale = -5 / 128
+    log_lams = [scale * x for x in radons]
+    nll_gt = nll_mix(42, log_lams)
+    print(f"{nll_gt=}")
+
+    # test:
+    # angle: 45 degrees
+    # mix(poisson(42; lambdas), lambdas = [128, 256, 512]
+    # = log(1/3 (poisson(42, 128) + poisson(42, 256) + poisson(42, 512))
+
+    # nlls = nll_mixture(preds, counts, intensities, angles)
+    # assert nlls.shape[0] == b and nlls.ndim == 1
+    # rad = radon(preds, angles)
+    # assert (
+    #     rad.shape[0] == b
+    #     and rad.shape[1] == n_pred
+    #     and rad.shape[2] == n_angles
+    #     and rad.shape[3] == n_detectors
+    # )
+    # rad = radon(preds[0, 0], angles)
+    # assert rad.shape[0] == n_angles and rad.shape[1] == n_detectors
+    # rad = radon(preds[0], angles)
+    # assert (
+    #     rad.shape[0] == n_pred
+    #     and rad.shape[1] == n_angles
+    #     and rad.shape[2] == n_detectors
+    # )
+
+    # fbp_ = fbp(rad, angles)
