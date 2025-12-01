@@ -1,5 +1,5 @@
 ARG BASE_IMAGE="nvidia/cuda:13.0.1-base-ubuntu24.04"
-ARG PYTHON_VERSION=3.13
+ARG PYTHON_VERSION=3.12
 
 
 # Stage 1: generate requirements-base.txt from pyproject.toml
