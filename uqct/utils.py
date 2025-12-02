@@ -80,7 +80,7 @@ def get_cache_dir() -> Path:
     raise FileNotFoundError("Unable to locate or create a cache directory.")
 
 
-def get_hardware_specific_engine_path() -> Path:
+def get_hardware_specific_engine_path(dataset: str) -> Path:
     """
     Returns a unique path inside get_cache_dir() based on the current GPU and TRT version.
     """
@@ -109,7 +109,11 @@ def get_hardware_specific_engine_path() -> Path:
 
     # 3. Construct Final Path
     # Structure: /your_cache/tensorrt_engines/NVIDIA_A100_sm80_trt8.6.1
-    engine_dir = base_cache / "tensorrt_engines" / f"{gpu_safe}_{arch_str}_trt{trt_ver}"
+    engine_dir = (
+        base_cache
+        / "tensorrt_engines"
+        / f"{gpu_safe}_{arch_str}_trt{trt_ver}_{dataset}"
+    )
 
     # Create directory if it doesn't exist
     engine_dir.mkdir(parents=True, exist_ok=True)
