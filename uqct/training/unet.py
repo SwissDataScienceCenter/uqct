@@ -145,6 +145,15 @@ def save_ckpt(
     torch.save(payload, ckpt_dir / name)
 
 
+def norm_intensities(total_intensities: torch.Tensor) -> torch.Tensor:
+    total_intensities_norm = (
+        (total_intensities - MIN_TOTAL_INTENSITY)
+        / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
+        * 999
+    )
+    return total_intensities_norm
+
+
 def loss_fn(
     x: torch.Tensor,
     fbps: torch.Tensor,
@@ -158,14 +167,7 @@ def loss_fn(
         fbps.unsqueeze_(1)
     if x.ndim == 3:
         x.unsqueeze_(1)
-
-    _n_angles = n_angles if n_angles is not None else N_ANGLES
-    total_intensities_norm = (
-        (total_intensities - MIN_TOTAL_INTENSITY)
-        / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
-        * 999
-    )
-
+    total_intensities_norm = norm_intensities(total_intensities)
     if n_angles is None:
         pred = unet(
             fbps,
@@ -173,6 +175,7 @@ def loss_fn(
             return_dict=False,
         )[0]
     else:
+        _n_angles = n_angles if n_angles is not None else N_ANGLES
         pred = unet(fbps, total_intensities_norm, class_labels=_n_angles - 1)[0]
     x_lr = F.interpolate(x, size=pred.shape[-2:], mode="area")  # 256x256 -> 128x128
     return F.mse_loss(pred, x_lr)
@@ -388,7 +391,7 @@ def main(**kwargs):
                     enabled=(device.type == "cuda"),
                 ):
                     if kwargs["sparse"]:
-                        fbp, intensities, n_angles = sample_fbp_sparse(x)
+                        fbp, intensities, n_angles = sample_fbp_sparse(x, device)
                         vloss = loss_fn(x, fbp, intensities, unet, n_angles)
                     else:
                         fbp, intensities = sample_fbp_dense(x, angles, device)

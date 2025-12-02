@@ -92,12 +92,12 @@ class TomogramDataset(BaseImageDataset):
         )
 
     def __getitem__(self, idx):  # type: ignore
-        hr_image = torch.Tensor(self.hr_tomogram[idx])
+        hr_image = torch.from_numpy(self.hr_tomogram[idx])
         if len(hr_image.shape) == 2:
             hr_image = hr_image.unsqueeze(0)
 
         hr_image = self.transform(hr_image)
-        return hr_image
+        return hr_image.clip(0, 1)
 
     def __len__(self):  # type: ignore
         return len(self.hr_tomogram)

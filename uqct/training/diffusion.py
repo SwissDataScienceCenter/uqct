@@ -8,18 +8,80 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from diffusers.models.unets.unet_2d import UNet2DModel
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
+from torch import nn
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
 from uqct.datasets.utils import get_dataset
+from uqct.debugging import plot_img
+from uqct.training.unet import N_ANGLES, norm_intensities, sample_fbp_sparse
+
+
+class UNet2DModelAux(nn.Module):
+    def __init__(
+        self,
+        emb_dim: int = 2,
+        dropout: float = 0.37,
+        device: torch.device = torch.device("cpu"),
+    ):
+        super().__init__()
+        self.device = device
+        self.proj = nn.Linear(2, emb_dim)
+        down_block_types = (
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "CrossAttnDownBlock2D",
+            "DownBlock2D",
+        )
+        up_block_types = (
+            "UpBlock2D",
+            "CrossAttnUpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        )
+        channels = (128, 128, 256, 256, 512, 512)
+        self.unet = UNet2DConditionModel(
+            sample_size=128,
+            in_channels=2,
+            out_channels=1,
+            layers_per_block=2,
+            dropout=dropout,
+            block_out_channels=channels,  # type: ignore
+            down_block_types=down_block_types,  # type: ignore
+            up_block_types=up_block_types,  # type: ignore
+            cross_attention_dim=emb_dim,
+        )
+
+    def forward(
+        self,
+        x_t: torch.Tensor,
+        fbp: torch.Tensor,
+        timestep: torch.Tensor,
+        intensity_norm: torch.Tensor,
+        n_angles_norm: torch.Tensor,
+    ) -> torch.Tensor:
+        proj = self.proj(torch.stack([intensity_norm, n_angles_norm], dim=1)).unsqueeze(
+            -2
+        )
+        if x_t.ndim != fbp.ndim:
+            fbp = fbp.unsqueeze(-3)
+        x_t_fbp = torch.cat([x_t, fbp], dim=-3)
+        return self.unet.forward(
+            x_t_fbp, timestep, encoder_hidden_states=proj, return_dict=False
+        )[0]
 
 
 def save_ckpt(
-    unet: UNet2DModel,
+    unet: UNet2DModel | UNet2DModelAux,
     epoch: int,
     val_loss: float,
     run_dir: Path,
@@ -37,7 +99,7 @@ def save_ckpt(
         pbar.write(f"Saving checkpoint: {epoch=}, {val_loss=}, {ckpt_dir=}")
     to_save = unet._orig_mod if hasattr(unet, "_orig_mod") else unet
     payload = {
-        "unet": to_save.state_dict(),
+        "unet": to_save.state_dict(),  # type: ignore
         "epoch": epoch,  # next epoch will start from this value
         "val_loss": val_loss,
         "best_val": best_val,
@@ -53,7 +115,23 @@ def save_ckpt(
     torch.save(payload, ckpt_dir / name)
 
 
-def loss_fn(
+def loss_fn_either(
+    x_0: torch.Tensor,
+    unet: UNet2DModel | UNet2DModelAux,
+    noise_scheduler: DDPMScheduler,
+    device: torch.device = torch.device("cpu"),
+) -> torch.Tensor:
+    if hasattr(unet, "unet"):
+        fbp, intensities, n_angles = sample_fbp_sparse(x_0 * 0.5 + 0.5, device)
+        x_0 = F.interpolate(x_0.to(unet.device), size=(128, 128), mode="area")
+        loss = loss_fn_cond(x_0, fbp, intensities, n_angles, unet, noise_scheduler)  # type: ignore
+    else:
+        x_0 = F.interpolate(x_0.to(unet.device), size=(128, 128), mode="area")
+        loss = loss_fn_uncond(x_0, unet, noise_scheduler)  # type: ignore
+    return loss
+
+
+def loss_fn_uncond(
     x_0: torch.Tensor, unet: UNet2DModel, noise_scheduler: DDPMScheduler
 ) -> torch.Tensor:
     x_0 = x_0.to(unet.device)
@@ -69,45 +147,34 @@ def loss_fn(
     return F.mse_loss(noise_pred, noise)
 
 
-def maybe_resume(
-    ckpt_path: Path,
-    unet: UNet2DModel,
-    optimizer: torch.optim.Optimizer,
-    lr_scheduler,
-    scaler: torch.GradScaler,
-    device: torch.device,
-):
-    start_epoch = 0
-    best_val = float("inf")
-    global_step = 0
-
-    if ckpt_path.is_file():
-        ckpt = torch.load(ckpt_path, map_location=device)
-        sd = ckpt["unet"]
-
-        target = unet._orig_mod if hasattr(unet, "_orig_mod") else unet
-        target.load_state_dict(sd, strict=True)
-
-        if "optimizer" in ckpt:
-            optimizer.load_state_dict(ckpt["optimizer"])
-        if "lr_scheduler" in ckpt:
-            lr_scheduler.load_state_dict(ckpt["lr_scheduler"])
-        if "scaler" in ckpt and isinstance(scaler, torch.GradScaler):
-            scaler.load_state_dict(ckpt["scaler"])
-
-        start_epoch = int(ckpt.get("epoch", 0)) + 1
-        best_val = float(ckpt.get("best_val", ckpt.get("val_loss", float("inf"))))
-        global_step = int(
-            ckpt.get(
-                "global_step", start_epoch * len(lr_scheduler.optimizer.param_groups)
-            )
-        )  # fallback
-
-        print(
-            f"Resumed from '{ckpt_path}': epoch={start_epoch}, best_val={best_val:.6f}, global_step={global_step}"
-        )
-
-    return start_epoch, best_val, global_step
+def loss_fn_cond(
+    x_0: torch.Tensor,
+    fbp: torch.Tensor,
+    intensities: torch.Tensor,
+    n_angles: torch.Tensor,
+    unet: UNet2DModelAux,
+    noise_scheduler: DDPMScheduler,
+) -> torch.Tensor:
+    fbp = (fbp - 0.5) * 2
+    x_0 = x_0.to(unet.device)
+    noise = torch.randn_like(x_0).to(unet.device)
+    intensity_norm = 2 * ((norm_intensities(intensities) / 999) - 0.5)
+    n_angles_norm = (n_angles - N_ANGLES / 2) / (N_ANGLES / 2)
+    timestep = torch.randint(
+        0,
+        noise_scheduler.config.num_train_timesteps,  # type: ignore
+        (x_0.shape[0],),
+        device=x_0.device,
+    ).long()
+    x_t = noise_scheduler.add_noise(x_0, noise, timestep)  # type: ignore
+    noise_pred = unet.forward(
+        x_t,
+        fbp,
+        timestep=timestep,
+        intensity_norm=intensity_norm,
+        n_angles_norm=n_angles_norm,
+    )
+    return F.mse_loss(noise_pred, noise)
 
 
 @click.command()
@@ -137,6 +204,12 @@ def maybe_resume(
     type=click.Path(path_type=Path),
     help="Path to a checkpoint to resume from.",
 )
+@click.option(
+    "--cond",
+    default=False,
+    type=bool,
+    help="Whether to train a conditional diffusion model",
+)
 def main(**kwargs):
     # Seeding
     torch.random.manual_seed(0)
@@ -151,7 +224,7 @@ def main(**kwargs):
     torch.backends.cudnn.benchmark = True
 
     # Load dataset
-    train_set, _ = get_dataset(kwargs["dataset"], False)
+    train_set, _ = get_dataset(kwargs["dataset"], True)
 
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
@@ -161,45 +234,51 @@ def main(**kwargs):
     run_dir = (
         root_dir
         / "runs"
-        / "diffusion"
+        / ("diffusion_cond" if kwargs["cond"] else "diffusion")
         / f"{ts}_{kwargs['dataset']}_{kwargs['batch_size']}_{kwargs['epochs']}_{kwargs['learning_rate']}_{kwargs['dropout']}_{kwargs['weight_decay']}"
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run directory: '{run_dir}'")
 
     # Create U-Net
-    channels = (128, 128, 256, 256, 512, 512)
-    down_block_types = (
-        "DownBlock2D",
-        "DownBlock2D",
-        "DownBlock2D",
-        "DownBlock2D",
-        "AttnDownBlock2D",
-        "DownBlock2D",
-    )
-    up_block_types = (
-        "UpBlock2D",
-        "AttnUpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-    )
-    unet = UNet2DModel(
-        sample_size=128,
-        in_channels=1,
-        out_channels=1,
-        layers_per_block=2,
-        dropout=kwargs["dropout"],
-        block_out_channels=channels,
-        down_block_types=down_block_types,
-        up_block_types=up_block_types,
-    )
+    if kwargs["cond"]:
+        unet = UNet2DModelAux(2, kwargs["dropout"], device)
+    else:
+        channels = (128, 128, 256, 256, 512, 512)
+        down_block_types = (
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "DownBlock2D",
+            "AttnDownBlock2D",
+            "DownBlock2D",
+        )
+        up_block_types = (
+            "UpBlock2D",
+            "AttnUpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+            "UpBlock2D",
+        )
+        unet = UNet2DModel(
+            sample_size=128,
+            in_channels=1,
+            out_channels=1,
+            layers_per_block=2,
+            dropout=kwargs["dropout"],
+            block_out_channels=channels,
+            down_block_types=down_block_types,
+            up_block_types=up_block_types,
+        )
     unet = unet.to(device)  # type: ignore
     if not on_cluster:
-        unet.enable_gradient_checkpointing()
+        if isinstance(unet, UNet2DModel):
+            unet.enable_gradient_checkpointing()
+        else:
+            unet.unet.enable_gradient_checkpointing()
     try:
-        unet: UNet2DModel = torch.compile(unet)  # type: ignore
+        unet: UNet2DModel | UNet2DModelAux = torch.compile(unet)  # type: ignore
     except Exception:
         pass
 
@@ -246,13 +325,11 @@ def main(**kwargs):
         num_training_steps=num_train_steps,
     )
     writer = SummaryWriter(log_dir=run_dir / "tb")
-
-    start_epoch, best_val, global_step = maybe_resume(
-        kwargs["load_model_ckpt"], unet, optimizer, lr_scheduler, scaler, device
-    )
+    global_step = 0
+    best_val = float("inf")
 
     # Run training
-    for epoch in (pbar := tqdm(range(start_epoch, kwargs["epochs"]))):
+    for epoch in (pbar := tqdm(range(0, kwargs["epochs"]))):
         unet.train()
         for x_0 in tqdm(train_loader, desc=f"Epoch {epoch} [Train]", leave=False):
             optimizer.zero_grad(set_to_none=True)
@@ -264,20 +341,18 @@ def main(**kwargs):
                 dtype=torch.float16,
                 enabled=(device.type == "cuda"),
             ):
-                loss = loss_fn(x_0, unet, noise_scheduler)
+                loss = loss_fn_either(x_0, unet, noise_scheduler, device)
 
             if not torch.isfinite(loss):
                 print("Non-finite loss, skipping batch.")
                 optimizer.zero_grad(set_to_none=True)
                 continue
-
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(unet.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
             lr_scheduler.step()
-
             writer.add_scalar("train/loss_step", loss.item(), global_step)
             writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], global_step)
             global_step += 1
@@ -296,8 +371,8 @@ def main(**kwargs):
                     dtype=torch.float16,
                     enabled=(device.type == "cuda"),
                 ):
-                    vloss = loss_fn(x_0, unet, noise_scheduler)
-                val_losses.append(vloss.item())
+                    loss = loss_fn_either(x_0, unet, noise_scheduler, device)
+                val_losses.append(loss.item())
         mean_val_loss = float(sum(val_losses) / max(1, len(val_losses)))
         writer.add_scalar("val/loss_epoch", mean_val_loss, epoch)
 

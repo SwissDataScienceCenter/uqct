@@ -7,7 +7,7 @@
 #SBATCH --gpus=1
 #SBATCH --gres=gpumem:20g
 #SBATCH --time=96:00:00
-#SBATCH --array=0-2
+#SBATCH --array=0-1
 
 module eth_proxy load
 
@@ -22,7 +22,7 @@ export PYTHONPATH=${GITROOT}
 cd $GITROOT
 
 # Experiment settings
-DATASETS=(composite lung lamino)
+DATASETS=(composite lamino)
 DATASET=${DATASETS[$SLURM_ARRAY_TASK_ID]}
 
 # run the actual job
@@ -30,4 +30,5 @@ DATASET=${DATASETS[$SLURM_ARRAY_TASK_ID]}
 	--dataset "$DATASET" \
 	--epochs 500 \
 	--batch-size 64 \
-	--learning-rate 0.0001
+	--learning-rate 0.0001 \
+    --cond
