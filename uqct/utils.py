@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from typing import List, Optional
 
@@ -77,3 +78,40 @@ def get_cache_dir() -> Path:
         if cache_path.is_dir():
             return cache_path
     raise FileNotFoundError("Unable to locate or create a cache directory.")
+
+
+def get_hardware_specific_engine_path() -> Path:
+    """
+    Returns a unique path inside get_cache_dir() based on the current GPU and TRT version.
+    """
+    import tensorrt
+    import torch
+
+    # 1. Get your project's base cache location
+    # Ensure it's a Path object
+    base_cache = Path(get_cache_dir())
+
+    if not torch.cuda.is_available():
+        # Fallback for CPU/Testing (unlikely to use TRT here, but safe to handle)
+        return base_cache / "tensorrt_engines" / "cpu_fallback"
+
+    # 2. Generate Hardware Identity String
+    # GPU Name (e.g. "NVIDIA_A100-SXM4-40GB") -> "NVIDIA_A100_SXM4_40GB"
+    gpu_name = torch.cuda.get_device_name(0)
+    gpu_safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", gpu_name)
+
+    # Compute Capability (e.g. "80" for A100)
+    cap = torch.cuda.get_device_capability(0)
+    arch_str = f"sm{cap[0]}{cap[1]}"
+
+    # TensorRT Version (e.g. "8.6.1")
+    trt_ver = tensorrt.__version__
+
+    # 3. Construct Final Path
+    # Structure: /your_cache/tensorrt_engines/NVIDIA_A100_sm80_trt8.6.1
+    engine_dir = base_cache / "tensorrt_engines" / f"{gpu_safe}_{arch_str}_trt{trt_ver}"
+
+    # Create directory if it doesn't exist
+    engine_dir.mkdir(parents=True, exist_ok=True)
+
+    return engine_dir

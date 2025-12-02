@@ -1,7 +1,12 @@
+import os
+import warnings
 from pathlib import Path
 from typing import Callable, Literal
 
 import click
+import numpy as np
+import onnxruntime as ort
+import tensorrt
 import torch
 import torch.nn.functional as F
 from diffusers.models.unets.unet_2d import UNet2DModel
@@ -14,13 +19,14 @@ from uqct.ct import (
     Experiment,
     apply_circular_mask,
     circular_mask,
+    lr_from_experiment,
     nll,
     prepare_inputs_from_experiment,
-    lr_from_experiment,
 )
 from uqct.debugging import plot_img
 from uqct.training.diffusion import UNet2DModelAux
 from uqct.training.unet import N_ANGLES, norm_intensities
+from uqct.utils import get_checkpoint_dir, get_hardware_specific_engine_path
 
 DatasetName = Literal["lung", "composite", "lamino"]
 
@@ -29,13 +35,18 @@ class Diffusion:
     def __init__(
         self,
         dataset: DatasetName,
-        num_steps: int = 50,
-        sgd_steps: int = 100,
+        num_steps: int = 100,
+        sgd_steps: int = 1,
         lr: float | None = None,
         batch_size: int = 64,
         cond: bool = False,
+        onnx: bool = False,
         verbose: bool = False,
     ):
+        assert not onnx or cond, (
+            "ONNX-based inference is not supported for unconditional models."
+        )
+
         self.verbose = verbose
         self.device = (
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -44,11 +55,43 @@ class Diffusion:
 
         # U-Net
         self.batch_size = batch_size
-        ckpt_path = find_ckpt(dataset, self.cond)
-        self.unet = load_unet(ckpt_path, cond)
-        self.unet.eval()
-        for param in self.unet.parameters():  # type: ignore
-            param.requires_grad = False
+
+        if onnx:
+            onnx_fp = (
+                get_checkpoint_dir()
+                / "diffusion"
+                / f"ddpm_conditional_128_{dataset}.onnx"
+            )
+            try:
+                trt_lib_path = os.path.join(
+                    os.path.dirname(tensorrt.__file__) + "_libs"
+                )
+                os.environ["LD_LIBRARY_PATH"] = (
+                    trt_lib_path + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+                )
+            except Exception as e:
+                warnings.warn(str(e))
+
+            providers = [
+                (
+                    "TensorrtExecutionProvider",
+                    {
+                        "trt_fp16_enable": True,
+                        "trt_engine_cache_enable": True,
+                        "trt_engine_cache_path": get_hardware_specific_engine_path(),
+                    },
+                ),
+                "CUDAExecutionProvider",
+            ]
+            self.ort_session = ort.InferenceSession(onnx_fp, providers=providers)
+            self.io_binding = self.ort_session.io_binding()
+        else:
+            self.ort_session = None
+            ckpt_path = find_ckpt(dataset, self.cond)
+            self.unet = load_unet(ckpt_path, cond)
+            self.unet.eval()
+            for param in self.unet.parameters():  # type: ignore
+                param.requires_grad = False
 
         # Diffusion
         self.num_steps = num_steps
@@ -78,32 +121,66 @@ class Diffusion:
         n_angles_norm = n_angles_norm.flatten()
         timesteps = torch.LongTensor([t]).expand(len(x_t_flat)).to(device)
 
-        # Split into batches of size <= self.batch_size
-        with torch.inference_mode():
-            with torch.autocast(
-                device_type=device.type,
-                dtype=torch.float16,
-                enabled=(device.type == "cuda"),
-            ):
-                for batch_idx in range(0, len(x_t_flat), self.batch_size):
-                    x_t_b = x_t_flat[batch_idx : batch_idx + self.batch_size]
-                    fbps_b = fbps_norm[batch_idx : batch_idx + self.batch_size]
-                    timesteps_b = timesteps[batch_idx : batch_idx + self.batch_size]
-                    intensities_norm_b = intensities_norm[
-                        batch_idx : batch_idx + self.batch_size
-                    ]
-                    n_angles_norm_b = n_angles_norm[
-                        batch_idx : batch_idx + self.batch_size
-                    ]
-                    noise_pred = self.unet(
-                        x_t_b,
-                        fbps_b,
-                        timesteps_b,
-                        intensities_norm_b,
-                        n_angles_norm_b,
-                    )
-                    noise_preds.append(noise_pred)
-        noise_pred = torch.cat(noise_preds, dim=0).view(in_shape)
+        if self.ort_session:
+            inputs = {
+                "x_t": safe_cast_to_half(x_t_flat),
+                "fbps": safe_cast_to_half(fbps_norm),
+                "timesteps": timesteps.int(),
+                "intensities_norm": safe_cast_to_half(intensities_norm),
+                "n_angles_norm": safe_cast_to_half(n_angles_norm),
+            }
+            for name, tensor in inputs.items():
+                if tensor.dtype == torch.float16:
+                    np_type = np.float16
+                else:
+                    np_type = np.int32
+
+                self.io_binding.bind_input(
+                    name=name,
+                    device_type="cuda",
+                    device_id=0,
+                    element_type=np_type,
+                    shape=tuple(tensor.shape),
+                    buffer_ptr=tensor.data_ptr(),
+                )
+            noise_pred = torch.empty(x_t_flat.shape, device=device, dtype=torch.half)
+            self.io_binding.bind_output(
+                "pred",
+                "cuda",
+                0,
+                np.float16,
+                tuple(noise_pred.shape),
+                noise_pred.data_ptr(),
+            )
+            self.ort_session.run_with_iobinding(self.io_binding)
+            noise_pred = noise_pred.reshape(x_t.shape).float()
+        else:
+            # Split into batches of size <= self.batch_size
+            with torch.inference_mode():
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=torch.float16,
+                    enabled=(device.type == "cuda"),
+                ):
+                    for batch_idx in range(0, len(x_t_flat), self.batch_size):
+                        x_t_b = x_t_flat[batch_idx : batch_idx + self.batch_size]
+                        fbps_b = fbps_norm[batch_idx : batch_idx + self.batch_size]
+                        timesteps_b = timesteps[batch_idx : batch_idx + self.batch_size]
+                        intensities_norm_b = intensities_norm[
+                            batch_idx : batch_idx + self.batch_size
+                        ]
+                        n_angles_norm_b = n_angles_norm[
+                            batch_idx : batch_idx + self.batch_size
+                        ]
+                        noise_pred = self.unet(
+                            x_t_b,
+                            fbps_b,
+                            timesteps_b,
+                            intensities_norm_b,
+                            n_angles_norm_b,
+                        )
+                        noise_preds.append(noise_pred)
+            noise_pred = torch.cat(noise_preds, dim=0).view(in_shape)
         return noise_pred
 
     def predict_noise(
@@ -141,7 +218,6 @@ class Diffusion:
         timestep: int,
         sample: torch.Tensor,
         guidance_loss_fn: Callable | None = None,
-        optimizer: optim.Adam | None = None,
         generator=None,
     ) -> DDPMSchedulerOutput:
         """
@@ -196,13 +272,12 @@ class Diffusion:
         pred_original_sample[..., ~mask] = -1.0
 
         if guidance_loss_fn is not None:
-            assert self.lr is not None
+            assert self.lr is not None, "Learning rate uninitialized"
             pred_original_sample = guide(
                 pred_original_sample,
                 guidance_loss_fn,
                 sgd_steps=self.sgd_steps,
                 lr=self.lr * (timestep / 1000),
-                optimizer=optimizer,
                 verbose=False,
             )
 
@@ -324,8 +399,20 @@ class Diffusion:
             else:
                 noise_pred = self.predict_noise(t, x_t)
 
+            # if noise_pred.isnan().any().item():
+            #     print("PRED")
+            #     print(noise_pred)
+            #     print(t)
+            #     print(x_t)
+            #     raise Exception()
             guidance_loss_fn_ = guidance_loss_fn if (20 < t < 1000) else None
             x_t = self.step(noise_pred, t, x_t, guidance_loss_fn_).prev_sample
+            # if x_t.isnan().any().item():
+            #     print("POST STEP")
+            #     print(noise_pred)
+            #     print(t)
+            #     print(x_t)
+            #     raise Exception()
         out = denorm_image(x_t).reshape(rep_first_shape)
         out = apply_circular_mask(out)
 
@@ -341,6 +428,25 @@ class Diffusion:
             x_t.ndim - 1,
         )
         return out.permute(out_perm).unsqueeze(-3)
+
+
+def safe_cast_to_half(x: torch.Tensor) -> torch.Tensor:
+    """
+    Safely casts float32 to float16 by:
+    1. Replacing NaNs with 0 (optional, but recommended for stability)
+    2. Clamping values to the float16 range [-65504, 65504]
+    3. Casting to half
+    """
+    if x.dtype == torch.float16:
+        return x
+
+    # Get limits
+    f16_info = torch.finfo(torch.float16)
+
+    # Optional: Handle NaNs if your pipeline is prone to them
+    # x = torch.nan_to_num(x, nan=0.0)
+
+    return x.clamp(min=f16_info.min, max=f16_info.max).to(torch.float16)
 
 
 def find_ckpt(dataset: DatasetName, cond: bool) -> Path:
@@ -450,7 +556,6 @@ def guide(
     loss_fct: Callable[..., torch.Tensor],
     sgd_steps: int = 50,
     lr: float = 0.1,
-    optimizer: None | optim.Adam = None,
     patience: None | int = None,
     verbose: bool = False,
 ) -> torch.Tensor:
@@ -472,15 +577,12 @@ def guide(
     circle_mask[~mask] = 0
     loss = torch.tensor([float("inf")])
 
+    # Init Optimizer
     y_0 = denorm_image(x_t)
+    y = torch.nn.Parameter(y_0).requires_grad_()
+    # optimizer = optim.Adam([y], lr=lr))
+    optimizer = optim.SGD([y], lr=lr * 10)
 
-    if optimizer is None:
-        y = torch.nn.Parameter(y_0).requires_grad_()
-        optimizer = optim.Adam([y], lr=lr)
-    else:
-        y = optimizer.param_groups[0]["params"][0]
-        with torch.no_grad():
-            y.copy_(y_0)
     it = tqdm(range(sgd_steps), disable=not verbose)
     lowest_loss = float("inf")
     cur_patience = patience
@@ -594,10 +696,10 @@ def main(dataset: DatasetName, sparse: bool, cond: bool, total_intensity):
     experiment = Experiment(counts, intensities_lr, angles, sparse)
     diffusion = Diffusion(
         dataset,
-        num_steps=100,
-        sgd_steps=10,
         batch_size=16,
+        sgd_steps=1,
         cond=cond,
+        onnx=True,
         verbose=True,
     )
 
