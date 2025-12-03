@@ -125,6 +125,7 @@ def nll_mixture_angle_schedule(
     intensities: torch.Tensor,
     angles: torch.Tensor,
     schedule: torch.Tensor,
+    sparse: bool = True,
     l: int = 5,
 ) -> torch.Tensor:
     r"""Compute nll only over angle-based partitions of observations.
@@ -141,8 +142,9 @@ def nll_mixture_angle_schedule(
         schedule (`torch.Tensor`): (s,) with s <= n_angles
         l: (`int`)
     Returns:
-        `torch.Tensor`: (...). Let (...) = (d_1, ..., d_k),
-        the returned tensor has shape (d_1, ..., d_k, s).
+        `torch.Tensor`: (...). Let (...) = (d_1, ..., d_k).
+        If full == False, then the returned tensor has shape (d_1, ..., d_k, s),
+        otherwise it has shape (d_1, ..., d_k, n_angles - min(schedule) + 1).
 
     Notes: Ignoring batch dimensions, output[i] equals
     $$
@@ -151,12 +153,13 @@ def nll_mixture_angle_schedule(
     $$
     """
 
+    # schedule: [1] -> condition prediction on nlls using data up to time 1
+
     device = images.device
     n_angles = counts.shape[-2]
-    if schedule is None:
-        schedule = torch.arange(1, n_angles + 1, device=device)
 
     # (s, n_angles)
+    schedule = schedule - 1
     schedule_lb = schedule.unsqueeze(1)
     schedule_ub = torch.cat(
         [schedule[1:], torch.tensor((n_angles,), device=device)]
@@ -174,7 +177,10 @@ def nll_mixture_angle_schedule(
     mix_input = -nlls.sum(-1) - math.log(n_pred)  # (..., s, n_pred, n_angles)
     mix = -torch.logsumexp(mix_input, dim=-2)
     mix[..., ~mask] = 0
-    out = mix.sum(-1)
+    if sparse:
+        out = mix.sum(-1)
+    else:
+        out = mix.sum(-2)[..., schedule.min() :]  # min=2 -> [1:]
     return out.float()
 
 
@@ -1000,7 +1006,7 @@ if __name__ == "__main__":
     diff = nlls_sched - nlls_manual
     print(diff)
 
-    from scipy.special import logsumexp, loggamma
+    from scipy.special import loggamma, logsumexp
 
     def nll_mix(x: float, log_lams: list[float]) -> float:
         def lam2nll(log_lam: float) -> float:
