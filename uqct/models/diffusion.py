@@ -42,9 +42,9 @@ class Diffusion:
         onnx: bool = False,
         verbose: bool = False,
     ):
-        assert not onnx or cond, (
-            "ONNX-based inference is not supported for unconditional models."
-        )
+        assert (
+            not onnx or cond
+        ), "ONNX-based inference is not supported for unconditional models."
 
         self.verbose = verbose
         self.device = (
@@ -508,6 +508,13 @@ def get_guidance_loss_fn(
         ) < schedule.to(device).unsqueeze(1)
 
         def loss_fn(image: torch.Tensor) -> torch.Tensor:
+            """
+            Arguments:
+                image: (replicates, ..., schedule_length, side_length, side_length)
+
+            Returns:
+                torch.Tensor: (1,)
+            """
             n_batch_dims = experiment.counts.ndim - 2
             counts_unsq = (
                 experiment.counts.unsqueeze(-3)
@@ -525,14 +532,13 @@ def get_guidance_loss_fn(
                 intensities_unsq,
                 experiment.angles,
             )
-            nlls[..., mask, :] = 0.0
-            out = nlls / schedule.to(device).reshape(-1, 1, 1)
-            return out.mean(-1).sum()
+            nlls[..., ~mask, :] = 0.0
+            return nlls.mean(-1).sum()
 
     else:
-        assert schedule is None, (
-            "Schedules are currently unsupported for the dense setting."
-        )
+        assert (
+            schedule is None
+        ), "Schedules are currently unsupported for the dense setting."
         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
 

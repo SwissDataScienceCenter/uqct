@@ -8,11 +8,15 @@ import h5py
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
+import einops
+from collections import defaultdict
 
-from uqct.ct import Experiment, sample_observations
+from uqct.ct import Experiment, sample_observations, nll_mixture_angle_schedule
 from uqct.datasets.utils import get_dataset
 from uqct.training.unet import N_ANGLES
 from uqct.utils import get_root_dir
+from uqct.metrics import get_metrics
 
 
 @dataclass
@@ -49,6 +53,41 @@ class Run:
     run_id: str = field(default_factory=lambda: str(uuid4()))
     timestamp: datetime = field(default_factory=datetime.now)
     extra: dict[str, Any] | None = None
+
+    def __str__(self) -> str:
+        s = []
+        s.append(f"Run Summary (ID: {self.run_id})")
+        s.append(f"  Timestamp: {self.timestamp}")
+        s.append(f"  Model: {self.model}")
+        s.append(f"  Dataset: {self.ct_settings.dataset}")
+        s.append(f"  Total Intensity: {self.ct_settings.total_intensity:.2e}")
+        s.append(f"  Sparse: {self.ct_settings.sparse}")
+        s.append(f"  Seed: {self.seed}")
+
+        if self.extra:
+            s.append("  Extra Metadata:")
+            for k, v in self.extra.items():
+                s.append(f"    {k}: {v}")
+
+        s.append("  Metrics (Mean over all images and steps):")
+        metrics_dict = asdict(self.metrics)
+        for k, v in metrics_dict.items():
+            # v is list[list[float]]
+            # Flatten and calculate mean
+            try:
+                values = [item for sublist in v for item in sublist]
+                if values:
+                    mean_val = sum(values) / len(values)
+                    s.append(f"    {k}: {mean_val:.4f}")
+                else:
+                    s.append(f"    {k}: N/A")
+            except Exception:
+                s.append(f"    {k}: Error calculating mean")
+
+        return "\n".join(s)
+
+    def __repr__(self) -> str:
+        return self.__str__()
 
     def dump_parquet(self) -> None:
         # Load metrics into dataframe
@@ -98,6 +137,7 @@ def setup_experiment(
         dataset (`str`): One of "lung", "composite" or "lamino"
         image_range (`tuple[int, int]`): Range of test set indices; `image_range[0]` is the first test set index, `image_range[1] - 1` is the last test set index, i.e. the upper bound is exclusive.
         total_intensity (`float`): Total intensity over all angles/rounds
+        seed (`int`): Random seed
         sparse (`bool`): Whether we are in a sparse setting
 
     Returns:
@@ -139,7 +179,7 @@ def setup_experiment(
             .int()
         )
     else:
-        n_rounds = 1
+        n_rounds = 10
         intensities = intensities.view(1, 1, 1, 1).expand(
             n_gt, n_rounds, N_ANGLES, -1
         ) / (N_ANGLES * n_detectors_hr * n_rounds)
@@ -148,3 +188,121 @@ def setup_experiment(
     intensities_lr = intensities * 2
     experiment = Experiment(counts, intensities_lr, angles, sparse)
     return gt, experiment, schedule
+
+
+def evaluate_and_save(
+    preds: torch.Tensor,
+    gt: torch.Tensor,
+    experiment: Experiment,
+    schedule: torch.Tensor | None,
+    ct_settings: CTSettings,
+    model_name: str,
+    seed: int,
+    extra_metadata: dict[str, Any] | None = None,
+) -> None:
+    """
+    Evaluates predictions against ground truth and saves the results.
+
+    Args:
+        preds: (N, T, H, W) or (N, T, 1, H, W)
+        gt: (N, H, W)
+        experiment: Experiment object
+        schedule: Schedule tensor or None
+        ct_settings: CTSettings object
+        model_name: Name of the model
+        seed: Random seed
+        extra_metadata: Additional metadata to save
+    """
+    n_gt = len(gt)
+
+    # Ensure preds has shape (N, T, H, W) for metrics calculation
+    if preds.ndim == 5 and preds.shape[2] == 1:
+        preds_metrics = preds.squeeze(2)
+    else:
+        preds_metrics = preds
+
+    # Downsample GT for metrics
+    gt_lr = F.interpolate(
+        einops.rearrange(gt, "n w h -> n 1 w h"), (128, 128), mode="area"
+    )
+    gt_lr = einops.rearrange(gt_lr, "n 1 w h -> n w h")
+
+    metric2lists = defaultdict(list)
+    for image_index in range(n_gt):
+        # Iterate over "timesteps" or "samples" dimension
+        for t in range(preds_metrics.shape[1]):
+            image_gt = gt_lr[image_index]
+            image_pred = preds_metrics[image_index][t]
+            for k, v in get_metrics(image_gt, image_pred).items():
+                if image_index + 1 > len(metric2lists[k]):
+                    metric2lists[k].append(list())
+                metric2lists[k][image_index].append(v)
+    metric2lists = dict(metric2lists)
+
+    # NLL calculation
+    if experiment.sparse:
+        assert schedule is not None, "Expecting schedule to not be None."
+
+        # Ensure preds has shape (N, T, 1, H, W) for NLL calculation
+        if preds.ndim == 4:
+            preds_nll = einops.rearrange(preds, "n t w h -> n t 1 w h")
+        else:
+            preds_nll = preds
+
+        # Repeat if necessary to match schedule length
+        # If T=1 and len(schedule) > 1, we repeat.
+        if preds_nll.shape[1] == 1 and len(schedule) > 1:
+            preds_nll = einops.repeat(
+                preds_nll, "n 1 1 w h -> n s 1 w h", s=len(schedule)
+            )
+
+        preds_nll = preds_nll.contiguous()
+
+        nlls_pred = nll_mixture_angle_schedule(
+            preds_nll,
+            experiment.counts,
+            experiment.intensities,
+            experiment.angles,
+            schedule,
+            sparse=False,
+        )
+
+        gt_expanded = einops.repeat(gt_lr, "n w h -> n t 1 w h", t=len(schedule))
+        gt_expanded = gt_expanded.contiguous()
+
+        nlls_gt = nll_mixture_angle_schedule(
+            gt_expanded,
+            experiment.counts,
+            experiment.intensities,
+            experiment.angles,
+            schedule,
+            sparse=False,
+        )
+    else:
+        # Placeholder for dense setting or raise NotImplementedError as before
+        # For now, let's just set empty lists or raise error if needed.
+        # But diffusion.py raised NotImplementedError.
+        raise NotImplementedError(
+            "Dense setting not fully supported for NLL calculation yet."
+        )
+
+    metrics = Metrics(
+        psnr=metric2lists["PSNR"],
+        ssim=metric2lists["SS"],
+        rmse=metric2lists["RMSE"],
+        zeroone=metric2lists["ZeroOne"],
+        l1=metric2lists["L1"],
+        nll_pred=nlls_pred.tolist(),
+        nll_gt=nlls_gt.tolist(),
+    )
+
+    run = Run(
+        ct_settings=ct_settings,
+        model=model_name,
+        metrics=metrics,
+        seed=seed,
+        preds=preds.cpu().numpy(),
+        extra=extra_metadata,
+    )
+    print(run)
+    run.dump_parquet()
