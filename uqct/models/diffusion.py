@@ -2,6 +2,7 @@ import os
 import warnings
 from pathlib import Path
 from typing import Callable, Literal
+import einops
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -515,16 +516,17 @@ def get_guidance_loss_fn(
             Returns:
                 torch.Tensor: (1,)
             """
-            n_batch_dims = experiment.counts.ndim - 2
-            counts_unsq = (
-                experiment.counts.unsqueeze(-3)
-                .unsqueeze(0)
-                .expand(image.shape[0], *(n_batch_dims * (-1,)), len(schedule), -1, -1)
+            counts_unsq = einops.repeat(
+                experiment.counts,
+                "... a w -> r ... t a w",
+                r=image.shape[0],
+                t=len(schedule),
             )
-            intensities_unsq = (
-                experiment.intensities.unsqueeze(-3)
-                .unsqueeze(0)
-                .expand(image.shape[0], *(n_batch_dims * (-1,)), len(schedule), -1, -1)
+            intensities_unsq = einops.repeat(
+                experiment.intensities,
+                "... a 1 -> r ... t a 1",
+                r=image.shape[0],
+                t=len(schedule),
             )
             nlls = nll(
                 image,
@@ -549,6 +551,61 @@ def get_guidance_loss_fn(
     return loss_fn
 
 
+# def get_guidance_loss_fn(
+#     experiment: Experiment, schedule: torch.Tensor | None = None
+# ) -> Callable[[torch.Tensor], torch.Tensor]:
+#     """Create a loss function that takes as input a batch of images and returns the Poisson NLL loss."""
+#     if experiment.sparse:
+#         n_angles = experiment.counts.shape[-2]
+#         device = experiment.counts.device
+#         if schedule is None:
+#             schedule = torch.arange(1, n_angles + 1, device=device)
+#         mask = torch.arange(n_angles, device=device).expand(
+#             len(schedule), -1
+#         ) < schedule.to(device).unsqueeze(1)
+
+#         def loss_fn(image: torch.Tensor) -> torch.Tensor:
+#             """
+#             Arguments:
+#                 image: (replicates, ..., schedule_length, side_length, side_length)
+
+#             Returns:
+#                 torch.Tensor: (1,)
+#             """
+#             n_batch_dims = experiment.counts.ndim - 2
+#             counts_unsq = (
+#                 experiment.counts.unsqueeze(-3)
+#                 .unsqueeze(0)
+#                 .expand(image.shape[0], *(n_batch_dims * (-1,)), len(schedule), -1, -1)
+#             )
+#             intensities_unsq = (
+#                 experiment.intensities.unsqueeze(-3)
+#                 .unsqueeze(0)
+#                 .expand(image.shape[0], *(n_batch_dims * (-1,)), len(schedule), -1, -1)
+#             )
+#             nlls = nll(
+#                 image,
+#                 counts_unsq,
+#                 intensities_unsq,
+#                 experiment.angles,
+#             )
+#             nlls[..., ~mask, :] = 0.0
+#             return nlls.mean(-1).sum()
+
+#     else:
+#         assert (
+#             schedule is None
+#         ), "Schedules are currently unsupported for the dense setting."
+#         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
+#         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
+
+#         def loss_fn(image: torch.Tensor) -> torch.Tensor:
+#             nlls = nll(image, counts_csum, intensities_csum, experiment.angles)
+#             return nlls.mean((-2, -1)).sum()
+
+#     return loss_fn
+
+
 def guide(
     x_t: torch.Tensor,
     loss_fct: Callable[..., torch.Tensor],
@@ -563,7 +620,6 @@ def guide(
     Returns:
         `torch.Tensor`: Guided shape (..., H, W) images with pixel values in range [-1, 1]
     """
-    circle_mask = torch.ones(*x_t.shape[-2:], device=x_t.device)
     radius = x_t.shape[-1] // 2
     y, x = torch.meshgrid(
         torch.arange(x_t.shape[-2], device=x_t.device),
@@ -571,7 +627,6 @@ def guide(
         indexing="ij",
     )
     mask = (x - radius) ** 2 + (y - radius) ** 2 <= radius**2
-    circle_mask[~mask] = 0
     loss = torch.tensor([float("inf")])
 
     # Init Optimizer
@@ -587,23 +642,17 @@ def guide(
         yp = (y * mask).clip(0)
         loss = loss_fct(yp)
 
-        # Punish out of range
-        low = yp[yp < 0]
-        if len(low) > 0:
-            loss += low.abs().mean()
-        high = yp[yp > 1]
-        if len(high) > 0:
-            loss += (high - 1).abs().mean()
-
         loss.backward()
         optimizer.step()
         with torch.no_grad():
             y.data[..., ~mask] = 0.0
+            y.data[y.data < 0] = 0.0
+            y.data[y.data > 1] = 1.0
 
         loss = loss.item()
         if loss < lowest_loss:
             lowest_loss = loss
-            best_y = yp.data.clone()
+            best_y = y.data.clone()
 
         it.set_postfix({"loss": f"{loss:1.2e}", "lowest_loss": f"{lowest_loss:1.2e}"})
 

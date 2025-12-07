@@ -3,7 +3,6 @@ from typing import Any, Callable, Literal
 
 import astra
 import numpy as np
-import numpy.typing as npt
 import torch
 
 
@@ -78,9 +77,9 @@ def nll(
     Returns:
         torch.Tensor: (..., n_angles, side_length)
     """
-    assert images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1, (
-        f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
-    )
+    assert (
+        images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1
+    ), f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
     intensities = intensities.clip(1e-9)
     sino = radon(images, angles)
     scale = l / images.shape[-1]
@@ -196,14 +195,10 @@ def radon(images: torch.Tensor, angles: torch.Tensor):
     batch_dims = images.size()[:-2]
     img_shape = images.size()[-2:]
     images = images.reshape(-1, *img_shape)
-
     proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(angles, images)
-
     op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
     parallel3d_layer = make_radon_layer(op3d)
-
     sino = parallel3d_layer(images)
-
     return sino.view(*batch_dims, sino.shape[1], img_shape[0])
 
 
@@ -387,10 +382,10 @@ class Experiment:
         self.intensities = intensities
         self.counts = counts
         if sparse:
-            self.total_exposure = intensities.sum((-2, -1)) * self.counts.shape[-1]
+            self.total_intensity = intensities.sum((-2, -1)) * self.counts.shape[-1]
             self.batch_dims = counts.shape[:-2]
         else:
-            self.total_exposure = intensities.sum((-3, -2, -1)) * self.counts.shape[-1]
+            self.total_intensity = intensities.sum((-3, -2, -1)) * self.counts.shape[-1]
             self.batch_dims = counts.shape[:-3]
         self.sparse = sparse
 
@@ -404,7 +399,7 @@ class Experiment:
         self.angles = self.angles.to(device)
         self.intensities = self.intensities.to(device)
         self.counts = self.counts.to(device)
-        self.total_exposure = self.total_exposure.to(device)
+        self.total_intensity = self.total_intensity.to(device)
         return self
 
 
@@ -432,9 +427,9 @@ def get_astra_geometry_from_images(
     angles: torch.Tensor, images: torch.Tensor
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     assert images.ndim == 3, "images must be 3D (n_slices, H, W)"
-    assert images.shape[-1] == images.shape[-2], (
-        f"images must be square (H, W), got images.shape={images.shape}"
-    )
+    assert (
+        images.shape[-1] == images.shape[-2]
+    ), f"images must be square (H, W), got images.shape={images.shape}"
     n_slices, im_size = images.shape[0], images.shape[-2]
     return get_astra_geometry_3d(angles, im_size, n_slices)
 
@@ -444,9 +439,9 @@ def get_astra_geometry_from_sinogram(
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     assert sino.ndim == 3, "sinogram must be 3D (n_angles, n_det_y, n_det_x)"
     n_det_rows, n_angles, n_det_cols = sino.shape
-    assert n_angles == angles.shape[0], (
-        f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sino.shape}"
-    )
+    assert (
+        n_angles == angles.shape[0]
+    ), f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sino.shape}"
     return get_astra_geometry_3d(angles, n_det_cols, n_det_rows)
 
 
@@ -859,14 +854,12 @@ def fbp_2d(
     for angle_set_i, counts_i, intensity_i in zip(angle_sets, counts, intensities):
         if not isinstance(intensity_i, torch.Tensor):
             intensity_i = torch.tensor(intensity_i)
-        print(f"{intensity_i=}")
         sino = sinogram_from_counts(
             counts_i, intensity_i.clone().to(counts_i.device)
         ).clamp_min(0)
         proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(
             angle_set_i, counts_i.shape[-1]
         )
-        print(f"{sino=}")
         fbp = fbp_single_from_forward(
             vol_geom=vol_geom_lr,
             proj_geom=proj_geom_lr,

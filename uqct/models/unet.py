@@ -281,7 +281,7 @@ class FBPUNet:
             intensity_lr,
             class_labels,
             out_device=out_device,
-        )
+        ).float()
 
 
 def load_unet_ckpt(unet: UNet2DModel, ckpt_path: Path, verbose: bool = False) -> None:

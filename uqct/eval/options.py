@@ -1,5 +1,4 @@
 import click
-from typing import Optional
 
 
 def common_options(func):

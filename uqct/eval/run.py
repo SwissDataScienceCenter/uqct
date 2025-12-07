@@ -1,7 +1,7 @@
-import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+import math
+from typing import Any, Literal, Callable
 from uuid import uuid4
 
 import h5py
@@ -306,3 +306,42 @@ def evaluate_and_save(
     )
     print(run)
     run.dump_parquet()
+
+
+def run_evaluation(
+    dataset: Literal["lung", "lamino", "composite"],
+    sparse: bool,
+    total_intensity: float,
+    image_range: tuple[int, int],
+    seed: int,
+    model_name: str,
+    predictor_fn: Callable[[Experiment, torch.Tensor | None], torch.Tensor],
+    extra_metadata: dict[str, Any] | None = None,
+) -> None:
+    """
+    Unified evaluation execution logic.
+    """
+    gt, experiment, schedule = setup_experiment(
+        dataset, image_range, total_intensity, sparse, seed
+    )
+
+    preds = predictor_fn(experiment, schedule)
+
+    ct_settings = CTSettings(
+        dataset=dataset,
+        total_intensity=total_intensity,
+        sparse=sparse,
+        image_start_index=image_range[0],
+        image_end_index=image_range[1],
+    )
+
+    evaluate_and_save(
+        preds=preds,
+        gt=gt,
+        experiment=experiment,
+        schedule=schedule,
+        ct_settings=ct_settings,
+        model_name=model_name,
+        seed=seed,
+        extra_metadata=extra_metadata,
+    )

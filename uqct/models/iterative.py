@@ -1,19 +1,13 @@
-from typing import Literal
-import math
-
-import click
 import torch
 import einops
 from torch import optim
+import math
 from tqdm.auto import tqdm
-from uqct.ct import lr_from_experiment
+from typing import Literal
 from uqct.models.diffusion import get_guidance_loss_fn
 from uqct.ct import circular_mask, Experiment, fbp, sinogram_from_counts
 from uqct.debugging import plot_img
-from uqct.model_eval.experiment import CTSettings, setup_experiment, evaluate_and_save
-from uqct.model_eval.options import common_options
 
-DatasetName = Literal["lung", "composite", "lamino"]
 ReconstructionMethod = Literal["mle", "map"]
 
 
@@ -112,19 +106,16 @@ def reconstruct(
     device = experiment.counts.device
     side_length = experiment.counts.shape[-1]
 
-    if lr < 0.0:
-        # Log-linearly interpolate between 1e-2 and 1e-3 based on total exposure
-        # Range: [1e4, 1e9] -> [1e-3, 1e-2]
-        exposure = float(experiment.total_exposure)
-        # Clamp exposure to range
-        exposure = max(1e4, min(1e9, exposure))
-        log_exposure = math.log10(exposure)
-        # Interpolate: log_lr = (log_exposure - 4) / (9 - 4) * (-2 - (-3)) + (-3)
-        log_lr = (log_exposure - 4) / 5.0 - 3.0
-        lr = 10**log_lr
-        print(f"Interpolated LR: {lr:.2e} (Exposure: {exposure:.2e})")
     if tv_weight < 0.0:
-        tv_weight = 0.00
+        # 5e5 is good for total intensity 1e9
+        # 5e4 is good for total intensity 1e4
+        # Log linearly interpolate
+        tv_weight = 5 * 10 ** (
+            4 + (math.log10(experiment.total_intensity.mean().item()) - 4) / 5.0
+        )
+        print(
+            f"Interpolated TV Weight: {tv_weight:.2e} (Exposure: {experiment.total_intensity.mean().item():.2e})"
+        )
 
     # Initialize using FBP
     # Shape: (N, S, H, W)
@@ -186,88 +177,4 @@ def reconstruct(
             break
 
         it.set_postfix({"loss": f"{current_loss:.2e}", "best": f"{best_loss:.2e}"})
-    plot_img(*xp.reshape(-1, side_length, side_length))
     return best_x
-
-
-@click.command()
-@common_options
-@click.option(
-    "--method",
-    default="mle",
-    type=click.Choice(["mle", "map"]),
-    help="Reconstruction method",
-)
-@click.option(
-    "--lr",
-    default=1e-2,
-    type=float,
-    help="Learning rate (default: 1e-2)",
-)
-@click.option(
-    "--patience",
-    default=50,
-    type=int,
-    help="Patience for early stopping",
-)
-@click.option(
-    "--tv-weight",
-    default=0.01,
-    type=float,
-    help="Weight for TV prior (only for MAP, default: 0.01)",
-)
-@click.option(
-    "--max-steps",
-    default=20000,
-    type=int,
-    help="Maximum number of optimization steps",
-)
-def main(
-    dataset: DatasetName,
-    sparse: bool,
-    total_intensity: float,
-    image_range: tuple[int, int],
-    seed: int,
-    method: ReconstructionMethod,
-    lr: float,
-    patience: int,
-    tv_weight: float,
-    max_steps: int,
-):
-    gt, experiment, schedule = setup_experiment(
-        dataset, image_range, total_intensity, sparse, seed
-    )
-
-    # Run reconstruction
-    # Output shape: (N, 1, H, W)
-    recons = reconstruct(
-        experiment, schedule, method, lr, patience, tv_weight, max_steps
-    )
-
-    ct_settings = CTSettings(
-        dataset=dataset,
-        total_intensity=total_intensity,
-        sparse=sparse,
-        image_start_index=image_range[0],
-        image_end_index=image_range[1],
-    )
-
-    evaluate_and_save(
-        preds=recons,
-        gt=gt,
-        experiment=experiment,
-        schedule=schedule,
-        ct_settings=ct_settings,
-        model_name=method,
-        seed=seed,
-        extra_metadata=dict(
-            lr=lr,
-            patience=patience,
-            tv_weight=tv_weight if method == "map" else None,
-            max_steps=max_steps,
-        ),
-    )
-
-
-if __name__ == "__main__":
-    main()
