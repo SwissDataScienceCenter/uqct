@@ -8,6 +8,7 @@ import sys
 # This fixes "ImportError: libcusparseLt.so.0" etc. when LD_LIBRARY_PATH is not set
 # (e.g. in SLURM jobs or when direnv is not used)
 def _preload_nvidia_libs():
+    print("Preloading Nvidia libraries from site-packages")
     libs_to_preload = [
         "libcusparseLt.so",
         "libcudnn.so",
@@ -28,18 +29,31 @@ def _preload_nvidia_libs():
     ]
 
     site_packages = [p for p in sys.path if "site-packages" in p]
+
+    # Discover .venv relative to this file
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    local_venv = os.path.join(project_root, ".venv")
+    if os.path.exists(local_venv):
+        venv_sps = glob.glob(os.path.join(local_venv, "lib", "python*", "site-packages"))
+        site_packages = venv_sps + site_packages
+
     if not site_packages:
+        print("No site-packages found")
         return
 
     # Check potential nvidia locations (usually site-packages/nvidia)
     # We look for all .so files in nvidia/ subdirectories
-    nvidia_path = os.path.join(site_packages[0], "nvidia")
-    if not os.path.exists(nvidia_path):
+    found_libs = []
+    for sp in site_packages:
+        nvidia_path = os.path.join(sp, "nvidia")
+        if os.path.exists(nvidia_path):
+            found_libs.extend(glob.glob(os.path.join(nvidia_path, "**", "*.so*"), recursive=True))
+
+    if not found_libs:
+        print("No Nvidia libraries found in site-packages")
         return
 
-    # Find all .so files recursively
-    # This might be slightly slow but it's executed once on import
-    found_libs = glob.glob(os.path.join(nvidia_path, "**", "*.so*"), recursive=True)
+    print(f"Found Nvidia libraries in site-packages: {found_libs}")
 
     # Map filenames to full paths for faster lookup
     lib_map = {os.path.basename(p): p for p in found_libs}
@@ -53,6 +67,7 @@ def _preload_nvidia_libs():
                 ctypes.CDLL(match, mode=ctypes.RTLD_GLOBAL)
             except OSError:
                 pass
+    print(f"Preloaded Nvidia libraries from site-packages: {found_libs}")
 
 
 _preload_nvidia_libs()

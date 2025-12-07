@@ -19,9 +19,9 @@ def run_fbp(
     seed: int,
 ):
     def predictor_fn(experiment, schedule):
-        # (N, T, H, W)
+        # (N, T, H, W) -> (N, T, 1, H, W)
         preds, _, _ = prepare_inputs_from_experiment(experiment, schedule)
-        return preds
+        return preds.unsqueeze(2)
 
     run_evaluation(
         dataset=dataset,

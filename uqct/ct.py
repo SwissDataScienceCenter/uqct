@@ -133,14 +133,15 @@ def nll_mixture_angle_schedule(
     images[..., 1] for counts[..., 7:10],
     images[..., 2] for counts[..., 10:].
 
-    Arguments:
+    Arguments
         images (`torch.Tensor`): (..., s, n_preds, H, W)
         counts (`torch.Tensor`): (..., n_angles, n_detectors)
         intensities (`torch.Tensor`): (..., n_angles, 1)
         angles (`torch.Tensor`): (n_angles,)
         schedule (`torch.Tensor`): (s,) with s <= n_angles
         l: (`int`)
-    Returns:
+
+    Returns
         `torch.Tensor`: (...). Let (...) = (d_1, ..., d_k).
         If full == False, then the returned tensor has shape (d_1, ..., d_k, s),
         otherwise it has shape (d_1, ..., d_k, n_angles - min(schedule) + 1).

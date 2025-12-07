@@ -23,10 +23,10 @@ def run_iterative(
     max_steps: int,
 ):
     def predictor_fn(experiment, schedule):
-        # Output shape: (N, 1, H, W)
+        # Output shape: (N, 1, H, W) or (N, T, H, W) -> (N, T, 1, H, W)
         return reconstruct(
             experiment, schedule, method, lr, patience, tv_weight, max_steps
-        )
+        ).unsqueeze(2)
 
     run_evaluation(
         dataset=dataset,

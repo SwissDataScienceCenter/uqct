@@ -92,7 +92,11 @@ class Diffusion:
                 ),
                 "CUDAExecutionProvider",
             ]
-            self.ort_session = ort.InferenceSession(onnx_fp, providers=providers)
+            sess_options = ort.SessionOptions()
+            sess_options.intra_op_num_threads = int(os.environ.get("OMP_NUM_THREADS", 8))
+            self.ort_session = ort.InferenceSession(
+                onnx_fp, sess_options=sess_options, providers=providers
+            )
             self.io_binding = self.ort_session.io_binding()
         else:
             self.ort_session = None

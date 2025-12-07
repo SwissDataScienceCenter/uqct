@@ -20,10 +20,7 @@ def _candidate_root_dirs() -> List[Path]:
     env_root = os.environ.get("UQCT_ROOT_DIR")
     if env_root:
         candidates.append(Path(env_root).expanduser())
-    candidates += [Path("/cluster/scratch/mgaetzner/uqct/")]
-    git_root = _git_root(Path(__file__).resolve().parent)
-    if git_root:
-        candidates.append(git_root)
+    candidates += [Path(__file__).parent.parent]
     return candidates
 
 
@@ -46,6 +43,21 @@ def get_checkpoint_dir() -> Path:
     if ckpt_dir.exists():
         return ckpt_dir
     return get_root_dir() / "checkpoints"
+
+def get_results_dir() -> Path:
+    """Resolve the results directory with environment variable override."""
+    env_results = os.environ.get("UQCT_RESULTS_DIR")
+    if env_results:
+        results_dir = Path(env_results).expanduser()
+    elif Path("/cluster/").exists():
+        results_dir = Path("/cluster/scratch/mgaetzner/uqct/results/")
+    elif Path("/mydata/").exists():
+        results_dir = Path("/mydata/chip/shared/results/uqct/")
+    else:
+        results_dir = get_root_dir() / "results"
+    results_dir.mkdir(exist_ok=True, parents=True)
+    print(f"Results dir: {results_dir}")
+    return results_dir
 
 
 def get_cache_dir() -> Path:

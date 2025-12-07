@@ -15,7 +15,7 @@ from collections import defaultdict
 from uqct.ct import Experiment, sample_observations, nll_mixture_angle_schedule
 from uqct.datasets.utils import get_dataset
 from uqct.training.unet import N_ANGLES
-from uqct.utils import get_root_dir
+from uqct.utils import get_results_dir
 from uqct.metrics import get_metrics
 
 
@@ -108,7 +108,7 @@ class Run:
         df["seed"] = self.seed
 
         # Locate place to save the data
-        output_dir = get_root_dir() / "results" / "model_eval"
+        output_dir = get_results_dir() / "runs"
         output_dir.mkdir(exist_ok=True, parents=True)
         file_name = (
             f"{self.model}:{self.ct_settings.dataset}:{self.ct_settings.total_intensity}:{self.ct_settings.sparse}:"
@@ -204,7 +204,7 @@ def evaluate_and_save(
     Evaluates predictions against ground truth and saves the results.
 
     Args:
-        preds: (N, T, H, W) or (N, T, 1, H, W)
+        preds: (N, T, R, H, W) -> Always 5D
         gt: (N, H, W)
         experiment: Experiment object
         schedule: Schedule tensor or None
@@ -215,11 +215,15 @@ def evaluate_and_save(
     """
     n_gt = len(gt)
 
-    # Ensure preds has shape (N, T, H, W) for metrics calculation
-    if preds.ndim == 5 and preds.shape[2] == 1:
-        preds_metrics = preds.squeeze(2)
+    # Ensure preds has shape (N, T, R, H, W) for metrics calculation
+    # If it happens to be 4D (N, T, H, W), we unsqueeze R=1
+    if preds.ndim == 4:
+         preds_metrics = preds.unsqueeze(2)
     else:
         preds_metrics = preds
+
+    # Calculate metrics on the average prediction across replicates
+    preds_mean = preds_metrics.mean(dim=2) # (N, T, H, W)
 
     # Downsample GT for metrics
     gt_lr = F.interpolate(
@@ -230,9 +234,9 @@ def evaluate_and_save(
     metric2lists = defaultdict(list)
     for image_index in range(n_gt):
         # Iterate over "timesteps" or "samples" dimension
-        for t in range(preds_metrics.shape[1]):
+        for t in range(preds_mean.shape[1]):
             image_gt = gt_lr[image_index]
-            image_pred = preds_metrics[image_index][t]
+            image_pred = preds_mean[image_index, t]
             for k, v in get_metrics(image_gt, image_pred).items():
                 if image_index + 1 > len(metric2lists[k]):
                     metric2lists[k].append(list())
@@ -243,21 +247,26 @@ def evaluate_and_save(
     if experiment.sparse:
         assert schedule is not None, "Expecting schedule to not be None."
 
-        # Ensure preds has shape (N, T, 1, H, W) for NLL calculation
+        # Ensure preds has shape (N, T, R, H, W) for NLL calculation
+        # If it came in as 4D, we already handled it above for metrics, but check again for safety/consistency
         if preds.ndim == 4:
             preds_nll = einops.rearrange(preds, "n t w h -> n t 1 w h")
         else:
             preds_nll = preds
 
-        # Repeat if necessary to match schedule length
-        # If T=1 and len(schedule) > 1, we repeat.
-        if preds_nll.shape[1] == 1 and len(schedule) > 1:
-            preds_nll = einops.repeat(
-                preds_nll, "n 1 1 w h -> n s 1 w h", s=len(schedule)
-            )
+        # Ensure prediction time dimension matches schedule length strict
+        # User requested to not repeat across dimension to make it work.
+        assert preds_nll.shape[1] == len(schedule), (
+            f"Prediction time dimension {preds_nll.shape[1]} must match "
+            f"schedule length {len(schedule)}."
+        )
 
         preds_nll = preds_nll.contiguous()
 
+        # nll_mixture_angle_schedule expects (..., s, n_preds, H, W)
+        # Our preds_nll is (N, s, R, H, W).
+        # We pass it directly. R corresponds to n_preds.
+        
         nlls_pred = nll_mixture_angle_schedule(
             preds_nll,
             experiment.counts,
@@ -267,6 +276,8 @@ def evaluate_and_save(
             sparse=False,
         )
 
+        # For GT, we treat it as single replicate (R=1).
+        # We need (N, s, 1, H, W).
         gt_expanded = einops.repeat(gt_lr, "n w h -> n t 1 w h", t=len(schedule))
         gt_expanded = gt_expanded.contiguous()
 
@@ -280,8 +291,6 @@ def evaluate_and_save(
         )
     else:
         # Placeholder for dense setting or raise NotImplementedError as before
-        # For now, let's just set empty lists or raise error if needed.
-        # But diffusion.py raised NotImplementedError.
         raise NotImplementedError(
             "Dense setting not fully supported for NLL calculation yet."
         )

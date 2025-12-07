@@ -35,8 +35,8 @@ def run_unet(
     )
 
     def predictor_fn(experiment, schedule):
-        # (N, T, H, W)
-        return model.predict(experiment, schedule)
+        # (N, T, H, W) -> (N, T, 1, H, W)
+        return model.predict(experiment, schedule).unsqueeze(2)
 
     run_evaluation(
         dataset=dataset,

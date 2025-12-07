@@ -14,7 +14,7 @@ DATA_DIR_CANDIDATES = [
         "/mydata/chip/shared/data",
         "../data",
         "./data",
-        "/cluster/scratch/mgaetzner/data",
+        "/cluster/home/mgaetzner/uq-xray-ct/data",
     )
 ]
 DATA_DIR = None

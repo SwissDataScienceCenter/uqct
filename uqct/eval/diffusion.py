@@ -41,7 +41,7 @@ def run_diffusion(
             guidance_loss_fn,
         )
         # Rearrange to (N, T, H, W)
-        return einops.rearrange(sample, "n t 1 1 w h -> n t w h")
+        return einops.rearrange(sample, "n t r 1 w h -> n t r w h")
 
     run_evaluation(
         dataset=dataset,
