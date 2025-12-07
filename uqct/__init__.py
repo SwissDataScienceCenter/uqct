@@ -34,7 +34,9 @@ def _preload_nvidia_libs():
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     local_venv = os.path.join(project_root, ".venv")
     if os.path.exists(local_venv):
-        venv_sps = glob.glob(os.path.join(local_venv, "lib", "python*", "site-packages"))
+        venv_sps = glob.glob(
+            os.path.join(local_venv, "lib", "python*", "site-packages")
+        )
         site_packages = venv_sps + site_packages
 
     if not site_packages:
@@ -47,7 +49,9 @@ def _preload_nvidia_libs():
     for sp in site_packages:
         nvidia_path = os.path.join(sp, "nvidia")
         if os.path.exists(nvidia_path):
-            found_libs.extend(glob.glob(os.path.join(nvidia_path, "**", "*.so*"), recursive=True))
+            found_libs.extend(
+                glob.glob(os.path.join(nvidia_path, "**", "*.so*"), recursive=True)
+            )
 
     if not found_libs:
         print("No Nvidia libraries found in site-packages")

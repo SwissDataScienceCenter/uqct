@@ -4,9 +4,7 @@ import glob
 import os
 import re
 import time
-from pathlib import Path
 from collections import defaultdict
-import concurrent.futures
 
 # ANSI colors
 RED = "\033[91m"
@@ -15,14 +13,31 @@ YELLOW = "\033[93m"
 CYAN = "\033[96m"
 RESET = "\033[0m"
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Monitor SLURM job logs.")
     parser.add_argument("job_id", type=str, help="SLURM job ID (or array job ID)")
-    parser.add_argument("--range", nargs=2, type=int, metavar=("START", "END"), help="Expected range of array indices (inclusive)")
-    parser.add_argument("--log-dir", type=str, default="/cluster/scratch/mgaetzner/logs", help="Directory containing log files")
+    parser.add_argument(
+        "--range",
+        nargs=2,
+        type=int,
+        metavar=("START", "END"),
+        help="Expected range of array indices (inclusive)",
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default="/cluster/scratch/mgaetzner/logs",
+        help="Directory containing log files",
+    )
 
-    parser.add_argument("--dashboard", action="store_true", help="Run in dashboard mode (continuous update)")
+    parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="Run in dashboard mode (continuous update)",
+    )
     return parser.parse_args()
+
 
 class JobMonitor:
     def __init__(self, job_id: str, log_dir: str):
@@ -33,7 +48,7 @@ class JobMonitor:
     def get_indices(self, args_range=None):
         if args_range:
             return list(range(args_range[0], args_range[1] + 1))
-        
+
         pattern = os.path.join(self.log_dir, f"*_{self.job_id}_*")
         files = glob.glob(pattern)
         found_indices = set()
@@ -50,17 +65,17 @@ class JobMonitor:
 
         # Check file logic
         status, msg, ts = self._check_files(index)
-        
+
         # Cache terminal states
         if status in ["Success", "Failed"]:
             self.cache[index] = (status, msg, ts)
-            
+
         return index, status, msg, ts
 
     def _check_files(self, index):
         out_pattern = os.path.join(self.log_dir, f"*_{self.job_id}_{index}.out")
         err_pattern = os.path.join(self.log_dir, f"*_{self.job_id}_{index}.err")
-        
+
         out_files = glob.glob(out_pattern)
         err_files = glob.glob(err_pattern)
 
@@ -94,23 +109,27 @@ class JobMonitor:
             try:
                 with open(err_file, "r") as f:
                     for line in f:
-                        if re.search(r"(Error|Traceback|Exception)", line, re.IGNORECASE):
+                        if re.search(
+                            r"(Error|Traceback|Exception)", line, re.IGNORECASE
+                        ):
                             error_msg = line.strip()
                             return "Failed", error_msg, timestamp
             except Exception:
                 pass
-                
-        # Check for failure in out file 
+
+        # Check for failure in out file
         if out_file and not error_msg:
-             try:
+            try:
                 with open(out_file, "r") as f:
                     for line in f:
-                         if re.search(r"(Error|Traceback|Exception)", line, re.IGNORECASE):
+                        if re.search(
+                            r"(Error|Traceback|Exception)", line, re.IGNORECASE
+                        ):
                             error_msg = line.strip()
                             return "Failed", error_msg, timestamp
-             except Exception:
+            except Exception:
                 pass
-        
+
         return "Running", None, None
 
     def update(self, indices):
@@ -122,7 +141,7 @@ class JobMonitor:
             stats[status].append((i, msg))
             if ts is not None:
                 finished_timestamps.append(ts)
-        
+
         todo_indices = [i for i in indices if i not in self.cache]
         total_todo = len(todo_indices)
 
@@ -134,12 +153,13 @@ class JobMonitor:
             stats[status].append((idx, msg))
             if status in ["Success", "Failed"] and ts is not None:
                 finished_timestamps.append(ts)
-        
+
         # Clear the progress line
         if total_todo > 0:
             print(" " * 40, end="\r", flush=True)
 
         return stats, finished_timestamps
+
 
 def format_time(seconds):
     if seconds is None:
@@ -150,6 +170,7 @@ def format_time(seconds):
         return f"{int(h)}h {int(m)}m"
     return f"{int(m)}m {int(s)}s"
 
+
 def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False):
     n_success = len(stats["Success"])
     n_failed = len(stats["Failed"])
@@ -158,32 +179,40 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
     # If using cache, 'Running' implies we checked and it's still running (or didn't check but it wasn't cached)
     # Actually, check_status returns 'Running' if files exist but no done/error.
     # Note: 'Pending' means no files.
-    
+
     output = []
     if clear:
-        output.append("\033[2J\033[H") # Clear screen and move cursor home
-    
+        output.append("\033[2J\033[H")  # Clear screen and move cursor home
+
     output.append(f"Monitoring Job ID: {job_id}")
     output.append(f"Last updated: {time.strftime('%H:%M:%S')}")
     output.append("-" * 40)
-    
+
     output.append("Summary:")
     output.append(f"  Total:   {total_indices}")
-    output.append(f"  {GREEN}Success: {n_success}{RESET} ({n_success/total_indices*100:.1f}%)")
-    output.append(f"  {RED}Failed:  {n_failed}{RESET} ({n_failed/total_indices*100:.1f}%)")
-    output.append(f"  {CYAN}Running: {n_running}{RESET} ({n_running/total_indices*100:.1f}%)")
-    output.append(f"  {YELLOW}Pending: {n_pending}{RESET} ({n_pending/total_indices*100:.1f}%)")
-    
+    output.append(
+        f"  {GREEN}Success: {n_success}{RESET} ({n_success/total_indices*100:.1f}%)"
+    )
+    output.append(
+        f"  {RED}Failed:  {n_failed}{RESET} ({n_failed/total_indices*100:.1f}%)"
+    )
+    output.append(
+        f"  {CYAN}Running: {n_running}{RESET} ({n_running/total_indices*100:.1f}%)"
+    )
+    output.append(
+        f"  {YELLOW}Pending: {n_pending}{RESET} ({n_pending/total_indices*100:.1f}%)"
+    )
+
     # Runtime Estimation
     output.append("-" * 40)
-    
+
     if len(finished_timestamps) >= 2:
         finished_timestamps.sort()
         start_time = finished_timestamps[0]
         end_time = finished_timestamps[-1]
         elapsed_processing = end_time - start_time
-        
-        if elapsed_processing > 10: 
+
+        if elapsed_processing > 10:
             throughput = (len(finished_timestamps) - 1) / elapsed_processing
             if throughput > 0:
                 n_remaining = n_running + n_pending
@@ -191,13 +220,17 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
                 output.append(f"  Estimated Rate: {throughput*60:.2f} jobs/min")
                 output.append(f"  Estimated Remaining Time: {format_time(eta_seconds)}")
             else:
-                 output.append("  Estimated Remaining Time: Unknown (Throughput 0)")
+                output.append("  Estimated Remaining Time: Unknown (Throughput 0)")
         else:
-             output.append("  Estimated Remaining Time: Calculating... (Need more time sample)")
+            output.append(
+                "  Estimated Remaining Time: Calculating... (Need more time sample)"
+            )
     elif (n_running + n_pending) == 0:
         output.append("  Estimated Remaining Time: 0s (Done)")
     else:
-        output.append("  Estimated Remaining Time: Unknown (Need at least 2 finished jobs)")
+        output.append(
+            "  Estimated Remaining Time: Unknown (Need at least 2 finished jobs)"
+        )
 
     # Details
     failed_tasks = sorted(stats["Failed"], key=lambda x: x[0])
@@ -210,15 +243,20 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
 
     if n_running > 0:
         if n_running < 20:
-             output.append(f"\n{CYAN}Running Indices:{RESET} {[i for i, _ in running_tasks]}")
+            output.append(
+                f"\n{CYAN}Running Indices:{RESET} {[i for i, _ in running_tasks]}"
+            )
         else:
-             output.append(f"\n{CYAN}Running Indices:{RESET} (first 20) {[i for i, _ in running_tasks][:20]} ...")
-            
+            output.append(
+                f"\n{CYAN}Running Indices:{RESET} (first 20) {[i for i, _ in running_tasks][:20]} ..."
+            )
+
     print("\n".join(output))
+
 
 def main():
     args = parse_args()
-    
+
     monitor = JobMonitor(args.job_id, args.log_dir)
     indices = monitor.get_indices(args.range)
 
@@ -240,6 +278,7 @@ def main():
         print("-" * 40)
         stats, timestamps = monitor.update(indices)
         print_summary(stats, timestamps, len(indices), args.job_id, clear=False)
+
 
 if __name__ == "__main__":
     main()

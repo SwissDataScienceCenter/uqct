@@ -218,12 +218,12 @@ def evaluate_and_save(
     # Ensure preds has shape (N, T, R, H, W) for metrics calculation
     # If it happens to be 4D (N, T, H, W), we unsqueeze R=1
     if preds.ndim == 4:
-         preds_metrics = preds.unsqueeze(2)
+        preds_metrics = preds.unsqueeze(2)
     else:
         preds_metrics = preds
 
     # Calculate metrics on the average prediction across replicates
-    preds_mean = preds_metrics.mean(dim=2) # (N, T, H, W)
+    preds_mean = preds_metrics.mean(dim=2)  # (N, T, H, W)
 
     # Downsample GT for metrics
     gt_lr = F.interpolate(
@@ -266,7 +266,7 @@ def evaluate_and_save(
         # nll_mixture_angle_schedule expects (..., s, n_preds, H, W)
         # Our preds_nll is (N, s, R, H, W).
         # We pass it directly. R corresponds to n_preds.
-        
+
         nlls_pred = nll_mixture_angle_schedule(
             preds_nll,
             experiment.counts,

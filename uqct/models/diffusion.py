@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Callable, Literal
 import einops
 
-import matplotlib.pyplot as plt
 import numpy as np
 import onnxruntime as ort
 import tensorrt
@@ -93,7 +92,9 @@ class Diffusion:
                 "CUDAExecutionProvider",
             ]
             sess_options = ort.SessionOptions()
-            sess_options.intra_op_num_threads = int(os.environ.get("OMP_NUM_THREADS", 8))
+            sess_options.intra_op_num_threads = int(
+                os.environ.get("OMP_NUM_THREADS", 8)
+            )
             self.ort_session = ort.InferenceSession(
                 onnx_fp, sess_options=sess_options, providers=providers
             )
@@ -339,8 +340,8 @@ class Diffusion:
     ) -> torch.Tensor:
         with torch.no_grad():
             for t in tqdm(self.noise_scheduler.timesteps, disable=not self.verbose):
-                noise_pred, _, _ = self.predict_noise(t, image)
-                image = self.step(noise_pred, t, image).prev_sample
+                noise_pred, _, _ = self.predict_noise(t, image)  # type: ignore
+                image = self.step(noise_pred, t, image).prev_sample  # type: ignore
             return denorm_image(image)
 
     def sample(
@@ -409,13 +410,13 @@ class Diffusion:
         for t in it:
             if self.cond:
                 noise_pred = self.predict_noise_cond(
-                    t, x_t, fbps_norm, intensities_norm, n_angles_norm
+                    t, x_t, fbps_norm, intensities_norm, n_angles_norm  # type: ignore
                 )
             else:
-                noise_pred = self.predict_noise(t, x_t)
+                noise_pred = self.predict_noise(t, x_t)  # type: ignore
 
             guidance_loss_fn_ = guidance_loss_fn if (20 < t < 1000) else None
-            x_t = self.step(noise_pred, t, x_t, guidance_loss_fn_).prev_sample
+            x_t = self.step(noise_pred, t, x_t, guidance_loss_fn_).prev_sample  # type: ignore
         out = denorm_image(x_t).reshape(rep_first_shape)
         out = apply_circular_mask(out)
 
@@ -553,61 +554,6 @@ def get_guidance_loss_fn(
             return nlls.mean((-2, -1)).sum()
 
     return loss_fn
-
-
-# def get_guidance_loss_fn(
-#     experiment: Experiment, schedule: torch.Tensor | None = None
-# ) -> Callable[[torch.Tensor], torch.Tensor]:
-#     """Create a loss function that takes as input a batch of images and returns the Poisson NLL loss."""
-#     if experiment.sparse:
-#         n_angles = experiment.counts.shape[-2]
-#         device = experiment.counts.device
-#         if schedule is None:
-#             schedule = torch.arange(1, n_angles + 1, device=device)
-#         mask = torch.arange(n_angles, device=device).expand(
-#             len(schedule), -1
-#         ) < schedule.to(device).unsqueeze(1)
-
-#         def loss_fn(image: torch.Tensor) -> torch.Tensor:
-#             """
-#             Arguments:
-#                 image: (replicates, ..., schedule_length, side_length, side_length)
-
-#             Returns:
-#                 torch.Tensor: (1,)
-#             """
-#             n_batch_dims = experiment.counts.ndim - 2
-#             counts_unsq = (
-#                 experiment.counts.unsqueeze(-3)
-#                 .unsqueeze(0)
-#                 .expand(image.shape[0], *(n_batch_dims * (-1,)), len(schedule), -1, -1)
-#             )
-#             intensities_unsq = (
-#                 experiment.intensities.unsqueeze(-3)
-#                 .unsqueeze(0)
-#                 .expand(image.shape[0], *(n_batch_dims * (-1,)), len(schedule), -1, -1)
-#             )
-#             nlls = nll(
-#                 image,
-#                 counts_unsq,
-#                 intensities_unsq,
-#                 experiment.angles,
-#             )
-#             nlls[..., ~mask, :] = 0.0
-#             return nlls.mean(-1).sum()
-
-#     else:
-#         assert (
-#             schedule is None
-#         ), "Schedules are currently unsupported for the dense setting."
-#         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
-#         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
-
-#         def loss_fn(image: torch.Tensor) -> torch.Tensor:
-#             nlls = nll(image, counts_csum, intensities_csum, experiment.angles)
-#             return nlls.mean((-2, -1)).sum()
-
-#     return loss_fn
 
 
 def guide(

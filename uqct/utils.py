@@ -44,6 +44,7 @@ def get_checkpoint_dir() -> Path:
         return ckpt_dir
     return get_root_dir() / "checkpoints"
 
+
 def get_results_dir() -> Path:
     """Resolve the results directory with environment variable override."""
     env_results = os.environ.get("UQCT_RESULTS_DIR")
