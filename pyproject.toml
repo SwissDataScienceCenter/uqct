@@ -26,6 +26,7 @@ dependencies = [
   "torch==2.6.0",
   "torchvision==0.21.0",
   "tqdm==4.67.1",
+  "pdbpp>=0.11.7",
 ]
 name = "uqct"
 version = "0.0.1"

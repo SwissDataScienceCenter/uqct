@@ -21,16 +21,17 @@ def cli():
 @cli.command()
 @click.option(
     "--model",
-    required=True,
+    required=False,
     type=click.Choice(["fbp", "mle", "map", "unet", "diffusion"]),
-    help="Model name (fbp, mle, map, unet, diffusion)",
+    default=None,
+    help="Model name (fbp, mle, map, unet, diffusion). Required only if running locally without job-id to filter.",
 )
 @click.option(
     "--job-id", type=int, default=None, help="SLURM array job ID to select config"
 )
 @click.option("--sparse", is_flag=True, default=True, help="Use sparse setting")
 def run(
-    model: Literal["fbp", "mle", "map", "unet", "diffusion"],
+    model: Literal["fbp", "mle", "map", "unet", "diffusion"] | None,
     job_id: int | None,
     sparse: bool,
 ):
@@ -49,35 +50,46 @@ def run(
     with open(settings_path, "rb") as f:
         settings = tomllib.load(f)["eval"]
 
+    models = settings.get("models", ["fbp", "mle", "map", "unet", "diffusion"])
     datasets = settings["datasets"]
     intensities = settings["total_intensity_values"]
-    image_range = tuple(settings["image_range"])
+
+    full_image_range = tuple(settings["image_range"])
+    start, end = full_image_range
+    # Create chunks of 10
+    image_ranges = [(i, min(i + 10, end)) for i in range(start, end, 10)]
 
     # Create grid of configurations
-    # Order: Iterate datasets, then intensities? Or vice versa?
-    # Let's match typical array order: Dataset outer, Intensity inner, or flat.
-    # itertools.product(A, B) yields (a0, b0), (a0, b1)...
-    grid = list(itertools.product(datasets, intensities))
+    # Order: Dataset, Intensity, Image Range, Model (Model inner-most to fail fast)
+    grid = list(itertools.product(datasets, intensities, image_ranges, models))
 
     if job_id is not None:
         if job_id < 0 or job_id >= len(grid):
             click.echo(f"Job ID {job_id} out of range (0-{len(grid)-1})")
             sys.exit(1)
 
-        dataset, intensity = grid[job_id]
-        click.echo(f"Running evaluation for {model}:")
+        dataset, intensity, current_image_range, model = grid[job_id]
+        if model is None:
+            raise ValueError("Model in grid cannot be None")
+
+        click.echo(f"Running evaluation for Job ID {job_id}:")
+        click.echo(f"  Model: {model}")
         click.echo(f"  Dataset: {dataset}")
         click.echo(f"  Intensity: {intensity}")
         click.echo(f"  Sparse: {sparse}")
-        click.echo(f"  Image Range: {image_range}")
+        click.echo(f"  Image Range: {current_image_range}")
 
-        _dispatch(model, dataset, intensity, sparse, image_range)
+        _dispatch(model, dataset, intensity, sparse, current_image_range)
     else:
         # If no job_id, run all locally
-        click.echo(f"Running all {len(grid)} configurations for {model}...")
-        for i, (dataset, intensity) in enumerate(grid):
-            click.echo(f"\n--- Config {i+1}/{len(grid)}: {dataset}, {intensity} ---")
-            _dispatch(model, dataset, intensity, sparse, image_range)
+        if model:
+            # Filter grid for specific model if provided
+            grid = [(d, i, r, m) for d, i, r, m in grid if m == model]
+
+        click.echo(f"Running {len(grid)} configurations...")
+        for i, (d, inten, r, m) in enumerate(grid):
+            click.echo(f"\n--- Config {i+1}/{len(grid)}: {m}, {d}, {inten}, {r} ---")
+            _dispatch(m, d, inten, sparse, r)
 
 
 def _dispatch(
