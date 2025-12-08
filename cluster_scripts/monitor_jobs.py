@@ -36,6 +36,12 @@ def parse_args():
         action="store_true",
         help="Run in dashboard mode (continuous update)",
     )
+    parser.add_argument(
+        "--save-failed",
+        type=str,
+        default=None,
+        help="Path to save list of failed job indices",
+    )
     return parser.parse_args()
 
 
@@ -109,7 +115,10 @@ class JobMonitor:
             try:
                 with open(err_file, "r") as f:
                     for line in f:
-                        if "Using an engine plan file across different models of devices" in line:
+                        if (
+                            "Using an engine plan file across different models of devices"
+                            in line
+                        ):
                             continue
                         if re.search(
                             r"(Error|Traceback|Exception)", line, re.IGNORECASE
@@ -124,7 +133,10 @@ class JobMonitor:
             try:
                 with open(out_file, "r") as f:
                     for line in f:
-                        if "Using an engine plan file across different models of devices" in line:
+                        if (
+                            "Using an engine plan file across different models of devices"
+                            in line
+                        ):
                             continue
                         if re.search(
                             r"(Error|Traceback|Exception)", line, re.IGNORECASE
@@ -276,12 +288,32 @@ def main():
                 time.sleep(5)
         except KeyboardInterrupt:
             print("\nDashboard stopped.")
+
     else:
         print(f"Monitoring Job ID: {args.job_id}")
         print(f"Checking {len(indices)} tasks...")
         print("-" * 40)
         stats, timestamps = monitor.update(indices)
         print_summary(stats, timestamps, len(indices), args.job_id, clear=False)
+
+    # Save failed indices if requested
+    if args.save_failed:
+        failed_indices = []
+        for i, (status, _, _) in monitor.cache.items():
+            if status == "Failed":
+                failed_indices.append(i)
+
+        failed_indices.sort()
+
+        if failed_indices:
+            with open(args.save_failed, "w") as f:
+                for idx in failed_indices:
+                    f.write(f"{idx}\n")
+            print(
+                f"\n{RED}Saved {len(failed_indices)} failed job indices to {args.save_failed}{RESET}"
+            )
+        else:
+            print(f"\n{GREEN}No failed jobs to save.{RESET}")
 
 
 if __name__ == "__main__":
