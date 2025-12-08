@@ -28,5 +28,23 @@ fi
 
 source "${PROJECT_ROOT}/.venv/bin/activate"
 
+# Determine Job ID (Normal vs Retry)
+if [ "${1:-}" != "" ] && [ -f "$1" ]; then
+    # Retry mode: read from file
+    # SLURM_ARRAY_TASK_ID is 0-indexed, sed uses 1-indexed lines
+    LINE_NUM=$((SLURM_ARRAY_TASK_ID + 1))
+    JOB_ID=$(sed -n "${LINE_NUM}p" "$1")
+    
+    if [ -z "$JOB_ID" ]; then
+        echo "No job ID found at line ${LINE_NUM} of $1. Assuming array task out of range for fewer failed jobs."
+        exit 0
+    fi
+    echo "Retry Mode: Mapped Array ID ${SLURM_ARRAY_TASK_ID} to Job ID ${JOB_ID} from $1"
+else
+    # Normal mode
+    JOB_ID="${SLURM_ARRAY_TASK_ID}"
+    echo "Normal Mode: Job ID ${JOB_ID}"
+fi
+
 # Run evaluation
-python -m uqct.eval.cli run --job-id "${SLURM_ARRAY_TASK_ID}" --sparse
+python -m uqct.eval.cli run --job-id "${JOB_ID}" --sparse
