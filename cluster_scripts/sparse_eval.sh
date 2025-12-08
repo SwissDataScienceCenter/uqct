@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=uqct-sparse-eval
-#SBATCH --array=0-899
+#SBATCH --array=0-14399
 #SBATCH --output=/cluster/scratch/mgaetzner/logs/%x_%A_%a.out
 #SBATCH --error=/cluster/scratch/mgaetzner/logs/%x_%A_%a.err
 #SBATCH --cpus-per-task=4
