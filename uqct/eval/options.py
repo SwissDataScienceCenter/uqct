@@ -26,4 +26,10 @@ def common_options(func):
         help="Test set images range (exclusive)",
     )(func)
     func = click.option("--seed", default=0, type=int, help="Random seed")(func)
+    func = click.option(
+        "--schedule-length",
+        default=10,
+        type=int,
+        help="Number of angles/rounds to use for the schedule",
+    )(func)
     return func

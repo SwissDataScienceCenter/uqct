@@ -17,6 +17,7 @@ def run_diffusion(
     sparse: bool,
     cond: bool,
     total_intensity: float,
+    schedule_length: int,
     gradient_steps: int,
     guidance_lr: float | None,
     image_range: tuple[int, int],
@@ -55,6 +56,7 @@ def run_diffusion(
         seed=seed,
         model_name="diffusion",
         predictor_fn=predictor_fn,
+        schedule_length=schedule_length,
         extra_metadata=dict(
             cond=cond, guidance_lr=guidance_lr, gradient_steps=gradient_steps
         ),
@@ -89,6 +91,7 @@ def main(
     sparse: bool,
     cond: bool,
     total_intensity: float,
+    schedule_length: int,
     gradient_steps: int,
     guidance_lr: float | None,
     image_range: tuple[int, int],
@@ -100,6 +103,7 @@ def main(
         sparse,
         cond,
         total_intensity,
+        schedule_length,
         gradient_steps,
         guidance_lr,
         image_range,

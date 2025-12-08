@@ -53,6 +53,7 @@ def run(
     models = settings.get("models", ["fbp", "mle", "map", "unet", "diffusion"])
     datasets = settings["datasets"]
     intensities = settings["total_intensity_values"]
+    schedule_length = settings.get("schedule_length", 32)
 
     full_image_range = tuple(settings["image_range"])
     start, end = full_image_range
@@ -79,7 +80,7 @@ def run(
         click.echo(f"  Sparse: {sparse}")
         click.echo(f"  Image Range: {current_image_range}")
 
-        _dispatch(model, dataset, intensity, sparse, current_image_range)  # type: ignore
+        _dispatch(model, dataset, intensity, sparse, current_image_range, schedule_length, settings)  # type: ignore
     else:
         # If no job_id, run all locally
         if model:
@@ -89,7 +90,7 @@ def run(
         click.echo(f"Running {len(grid)} configurations...")
         for i, (d, inten, r, m) in enumerate(grid):
             click.echo(f"\n--- Config {i+1}/{len(grid)}: {m}, {d}, {inten}, {r} ---")
-            _dispatch(m, d, inten, sparse, r)  # type: ignore
+            _dispatch(m, d, inten, sparse, r, schedule_length, settings)  # type: ignore
 
 
 def _dispatch(
@@ -98,18 +99,22 @@ def _dispatch(
     intensity: float,
     sparse: bool,
     image_range: tuple[int, int],
+    schedule_length: int,
+    settings: dict,
 ):
     seed = 0  # Default seed
 
     if model == "fbp":
-        run_fbp(dataset, sparse, intensity, image_range, seed)
+        run_fbp(dataset, sparse, intensity, image_range, seed, schedule_length)
 
     elif model in ["mle", "map"]:
-        # Defaults from iterative.py
-        lr = 1e-2
-        patience = 50
-        max_steps = 20000
-        tv_weight = -1.0  # Default
+        # Load from settings
+        cfg = settings.get(model, {})
+        # Fallback defaults if not in settings (though settings.toml should have them)
+        lr = cfg.get("lr", 1e-2)
+        patience = cfg.get("patience", 50)
+        max_steps = cfg.get("max_steps", 20000)
+        tv_weight = cfg.get("tv_weight", -1.0)
 
         run_iterative(
             dataset=dataset,
@@ -122,24 +127,32 @@ def _dispatch(
             patience=patience,
             tv_weight=tv_weight,
             max_steps=max_steps,
+            schedule_length=schedule_length,
         )
 
     elif model == "unet":
-        # Default member 0
-        run_unet(dataset, sparse, intensity, image_range, seed, member=0)
+        cfg = settings.get("unet", {})
+        member = cfg.get("member", 0)
+        run_unet(dataset, sparse, intensity, image_range, seed, member, schedule_length)
 
     elif model == "diffusion":
-        # Defaults from diffusion.py
+        cfg = settings.get("diffusion", {})
+        gradient_steps = cfg.get("gradient_steps", 20)
+        guidance_lr = cfg.get("guidance_lr", 1e-2)
+        replicates = cfg.get("replicates", 16)
+        cond = cfg.get("cond", True)
+
         run_diffusion(
             dataset=dataset,
             sparse=sparse,
-            cond=True,
+            cond=cond,
             total_intensity=intensity,
-            gradient_steps=20,
-            guidance_lr=1e-2,
+            gradient_steps=gradient_steps,
+            guidance_lr=guidance_lr,
             image_range=image_range,
             seed=seed,
-            replicates=16,
+            replicates=replicates,
+            schedule_length=schedule_length,
         )
     else:
         click.echo(

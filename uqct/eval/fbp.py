@@ -16,6 +16,7 @@ def run_fbp(
     total_intensity: float,
     image_range: tuple[int, int],
     seed: int,
+    schedule_length: int,
 ):
     def predictor_fn(
         experiment: Experiment, schedule: torch.Tensor | None
@@ -32,6 +33,7 @@ def run_fbp(
         seed=seed,
         model_name="fbp",
         predictor_fn=predictor_fn,
+        schedule_length=schedule_length,
     )
 
 
@@ -43,8 +45,9 @@ def main(
     total_intensity: float,
     image_range: tuple[int, int],
     seed: int,
+    schedule_length: int,
 ):
-    run_fbp(dataset, sparse, total_intensity, image_range, seed)
+    run_fbp(dataset, sparse, total_intensity, image_range, seed, schedule_length)
 
 
 if __name__ == "__main__":

@@ -130,6 +130,7 @@ def setup_experiment(
     total_intensity: float,
     sparse: bool,
     seed: int,
+    schedule_length: int,
 ) -> tuple[torch.Tensor, Experiment, torch.Tensor | None]:
     """Deterministically computes experiment (and angle schedule if sparse setting).
 
@@ -139,6 +140,7 @@ def setup_experiment(
         total_intensity (`float`): Total intensity over all angles/rounds
         seed (`int`): Random seed
         sparse (`bool`): Whether we are in a sparse setting
+        schedule_length (`int`): Number of angles/rounds to use for the schedule
 
     Returns:
         `tuple[torch.Tensor, Experiment, torch.Tensor | None]`: Ground truth images (high resolution), experiment object, and schedule if sparse == True, otherwise None.
@@ -174,12 +176,21 @@ def setup_experiment(
             N_ANGLES * n_detectors_hr
         )
         schedule = (
-            torch.logspace(math.log10(10), math.log10(199), steps=10, device=device)
+            torch.logspace(
+                math.log10(10),
+                math.log10(199),
+                steps=schedule_length,
+                device=device,
+            )
             .round()
             .int()
         )
+        if (schedule[:-1] == schedule[1:]).any():
+            raise ValueError("Schedule must be strictly increasing")
+
+        print(f"Schedule: {schedule.tolist()}")
     else:
-        n_rounds = 10
+        n_rounds = schedule_length
         intensities = intensities.view(1, 1, 1, 1).expand(
             n_gt, n_rounds, N_ANGLES, -1
         ) / (N_ANGLES * n_detectors_hr * n_rounds)
@@ -325,13 +336,14 @@ def run_evaluation(
     seed: int,
     model_name: str,
     predictor_fn: Callable[[Experiment, torch.Tensor | None], torch.Tensor],
+    schedule_length: int,
     extra_metadata: dict[str, Any] | None = None,
 ) -> None:
     """
     Unified evaluation execution logic.
     """
     gt, experiment, schedule = setup_experiment(
-        dataset, image_range, total_intensity, sparse, seed
+        dataset, image_range, total_intensity, sparse, seed, schedule_length
     )
 
     preds = predictor_fn(experiment, schedule - 1 if schedule is not None else None)

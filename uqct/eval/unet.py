@@ -3,12 +3,8 @@ from typing import Literal
 import click
 import torch
 
-from uqct.eval.run import (
-    CTSettings,
-    setup_experiment,
-    evaluate_and_save,
-    run_evaluation,
-)
+from uqct.ct import Experiment
+from uqct.eval.run import run_evaluation
 from uqct.models.unet import FBPUNet
 from uqct.eval.options import common_options
 
@@ -22,6 +18,7 @@ def run_unet(
     image_range: tuple[int, int],
     seed: int,
     member: int,
+    schedule_length: int,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -34,9 +31,11 @@ def run_unet(
         verbose=True,
     )
 
-    def predictor_fn(experiment, schedule):
-        # (N, T, H, W) -> (N, T, 1, H, W)
-        return model.predict(experiment, schedule).unsqueeze(2)
+    def predictor_fn(
+        experiment: Experiment, schedule: torch.Tensor | None
+    ) -> torch.Tensor:
+        # (N, T, H, W)
+        return model.predict(experiment, schedule)
 
     run_evaluation(
         dataset=dataset,
@@ -46,6 +45,7 @@ def run_unet(
         seed=seed,
         model_name="unet",
         predictor_fn=predictor_fn,
+        schedule_length=schedule_length,
         extra_metadata=dict(member=member),
     )
 
@@ -65,8 +65,11 @@ def main(
     image_range: tuple[int, int],
     seed: int,
     member: int,
+    schedule_length: int,
 ):
-    run_unet(dataset, sparse, total_intensity, image_range, seed, member)
+    run_unet(
+        dataset, sparse, total_intensity, image_range, seed, member, schedule_length
+    )
 
 
 if __name__ == "__main__":

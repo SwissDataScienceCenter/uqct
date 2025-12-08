@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import math
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -76,10 +74,10 @@ class FBPUNetEnsemble:
         pickle.dump(self.unets, open(self.pickle_path, "wb"))
         del self.unets
 
-    def to(self, device: torch.device | str) -> FBPUNetEnsemble:
+    def to(self, device: torch.device | str) -> "FBPUNetEnsemble":
         target = torch.device(device)
         for unet in self.unets:
-            unet.unet.to(target)
+            unet.unet.to(target)  # type: ignore
         self._device = target
         return self
 

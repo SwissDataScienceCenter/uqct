@@ -22,6 +22,7 @@ def run_iterative(
     patience: int,
     tv_weight: float,
     max_steps: int,
+    schedule_length: int,
 ):
     def predictor_fn(
         experiment: Experiment, schedule: torch.Tensor | None
@@ -45,6 +46,7 @@ def run_iterative(
         seed=seed,
         model_name=method,
         predictor_fn=predictor_fn,
+        schedule_length=schedule_length,
         extra_metadata=dict(
             lr=lr,
             patience=patience,
@@ -97,6 +99,7 @@ def main(
     patience: int,
     tv_weight: float,
     max_steps: int,
+    schedule_length: int,
 ):
     run_iterative(
         dataset,
@@ -109,6 +112,7 @@ def main(
         patience,
         tv_weight,
         max_steps,
+        schedule_length,
     )
 
 
