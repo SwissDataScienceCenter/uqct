@@ -1,11 +1,10 @@
 from typing import Literal
 
 import click
+import torch
 
-from uqct.ct import prepare_inputs_from_experiment
-from uqct.eval.run import (
-    run_evaluation,
-)
+from uqct.ct import prepare_inputs_from_experiment, Experiment
+from uqct.eval.run import run_evaluation
 from uqct.eval.options import common_options
 
 DatasetName = Literal["lung", "composite", "lamino"]
@@ -18,10 +17,12 @@ def run_fbp(
     image_range: tuple[int, int],
     seed: int,
 ):
-    def predictor_fn(experiment, schedule):
-        # (N, T, H, W) -> (N, T, 1, H, W)
+    def predictor_fn(
+        experiment: Experiment, schedule: torch.Tensor | None
+    ) -> torch.Tensor:
+        # (N, T, H, W)
         preds, _, _ = prepare_inputs_from_experiment(experiment, schedule)
-        return preds.unsqueeze(2)
+        return preds
 
     run_evaluation(
         dataset=dataset,

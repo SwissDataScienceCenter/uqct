@@ -68,7 +68,7 @@ def run(
             click.echo(f"Job ID {job_id} out of range (0-{len(grid)-1})")
             sys.exit(1)
 
-        dataset, intensity, current_image_range, model = grid[job_id]
+        dataset, intensity, current_image_range, model = grid[job_id]  # type: ignore
         if model is None:
             raise ValueError("Model in grid cannot be None")
 
@@ -79,7 +79,7 @@ def run(
         click.echo(f"  Sparse: {sparse}")
         click.echo(f"  Image Range: {current_image_range}")
 
-        _dispatch(model, dataset, intensity, sparse, current_image_range)
+        _dispatch(model, dataset, intensity, sparse, current_image_range)  # type: ignore
     else:
         # If no job_id, run all locally
         if model:
@@ -89,7 +89,7 @@ def run(
         click.echo(f"Running {len(grid)} configurations...")
         for i, (d, inten, r, m) in enumerate(grid):
             click.echo(f"\n--- Config {i+1}/{len(grid)}: {m}, {d}, {inten}, {r} ---")
-            _dispatch(m, d, inten, sparse, r)
+            _dispatch(m, d, inten, sparse, r)  # type: ignore
 
 
 def _dispatch(

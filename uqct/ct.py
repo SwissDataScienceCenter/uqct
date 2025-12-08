@@ -124,7 +124,7 @@ def nll_mixture_angle_schedule(
     intensities: torch.Tensor,
     angles: torch.Tensor,
     schedule: torch.Tensor,
-    sparse: bool = True,
+    reduce: bool = True,
     l: int = 5,
 ) -> torch.Tensor:
     r"""Compute nll only over angle-based partitions of observations.
@@ -177,7 +177,7 @@ def nll_mixture_angle_schedule(
     mix_input = -nlls.sum(-1) - math.log(n_pred)  # (..., s, n_pred, n_angles)
     mix = -torch.logsumexp(mix_input, dim=-2)
     mix[..., ~mask] = 0
-    if sparse:
+    if reduce:
         out = mix.sum(-1)
     else:
         out = mix.sum(-2)[..., schedule.min() :]  # min=2 -> [1:]

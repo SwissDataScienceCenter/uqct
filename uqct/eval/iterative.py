@@ -1,6 +1,7 @@
+from uqct.ct import Experiment
 from uqct.models.iterative import reconstruct, ReconstructionMethod
 from typing import Literal
-
+import torch
 import click
 from uqct.eval.run import (
     run_evaluation,
@@ -22,10 +23,18 @@ def run_iterative(
     tv_weight: float,
     max_steps: int,
 ):
-    def predictor_fn(experiment, schedule):
+    def predictor_fn(
+        experiment: Experiment, schedule: torch.Tensor | None
+    ) -> torch.Tensor:
         # Output shape: (N, 1, H, W) or (N, T, H, W) -> (N, T, 1, H, W)
         return reconstruct(
-            experiment, schedule, method, lr, patience, tv_weight, max_steps
+            experiment,
+            schedule,
+            method,
+            lr,
+            patience,
+            tv_weight,
+            max_steps,
         ).unsqueeze(2)
 
     run_evaluation(

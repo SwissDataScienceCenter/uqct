@@ -57,7 +57,9 @@ def _preload_nvidia_libs():
         print("No Nvidia libraries found in site-packages")
         return
 
-    print(f"Found Nvidia libraries in site-packages: {found_libs}")
+    print(
+        f"Found Nvidia libraries in site-packages: {found_libs[:5]}{'...' if len(found_libs) > 5 else ''}"
+    )
 
     # Map filenames to full paths for faster lookup
     lib_map = {os.path.basename(p): p for p in found_libs}
@@ -71,7 +73,7 @@ def _preload_nvidia_libs():
                 ctypes.CDLL(match, mode=ctypes.RTLD_GLOBAL)
             except OSError:
                 pass
-    print(f"Preloaded Nvidia libraries from site-packages: {found_libs}")
+    print("Preloaded Nvidia libraries from site-packages")
 
 
 _preload_nvidia_libs()

@@ -3,6 +3,8 @@ from typing import Literal, Optional
 import click
 import einops
 
+from uqct.ct import Experiment
+import torch
 from uqct.eval.run import run_evaluation
 from uqct.models.diffusion import Diffusion, get_guidance_loss_fn
 from uqct.eval.options import common_options
@@ -31,13 +33,15 @@ def run_diffusion(
         verbose=True,
     )
 
-    def predictor_fn(experiment, schedule):
+    def predictor_fn(
+        experiment: Experiment, schedule: torch.Tensor | None
+    ) -> torch.Tensor:
         guidance_loss_fn = get_guidance_loss_fn(experiment, schedule)
         # (..., T, replicates, 1, side_length, side_length)
         sample = diffusion.sample(
             experiment,
             replicates,
-            schedule - 1 if schedule is not None else None,
+            schedule,
             guidance_loss_fn,
         )
         # Rearrange to (N, T, H, W)

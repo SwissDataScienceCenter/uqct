@@ -273,7 +273,7 @@ def evaluate_and_save(
             experiment.intensities,
             experiment.angles,
             schedule,
-            sparse=False,
+            reduce=False,
         )
 
         # For GT, we treat it as single replicate (R=1).
@@ -287,7 +287,7 @@ def evaluate_and_save(
             experiment.intensities,
             experiment.angles,
             schedule,
-            sparse=False,
+            reduce=False,
         )
     else:
         # Placeholder for dense setting or raise NotImplementedError as before
@@ -334,7 +334,7 @@ def run_evaluation(
         dataset, image_range, total_intensity, sparse, seed
     )
 
-    preds = predictor_fn(experiment, schedule)
+    preds = predictor_fn(experiment, schedule - 1 if schedule is not None else None)
 
     ct_settings = CTSettings(
         dataset=dataset,
