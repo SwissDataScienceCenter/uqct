@@ -112,7 +112,7 @@ class Run:
         output_dir.mkdir(exist_ok=True, parents=True)
         file_name = (
             f"{self.model}:{self.ct_settings.dataset}:{self.ct_settings.total_intensity}:{self.ct_settings.sparse}:"
-            f"{self.ct_settings.image_start_index}-{self.ct_settings.image_end_index}:{self.timestamp}"
+            f"{self.ct_settings.image_start_index}-{self.ct_settings.image_end_index}:{self.seed}:{self.timestamp}"
         )
         fp_parquet = output_dir / (file_name + ".parquet")
         fp_preds = output_dir / (file_name + ".h5")

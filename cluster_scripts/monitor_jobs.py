@@ -109,6 +109,8 @@ class JobMonitor:
             try:
                 with open(err_file, "r") as f:
                     for line in f:
+                        if "Using an engine plan file across different models of devices" in line:
+                            continue
                         if re.search(
                             r"(Error|Traceback|Exception)", line, re.IGNORECASE
                         ):
@@ -122,6 +124,8 @@ class JobMonitor:
             try:
                 with open(out_file, "r") as f:
                     for line in f:
+                        if "Using an engine plan file across different models of devices" in line:
+                            continue
                         if re.search(
                             r"(Error|Traceback|Exception)", line, re.IGNORECASE
                         ):

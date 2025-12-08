@@ -218,5 +218,4 @@ notes
 .vscode/
 caches
 results
-*.py
 plots/

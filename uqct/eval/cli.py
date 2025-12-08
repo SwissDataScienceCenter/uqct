@@ -2,7 +2,7 @@ import click
 import tomllib
 import itertools
 import sys
-from typing import Literal
+from typing import Literal, Any
 
 from uqct.datasets.utils import DatasetName
 from uqct.eval.fbp import run_fbp
@@ -30,10 +30,17 @@ def cli():
     "--job-id", type=int, default=None, help="SLURM array job ID to select config"
 )
 @click.option("--sparse", is_flag=True, default=True, help="Use sparse setting")
+@click.option(
+    "--duplicate/--no-duplicate",
+    default=False,
+    show_default=True,
+    help="Allow duplicate runs. If False, skips if run exists.",
+)
 def run(
     model: Literal["fbp", "mle", "map", "unet", "diffusion"] | None,
     job_id: int | None,
     sparse: bool,
+    duplicate: bool,
 ):
     """Run evaluation for a specific model and configuration."""
 
@@ -47,13 +54,21 @@ def run(
         click.echo(f"Settings file not found at {settings_path}")
         sys.exit(1)
 
+    section = "eval-sparse" if sparse else "eval-dense"
     with open(settings_path, "rb") as f:
-        settings = tomllib.load(f)["eval"]
+        full_config = tomllib.load(f)
+        if section not in full_config:
+            click.echo(f"Section [{section}] not found in settings.toml")
+            sys.exit(1)
+        settings = full_config[section]
 
     models = settings.get("models", ["fbp", "mle", "map", "unet", "diffusion"])
     datasets = settings["datasets"]
     intensities = settings["total_intensity_values"]
     schedule_length = settings.get("schedule_length", 32)
+
+    seed_range = settings.get("seed_range", [0, 1])  # Default single seed 0
+    seeds = list(range(seed_range[0], seed_range[1]))
 
     full_image_range = tuple(settings["image_range"])
     start, end = full_image_range
@@ -61,15 +76,15 @@ def run(
     image_ranges = [(i, min(i + 10, end)) for i in range(start, end, 10)]
 
     # Create grid of configurations
-    # Order: Dataset, Intensity, Image Range, Model (Model inner-most to fail fast)
-    grid = list(itertools.product(datasets, intensities, image_ranges, models))
+    # Order: Dataset, Intensity, Image Range, Seed, Model (Model inner-most to fail fast)
+    grid = list(itertools.product(datasets, intensities, image_ranges, seeds, models))
 
     if job_id is not None:
         if job_id < 0 or job_id >= len(grid):
             click.echo(f"Job ID {job_id} out of range (0-{len(grid)-1})")
             sys.exit(1)
 
-        dataset, intensity, current_image_range, model = grid[job_id]  # type: ignore
+        dataset, intensity, current_image_range, seed, model = grid[job_id]  # type: ignore
         if model is None:
             raise ValueError("Model in grid cannot be None")
 
@@ -79,30 +94,47 @@ def run(
         click.echo(f"  Intensity: {intensity}")
         click.echo(f"  Sparse: {sparse}")
         click.echo(f"  Image Range: {current_image_range}")
+        click.echo(f"  Seed: {seed}")
 
-        _dispatch(model, dataset, intensity, sparse, current_image_range, schedule_length, settings)  # type: ignore
+        _dispatch(model, dataset, intensity, sparse, current_image_range, schedule_length, settings, duplicate, seed)  # type: ignore
     else:
         # If no job_id, run all locally
         if model:
             # Filter grid for specific model if provided
-            grid = [(d, i, r, m) for d, i, r, m in grid if m == model]
+            grid = [(d, i, r, s, m) for d, i, r, s, m in grid if m == model]
 
         click.echo(f"Running {len(grid)} configurations...")
-        for i, (d, inten, r, m) in enumerate(grid):
-            click.echo(f"\n--- Config {i+1}/{len(grid)}: {m}, {d}, {inten}, {r} ---")
-            _dispatch(m, d, inten, sparse, r, schedule_length, settings)  # type: ignore
+        for i, (d, inten, r, s, m) in enumerate(grid):
+            click.echo(
+                f"\n--- Config {i+1}/{len(grid)}: {m}, {d}, {inten}, {r}, seed={s} ---"
+            )
+            _dispatch(m, d, inten, sparse, r, schedule_length, settings, duplicate, s)  # type: ignore
 
 
 def _dispatch(
-    model: Literal["fbp", "mle", "map", "unet", "diffusion"],
+    model: str,
     dataset: DatasetName,
     intensity: float,
     sparse: bool,
     image_range: tuple[int, int],
     schedule_length: int,
-    settings: dict,
+    settings: dict[str, Any],
+    duplicate: bool,
+    seed: int,
 ):
-    seed = 0  # Default seed
+    from uqct.utils import get_results_dir
+
+    # Check for existing run
+    if not duplicate:
+        results_dir = get_results_dir() / "runs"
+        # Format: model:dataset:intensity:sparse:start-end:seed:timestamp.parquet
+        pattern = f"{model}:{dataset}:{intensity}:{sparse}:{image_range[0]}-{image_range[1]}:{seed}:*.parquet"
+        files = list(results_dir.glob(pattern))
+        if files:
+            click.echo(
+                f"Skipping {model} run (found {len(files)} existing files). Use --duplicate to force."
+            )
+            return
 
     if model == "fbp":
         run_fbp(dataset, sparse, intensity, image_range, seed, schedule_length)

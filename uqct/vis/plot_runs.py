@@ -246,13 +246,27 @@ def process_and_plot(latest_runs: Dict[str, pd.DataFrame], output_dir: Path):
             )
             plt.xlabel("Step")
             plt.ylabel("Cumulative NLL")
-            plt.yscale("log")
             plt.legend()
 
             # Save plot
             run_id = row.get("run_id", "unknown")
             plot_path = model_dir / f"run_{run_id}_img_{idx}_nll.png"
             plt.savefig(plot_path)
+            plt.close()
+
+            # Pointwise Difference Plot (Pred - GT)
+            nll_diff = [p - g for p, g in zip(nll_pred, nll_gt)]
+
+            plt.figure()
+            plt.plot(steps, nll_diff, label="NLL(Pred) - NLL(GT)", color="tab:purple")
+            plt.axhline(0, color="black", linestyle="--", linewidth=1)
+            plt.title(f"Pointwise NLL Difference - {model} - Img {idx}")
+            plt.xlabel("Step")
+            plt.ylabel("NLL Difference")
+            plt.legend()
+
+            diff_plot_path = model_dir / f"run_{run_id}_img_{idx}_nll_diff.png"
+            plt.savefig(diff_plot_path)
             plt.close()
 
         # Avg metrics

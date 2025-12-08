@@ -58,7 +58,7 @@ def _preload_nvidia_libs():
         return
 
     print(
-        f"Found Nvidia libraries in site-packages: {found_libs[:5]}{'...' if len(found_libs) > 5 else ''}"
+        f"Found Nvidia libraries in site-packages: {', '.join(found_libs[:2])}{'...' if len(found_libs) > 2 else ''}"
     )
 
     # Map filenames to full paths for faster lookup
