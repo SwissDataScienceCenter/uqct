@@ -1,6 +1,7 @@
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import math
+import os
 from typing import Any, Literal, Callable
 from uuid import uuid4
 
@@ -52,11 +53,14 @@ class Run:
 
     run_id: str = field(default_factory=lambda: str(uuid4()))
     timestamp: datetime = field(default_factory=datetime.now)
+    slurm_job_id: str | int | None = None
     extra: dict[str, Any] | None = None
 
     def __str__(self) -> str:
         s = []
         s.append(f"Run Summary (ID: {self.run_id})")
+        if self.slurm_job_id:
+             s.append(f"  SLURM Job ID: {self.slurm_job_id}")
         s.append(f"  Timestamp: {self.timestamp}")
         s.append(f"  Model: {self.model}")
         s.append(f"  Dataset: {self.ct_settings.dataset}")
@@ -105,6 +109,7 @@ class Run:
         df["model"] = self.model
         df["run_id"] = self.run_id
         df["timestamp"] = self.timestamp
+        df["slurm_job_id"] = self.slurm_job_id
         df["seed"] = self.seed
 
         # Locate place to save the data
@@ -188,7 +193,7 @@ def setup_experiment(
         if (schedule[:-1] == schedule[1:]).any():
             raise ValueError("Schedule must be strictly increasing")
 
-        print(f"Schedule: {schedule.tolist()}")
+        # print(f"Schedule: {schedule.tolist()}")
     else:
         n_rounds = schedule_length
         intensities = intensities.view(1, 1, 1, 1).expand(
@@ -316,12 +321,17 @@ def evaluate_and_save(
         nll_gt=nlls_gt.tolist(),
     )
 
+    # Try to capture SLURM ID
+    # Priority: SLURM_ARRAY_JOB_ID (for arrays) -> SLURM_JOB_ID (for normal)
+    slurm_id = os.environ.get("SLURM_ARRAY_JOB_ID", os.environ.get("SLURM_JOB_ID"))
+
     run = Run(
         ct_settings=ct_settings,
         model=model_name,
         metrics=metrics,
         seed=seed,
         preds=preds.cpu().numpy(),
+        slurm_job_id=slurm_id,
         extra=extra_metadata,
     )
     print(run)

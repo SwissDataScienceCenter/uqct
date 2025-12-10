@@ -44,9 +44,6 @@ def run(
 ):
     """Run evaluation for a specific model and configuration."""
 
-    # Load settings
-    # Assuming running from project root or uqct is in pythonpath
-    # We look for settings.toml relative to uqct package or project root
     root = get_root_dir()
     settings_path = root / "uqct" / "settings.toml"
 
@@ -62,53 +59,205 @@ def run(
             sys.exit(1)
         settings = full_config[section]
 
-    models = settings.get("models", ["fbp", "mle", "map", "unet", "diffusion"])
+    all_models = settings.get("models", ["fbp", "mle", "map", "unet", "diffusion"])
     datasets = settings["datasets"]
     intensities = settings["total_intensity_values"]
     schedule_length = settings.get("schedule_length", 32)
-
-    seed_range = settings.get("seed_range", [0, 1])  # Default single seed 0
+    seed_range = settings.get("seed_range", [0, 1])
     seeds = list(range(seed_range[0], seed_range[1]))
-
     full_image_range = tuple(settings["image_range"])
     start, end = full_image_range
-    # Create chunks of 10
-    image_ranges = [(i, min(i + 10, end)) for i in range(start, end, 10)]
 
-    # Create grid of configurations
-    # Order: Dataset, Intensity, Image Range, Seed, Model (Model inner-most to fail fast)
-    grid = list(itertools.product(datasets, intensities, image_ranges, seeds, models))
+    # ---------------------------------------------------------
+    # Build Heterogeneous Job Grid
+    # ---------------------------------------------------------
+    grid = []
+
+    # 1. FBP: 1 Global Job. Loops Datasets, Intensities, Seeds. Full range.
+    if "fbp" in all_models:
+        grid.append(
+            {
+                "model": "fbp",
+                "datasets": datasets,  # List -> Loop
+                "intensities": intensities,  # List -> Loop
+                "image_range": full_image_range,
+                "seeds": seeds,  # List -> Loop
+            }
+        )
+
+    # 2. MLE/MAP: 1 Job per (Model, Dataset, Intensity). Loops seeds, chunk-20.
+    # User requested: Split by intensity for more parallelism.
+    iterative = [m for m in all_models if m in ["mle", "map"]]
+    chunks_20 = [(i, min(i + 20, end)) for i in range(start, end, 20)]
+    for m in iterative:
+        for d in datasets:
+            for i in intensities:
+                grid.append(
+                    {
+                        "model": m,
+                        "dataset": d,
+                        "intensity": i,  # Scalar -> One Job
+                        "seeds": seeds,  # List -> Loop
+                        "image_ranges": chunks_20,  # List -> Loop
+                    }
+                )
+
+    # 3. U-Net: 1 Job per (Dataset, Intensity). Loops seeds. Full range.
+    if "unet" in all_models:
+        for d in datasets:
+            for i in intensities:
+                grid.append(
+                    {
+                        "model": "unet",
+                        "dataset": d,  # Scalar -> One Job
+                        "intensity": i,  # Scalar -> One Job
+                        "seeds": seeds,  # List -> Loop
+                        "image_range": full_image_range,
+                    }
+                )
+
+    # 4. Diffusion: Granular. 1 Job per (Dataset, Intensity, Seed, Chunk-10).
+    if "diffusion" in all_models:
+        chunks_10 = [(i, min(i + 10, end)) for i in range(start, end, 10)]
+        for d in datasets:
+            for i in intensities:
+                for s in seeds:
+                    for r in chunks_10:
+                        grid.append(
+                            {
+                                "model": "diffusion",
+                                "dataset": d,
+                                "intensity": i,
+                                "seed": s,
+                                "image_range": r,
+                            }
+                        )
+
+    # ---------------------------------------------------------
+    # Execution Logic
+    # ---------------------------------------------------------
 
     if job_id is not None:
         if job_id < 0 or job_id >= len(grid):
             click.echo(f"Job ID {job_id} out of range (0-{len(grid)-1})")
             sys.exit(1)
 
-        dataset, intensity, current_image_range, seed, model = grid[job_id]  # type: ignore
-        if model is None:
-            raise ValueError("Model in grid cannot be None")
+        task = grid[job_id]
+        if model and task["model"] != model:
+            # If user supplied --model, we could check consistency, but --job-id is absolute.
+            # Just warn or ignore.
+            pass
 
-        click.echo(f"Running evaluation for Job ID {job_id}:")
-        click.echo(f"  Model: {model}")
-        click.echo(f"  Dataset: {dataset}")
-        click.echo(f"  Intensity: {intensity}")
-        click.echo(f"  Sparse: {sparse}")
-        click.echo(f"  Image Range: {current_image_range}")
-        click.echo(f"  Seed: {seed}")
+        click.echo(f"Running Job ID {job_id} (Model: {task['model']})")
+        execute_task(task, sparse, schedule_length, settings, duplicate)
 
-        _dispatch(model, dataset, intensity, sparse, current_image_range, schedule_length, settings, duplicate, seed)  # type: ignore
     else:
-        # If no job_id, run all locally
+        # Local execution - run all or filter
+        tasks_to_run = grid
         if model:
-            # Filter grid for specific model if provided
-            grid = [(d, i, r, s, m) for d, i, r, s, m in grid if m == model]
+            tasks_to_run = [t for t in grid if t["model"] == model]
 
-        click.echo(f"Running {len(grid)} configurations...")
-        for i, (d, inten, r, s, m) in enumerate(grid):
+        click.echo(f"Running {len(tasks_to_run)} jobs locally...")
+        for i, task in enumerate(tasks_to_run):
             click.echo(
-                f"\n--- Config {i+1}/{len(grid)}: {m}, {d}, {inten}, {r}, seed={s} ---"
+                f"\n--- Local Job {i+1}/{len(tasks_to_run)}: {task['model']} ---"
             )
-            _dispatch(m, d, inten, sparse, r, schedule_length, settings, duplicate, s)  # type: ignore
+            execute_task(task, sparse, schedule_length, settings, duplicate)
+
+
+def execute_task(
+    task: dict,
+    sparse: bool,
+    schedule_length: int,
+    settings: dict[str, Any],
+    duplicate: bool,
+):
+    """
+    Recursively unfolds lists in `task` dict to call _dispatch with scalar values.
+    Order of unpacking: Datasets -> Intensities -> Seeds -> ImageRanges.
+    """
+    # Keys that might be lists
+    # Note: 'model' is always scalar here (defined in grid generation)
+
+    # 1. Datasets
+    ds_arg = task.get("datasets", task.get("dataset"))
+    if isinstance(ds_arg, list):
+        for d in ds_arg:
+            # Create sub-task with scalar
+            sub = task.copy()
+            sub["dataset"] = d
+            sub.pop("datasets", None)
+            execute_task(sub, sparse, schedule_length, settings, duplicate)
+        return
+    else:
+        dataset = ds_arg
+
+    # 2. Intensities
+    int_arg = task.get("intensities", task.get("intensity"))
+    if isinstance(int_arg, list):
+        for i in int_arg:
+            sub = task.copy()
+            sub["intensity"] = i
+            sub.pop("intensities", None)
+            execute_task(sub, sparse, schedule_length, settings, duplicate)
+        return
+    else:
+        intensity = int_arg
+
+    # 3. Seeds
+    seed_arg = task.get("seeds", task.get("seed"))
+    if isinstance(seed_arg, list):
+        for s in seed_arg:
+            sub = task.copy()
+            sub["seed"] = s
+            sub.pop("seeds", None)
+            execute_task(sub, sparse, schedule_length, settings, duplicate)
+        return
+    else:
+        seed = seed_arg
+
+    # 4. Image Ranges
+    rng_arg = task.get("image_ranges", task.get("image_range"))
+    if isinstance(rng_arg, list):
+        for r in rng_arg:
+            sub = task.copy()
+            sub["image_range"] = r
+            sub.pop("image_ranges", None)
+            execute_task(sub, sparse, schedule_length, settings, duplicate)
+        return
+    else:
+        image_range = rng_arg
+
+    # Base case: All scalars
+    model = task["model"]
+
+    print(
+        f"  -> Dispatching: {model}, {dataset}, {intensity}, {image_range}, seed={seed}"
+    )
+
+    try:
+        _dispatch(
+            model=model,
+            dataset=dataset,
+            intensity=intensity,
+            sparse=sparse,
+            image_range=image_range,
+            schedule_length=schedule_length,
+            settings=settings,
+            duplicate=duplicate,
+            seed=seed,
+        )
+    except Exception as e:
+        # Log error but try to continue if this is part of a larger loop?
+        # Standard behavior: if one sub-task fails, print traceback.
+        # Ideally we want to continue other seeds if one seed fails.
+        import traceback
+
+        click.echo(f"ERROR processing {model}, {dataset}, {intensity}, {seed}: {e}")
+        traceback.print_exc()
+        # Ensure we mark job as failed (non-zero exit) at the end if strict?
+        # For now, print error allows monitor_jobs.py to catch "Error" string.
+        pass
 
 
 def _dispatch(
@@ -131,9 +280,7 @@ def _dispatch(
         pattern = f"{model}:{dataset}:{intensity}:{sparse}:{image_range[0]}-{image_range[1]}:{seed}:*.parquet"
         files = list(results_dir.glob(pattern))
         if files:
-            click.echo(
-                f"Skipping {model} run (found {len(files)} existing files). Use --duplicate to force."
-            )
+            click.echo(f"Skipping {model} run (found {len(files)} existing files).")
             return
 
     if model == "fbp":

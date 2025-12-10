@@ -3,12 +3,17 @@ import glob
 import ctypes
 import sys
 
+from logging import basicConfig, getLogger
+
+basicConfig(level="INFO")
+logger = getLogger(__name__)
+
 
 # Patch to preload Nvidia libraries from site-packages
 # This fixes "ImportError: libcusparseLt.so.0" etc. when LD_LIBRARY_PATH is not set
 # (e.g. in SLURM jobs or when direnv is not used)
 def _preload_nvidia_libs():
-    print("Preloading Nvidia libraries from site-packages")
+    logger.debug("Preloading Nvidia libraries from site-packages")
     libs_to_preload = [
         "libcusparseLt.so",
         "libcudnn.so",
@@ -40,7 +45,7 @@ def _preload_nvidia_libs():
         site_packages = venv_sps + site_packages
 
     if not site_packages:
-        print("No site-packages found")
+        logger.error("No site-packages found")
         return
 
     # Check potential nvidia locations (usually site-packages/nvidia)
@@ -54,10 +59,10 @@ def _preload_nvidia_libs():
             )
 
     if not found_libs:
-        print("No Nvidia libraries found in site-packages")
+        logger.error("No Nvidia libraries found in site-packages")
         return
 
-    print(
+    logger.debug(
         f"Found Nvidia libraries in site-packages: {', '.join(found_libs[:2])}{'...' if len(found_libs) > 2 else ''}"
     )
 
@@ -73,7 +78,7 @@ def _preload_nvidia_libs():
                 ctypes.CDLL(match, mode=ctypes.RTLD_GLOBAL)
             except OSError:
                 pass
-    print("Preloaded Nvidia libraries from site-packages")
+    logger.debug("Preloaded Nvidia libraries from site-packages")
 
 
 _preload_nvidia_libs()
