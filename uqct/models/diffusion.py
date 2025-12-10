@@ -364,27 +364,22 @@ class Diffusion:
             n_angles_schedule = (
                 len(schedule) if schedule is not None else experiment.counts.shape[-2]
             )
-            x_t = torch.randn(
+            x_t_shape = (
                 replicates,
                 *experiment.batch_dims,
                 n_angles_schedule,
                 side_length,
                 side_length,
-                device=self.device,
             )
         else:
-            x_t = torch.randn(
+            x_t_shape = (
                 replicates,
                 *experiment.batch_dims,
                 experiment.counts.shape[-3],
                 side_length,
                 side_length,
-                device=self.device,
             )
-        rep_first_shape = x_t.shape
-
-        it = tqdm(self.noise_scheduler.timesteps, disable=not self.verbose)
-
+        
         fbps, intensities, class_labels = prepare_inputs_from_experiment(
             experiment, schedule
         )
@@ -396,40 +391,79 @@ class Diffusion:
         else:  # Sparse
             class_labels = class_labels.to(self.device)
             n_angles = class_labels + 1
-        fbps_norm = ((fbps - 0.5) * 2).expand_as(x_t)
+
+        # Use x_t_shape to expand normalized inputs
+        fbps_norm = ((fbps - 0.5) * 2).expand(x_t_shape)
         intensities_norm = (2 * ((norm_intensities(intensities) / 999) - 0.5)).clip(
             -1, 1
         )
         n_angles_norm = ((n_angles - N_ANGLES / 2) / (N_ANGLES / 2)).clip(-1, 1)
+        
         intensities_norm = intensities_norm.view(1, *intensities_norm.shape).expand(
             replicates, *(-1 for _ in range(intensities_norm.ndim))
         )
         n_angles_norm = n_angles_norm.view(1, *n_angles_norm.shape).expand(
             replicates, *(-1 for _ in range(n_angles_norm.ndim))
         )
-        for t in it:
-            if self.cond:
-                noise_pred = self.predict_noise_cond(
-                    t, x_t, fbps_norm, intensities_norm, n_angles_norm  # type: ignore
-                )
-            else:
-                noise_pred = self.predict_noise(t, x_t)  # type: ignore
+        
+        max_retries = 5
+        out = None
+        
+        for attempt in range(max_retries):
+            # Init x_t
+            x_t = torch.randn(x_t_shape, device=self.device)
+            
+            it = tqdm(self.noise_scheduler.timesteps, disable=not self.verbose)
+            failed = False
+            
+            for t in it:
+                if self.cond:
+                    noise_pred = self.predict_noise_cond(
+                        t, x_t, fbps_norm, intensities_norm, n_angles_norm  # type: ignore
+                    )
+                else:
+                    noise_pred = self.predict_noise(t, x_t)  # type: ignore
 
-            guidance_loss_fn_ = guidance_loss_fn if (20 < t < 1000) else None
-            x_t = self.step(noise_pred, t, x_t, guidance_loss_fn_).prev_sample  # type: ignore
-        out = denorm_image(x_t).reshape(rep_first_shape)
+                if torch.isnan(noise_pred).any() or torch.isinf(noise_pred).any():
+                    if self.verbose: 
+                         warnings.warn(f"NaN/Inf in noise_pred (Attempt {attempt+1}/{max_retries})")
+                    failed = True
+                    break
+
+                guidance_loss_fn_ = guidance_loss_fn if (20 < t < 1000) else None
+                step_out = self.step(noise_pred, t, x_t, guidance_loss_fn_)
+                x_t = step_out.prev_sample
+
+                if torch.isnan(x_t).any() or torch.isinf(x_t).any():
+                    if self.verbose:
+                         warnings.warn(f"NaN/Inf in x_t (Attempt {attempt+1}/{max_retries})")
+                    failed = True
+                    break
+            
+            if not failed:
+                out = denorm_image(x_t)
+                break
+            elif attempt == max_retries - 1:
+                warnings.warn("Max retries reached. Returning FBP fallback.")
+                out = fbps.expand(x_t_shape)
+
+        if out is None:
+             out = fbps.expand(x_t_shape)
+
+        out = out.reshape(x_t_shape)
         out = apply_circular_mask(out)
 
         # Massage from
         #    (replicates, ..., n_angles or n_rounds, side_length, side_length)
         # to (..., n_angles or n_rounds, replicates, 1, side_length, side_length),
         n_batch_dims = len(experiment.batch_dims)
+        ndim = len(x_t_shape)
         out_perm = (
             *tuple(range(1, n_batch_dims + 1)),
             n_batch_dims + 1,
             0,
-            x_t.ndim - 2,
-            x_t.ndim - 1,
+            ndim - 2,
+            ndim - 1,
         )
         return out.permute(out_perm).unsqueeze(-3)
 

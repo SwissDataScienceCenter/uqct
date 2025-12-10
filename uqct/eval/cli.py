@@ -102,17 +102,19 @@ def run(
                     }
                 )
 
-    # 3. U-Net: 1 Single Global Job. Loops everything. Full range.
+    # 3. U-Net: 1 Job per (Dataset, Intensity). Loops seeds. Full range.
     if "unet" in all_models:
-        grid.append(
-            {
-                "model": "unet",
-                "datasets": datasets,  # List -> Loop
-                "intensities": intensities,  # List -> Loop
-                "seeds": seeds,  # List -> Loop
-                "image_range": full_image_range,
-            }
-        )
+        for d in datasets:
+            for i in intensities:
+                grid.append(
+                    {
+                        "model": "unet",
+                        "dataset": d,  # Scalar -> One Job
+                        "intensity": i,  # Scalar -> One Job
+                        "seeds": seeds,  # List -> Loop
+                        "image_range": full_image_range,
+                    }
+                )
 
     # 4. Diffusion: Granular. 1 Job per (Dataset, Intensity, Seed, Chunk-10).
     if "diffusion" in all_models:
