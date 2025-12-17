@@ -11,10 +11,13 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from uqct.utils import get_results_dir
+from uqct.loading import load_runs
+from uqct.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Set plotting style
 # sns.set_theme(style="whitegrid")
-from uqct.loading import load_runs
 plt.style.use(
     "seaborn-v0_8-whitegrid"
     if "seaborn-v0_8-whitegrid" in plt.style.available
@@ -27,21 +30,24 @@ DELTA = 0.05
 LOG_INV_DELTA = math.log(1 / DELTA)
 
 
-
-
-def process_and_plot(latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFrame], output_dir: Path, log_scale: bool = False, show_progress: bool = True):
+def process_and_plot(
+    latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFrame],
+    output_dir: Path,
+    log_scale: bool = False,
+    show_progress: bool = True,
+):
     ranking_data = []
 
     common_indices: Optional[set] = None
 
     # First pass: Determine intersection of available image indices
-    
+
     min_len = min(len(df) for df in latest_runs.values()) if latest_runs else 0
     if min_len == 0:
-        click.echo("No images found in runs.")
+        logger.warning("No images found in runs.")
         return pd.DataFrame()
-        
-    click.echo(f"Intersecting results to {min_len} common images.")
+
+    logger.info(f"Intersecting results to {min_len} common images.")
 
     for key, df in latest_runs.items():
         # Unpack key
@@ -52,7 +58,7 @@ def process_and_plot(latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFram
             model = str(key)
 
         # Crop to min_len
-        df = df.iloc[:min_len]
+        df = df.iloc[:min_len].reset_index(drop=True)
         model_dir = output_dir / model
         model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -65,7 +71,12 @@ def process_and_plot(latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFram
         crossover_hits = []
         n_images = 0
 
-        for idx, row in tqdm(df.iterrows(), total=len(df), desc=f"Processing {model}", disable=not show_progress):
+        for idx, row in tqdm(
+            df.iterrows(),
+            total=len(df),
+            desc=f"Processing {model}",
+            disable=not show_progress,
+        ):
             # Parse metrics. Parquet might load lists as numpy arrays or lists.
             # nll_pred and nll_gt are list of lists.
             # In the DF, 'nll_pred' column contains the list for that image.
@@ -106,7 +117,7 @@ def process_and_plot(latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFram
             else:
                 psnr_finals.append(np.nan)
                 psnr_trajs.append(np.nan)
-            
+
             if len(nll_pred_cum) > 0:
                 nll_finals.append(nll_pred_cum[-1])
                 nll_trajs.append(np.mean(nll_pred_cum))
@@ -121,7 +132,7 @@ def process_and_plot(latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFram
             plt.plot(
                 steps,
                 nll_gt_cum,
-                label="NLL (GT, Cumulative)",
+                label=r"$L_t(\theta^\ast)$",
                 linestyle="--",
                 color="black",
             )
@@ -131,7 +142,7 @@ def process_and_plot(latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFram
             plt.plot(
                 steps,
                 nll_pred_cum,
-                label=f"NLL (Pred: {model}, Cumulative)",
+                label=r"$L_t(\theta^\text{pred}_t)$",
                 color="tab:blue",
             )
 
@@ -140,18 +151,17 @@ def process_and_plot(latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFram
             plt.plot(
                 steps,
                 thresh_line,
-                label=f"NLL(Pred) + log(1/{DELTA})",
+                label=r"$\beta_t(\delta)$",
                 linestyle=":",
                 color="tab:red",
             )
 
-
-            plt.xlabel("Step")
-            plt.ylabel("Cumulative NLL")
+            plt.xlabel("Time step $t$")
+            plt.ylabel("NLL and confidence coefficient")
             plt.legend()
 
             # Save plot
-            plot_path = model_dir / f"img_{idx:03d}_nll.png"
+            plot_path = model_dir / f"img_{idx:03d}_nll.pdf"
             plt.savefig(plot_path)
             plt.close()
 
@@ -159,14 +169,19 @@ def process_and_plot(latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFram
             nll_diff = [p - g for p, g in zip(nll_pred, nll_gt)]
 
             plt.figure()
-            plt.plot(steps, nll_diff, label="NLL(Pred) - NLL(GT)", color="tab:purple")
+            plt.plot(
+                steps,
+                nll_diff,
+                label=r"$\log p_t(y_t | \theta^\text{pred}_t) - \log p_t(y_t | \theta^\ast)$",
+                color="tab:purple",
+            )
             plt.axhline(0, color="black", linestyle="--", linewidth=1)
 
             plt.xlabel("Step")
-            plt.ylabel("NLL Difference")
+            plt.ylabel("Log density difference")
             plt.legend()
 
-            diff_plot_path = model_dir / f"img_{idx:03d}_nll_diff.png"
+            diff_plot_path = model_dir / f"img_{idx:03d}_logp_diff.pdf"
             plt.savefig(diff_plot_path)
             plt.close()
 
@@ -180,33 +195,53 @@ def process_and_plot(latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFram
 
             plt.figure()
             plt.plot(steps, gap_traj, label="Gap", color="tab:blue")
-            plt.axhline(0, color="black", linestyle="--", linewidth=1.5, label="Threshold (0)")
-            
+            plt.axhline(
+                0, color="black", linestyle="--", linewidth=1.5, label="Threshold (0)"
+            )
+
             # Shade regions where gap < 0 (violation)
             gap_arr = np.array(gap_traj)
-            plt.fill_between(steps, 0, gap_arr, where=(gap_arr < 0), color='tab:red', alpha=0.3, interpolate=True, label="Violation")
-            plt.fill_between(steps, 0, gap_arr, where=(gap_arr >= 0), color='tab:green', alpha=0.1, interpolate=True, label="Safe")
+            plt.fill_between(
+                steps,
+                0,
+                gap_arr,
+                where=(gap_arr < 0),
+                color="tab:red",
+                alpha=0.3,
+                interpolate=True,
+                label="GT Image NOT in CS",
+            )
+            plt.fill_between(
+                steps,
+                0,
+                gap_arr,
+                where=(gap_arr >= 0),
+                color="tab:green",
+                alpha=0.1,
+                interpolate=True,
+                label="GT Image in CS",
+            )
 
-
-            plt.xlabel("Step")
-            plt.ylabel(f"Gap: Pred + log(1/{DELTA}) - GT")
+            plt.xlabel("Time step $t$")
+            plt.ylabel(r"$\beta_t(\delta) - L_t(\theta^\ast)$")
             plt.legend()
 
-            gap_plot_path = model_dir / f"img_{idx:03d}_gap.png"
+            gap_plot_path = model_dir / f"img_{idx:03d}_gap.pdf"
             plt.savefig(gap_plot_path)
             plt.close()
 
-
         # Avg metrics
         if psnr_finals and np.isnan(psnr_finals).any():
-             click.echo(f"  [Warning] {np.isnan(psnr_finals).sum()} NaNs detected in PSNR for {model}")
+            raise ValueError(
+                f"NaNs detected in PSNR for {key}. NaNs: {np.isnan(psnr_finals).sum()}, Values: {psnr_finals}"
+            )
 
         avg_psnr_final = np.nanmean(psnr_finals) if psnr_finals else 0.0
         avg_nll_final = np.nanmean(nll_finals) if nll_finals else 0.0
-        
+
         avg_psnr_traj = np.nanmean(psnr_trajs) if psnr_trajs else 0.0
         avg_nll_traj = np.nanmean(nll_trajs) if nll_trajs else 0.0
-        
+
         crossover_rate = np.nanmean(crossover_hits) if crossover_hits else 0.0
 
         ranking_data.append(
@@ -230,34 +265,39 @@ def process_single_group(args):
     args: (dataset, intensity, sparse, df_group, output_dir, log_scale, show_progress)
     """
     d, i, s, setting_df, output_dir, log_scale, show_progress = args
-    
+
     # Re-import check for safety if spawned
     import matplotlib.pyplot as plt
+    from uqct.logging import get_logger
+
+    logger = get_logger(__name__)
+    # Ensure logging is setup in worker if needed, though basic config might propagate or need re-init
+    # For now, just print is replaced by logger, hoping stdout capture works.
 
     try:
         # Construct latest_runs for this group
         latest_runs = {}
         # Group by model
         for model_name, model_df in setting_df.groupby("model"):
-             key = (d, model_name, i, s)
-             latest_runs[key] = model_df
-        
+            key = (d, model_name, i, s)
+            latest_runs[key] = model_df
+
         fmt_i = f"{i:.0e}".replace("+0", "").replace("+", "")
         # Prepare output dir
         # Hierarchical
-        setting_dir = (
-            output_dir / d / f"{fmt_i}_{'sparse' if s else 'dense'}"
-        )
+        setting_dir = output_dir / d / f"{fmt_i}_{'sparse' if s else 'dense'}"
         setting_dir.mkdir(parents=True, exist_ok=True)
-        
-        print(f"Processing group: {d} {fmt_i} {'sparse' if s else 'dense'}")
-        
+
+        logger.info(f"Processing group: {d} {fmt_i} {'sparse' if s else 'dense'}")
+
         # Call processing
-        ranking_df = process_and_plot(latest_runs, setting_dir, log_scale, show_progress=show_progress)
-        
+        ranking_df = process_and_plot(
+            latest_runs, setting_dir, log_scale, show_progress=show_progress
+        )
+
         if not ranking_df.empty:
             ranking_df = ranking_df.sort_values(by="avg_nll_final", ascending=True)
-            
+
             # Save CSV
             csv_path = setting_dir / "ranking.csv"
             ranking_df.to_csv(csv_path, index=False)
@@ -267,6 +307,7 @@ def process_single_group(args):
 
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         return f"Error processing {d}/{i}: {str(e)}"
 
@@ -291,12 +332,28 @@ def process_single_group(args):
     help="Directory to save plots.",
 )
 @click.option(
-    "--dataset", required=False, type=str, default=None, help="Dataset name (lung, composite, lamino). Default: All."
+    "--dataset",
+    required=False,
+    type=str,
+    default=None,
+    help="Dataset name (lung, composite, lamino). Default: All.",
 )
-@click.option("--intensity", required=False, type=float, default=None, help="Total intensity. Default: All.")
-@click.option("--sparse/--no-sparse", default=None, help="Sparse setting flag. Default: All.")
-@click.option("--log-scale/--no-log-scale", default=False, help="Use log scale for NLL plots.")
-@click.option("--parallel/--no-parallel", default=True, help="Enable parallel processing.")
+@click.option(
+    "--intensity",
+    required=False,
+    type=float,
+    default=None,
+    help="Total intensity. Default: All.",
+)
+@click.option(
+    "--sparse/--no-sparse", default=None, help="Sparse setting flag. Default: All."
+)
+@click.option(
+    "--log-scale/--no-log-scale", default=False, help="Use log scale for NLL plots."
+)
+@click.option(
+    "--parallel/--no-parallel", default=True, help="Enable parallel processing."
+)
 def main(
     runs_dir: Optional[Path],
     consolidated_file: Optional[Path],
@@ -308,8 +365,6 @@ def main(
     parallel: bool,
 ):
 
-    """Visualize evaluation runs."""
-
     if runs_dir is None:
         runs_dir = get_results_dir() / "runs"
 
@@ -317,62 +372,66 @@ def main(
     if dataset == "ALL":
         dataset = None
 
-    click.echo(f"Configuration:")
-    click.echo(f"  Runs Dir:  {runs_dir}")
-    click.echo(f"  Output Dir:{output_dir}")
-    click.echo(f"  Dataset:   {dataset if dataset else 'ALL'}")
-    click.echo(f"  Intensity: {intensity if intensity else 'ALL'}")
-    click.echo(f"  Sparse:    {sparse if sparse is not None else 'ALL'}")
+    logger.info(f"Configuration:")
+    logger.info(f"  Runs Dir:  {runs_dir}")
+    logger.info(f"  Output Dir:{output_dir}")
+    logger.info(f"  Dataset:   {dataset if dataset else 'ALL'}")
+    logger.info(f"  Intensity: {intensity if intensity else 'ALL'}")
+    logger.info(f"  Sparse:    {sparse if sparse is not None else 'ALL'}")
 
     if consolidated_file and consolidated_file.exists():
-        click.echo(f"Loading from consolidated file: {consolidated_file}")
+        logger.info(f"Loading from consolidated file: {consolidated_file}")
         df = pd.read_parquet(consolidated_file)
-        
+
         # Filter (only if arg provided)
         if dataset is not None:
-             df = df[df["dataset"] == dataset]
+            df = df[df["dataset"] == dataset]
         if intensity is not None:
-             df = df[np.abs(df["total_intensity"] - intensity) < 1e-9]
+            df = df[np.abs(df["total_intensity"] - intensity) < 1e-9]
         if sparse is not None:
-             df = df[df["sparse"] == sparse]
+            df = df[df["sparse"] == sparse]
 
         if df.empty:
-             click.echo("No matching runs found in consolidated file.")
-             return
+            logger.warning("No matching runs found in consolidated file.")
+            return
 
         # Ensure grouping columns exist
         req_cols = ["dataset", "total_intensity", "sparse"]
         if not all(c in df.columns for c in req_cols):
-             click.echo(f"Consolidated file missing columns: {req_cols}. Available: {df.columns.tolist()}")
-             return
+            logger.error(
+                f"Consolidated file missing columns: {req_cols}. Available: {df.columns.tolist()}"
+            )
+            return
 
         # Iterate over unique settings
         groups = list(df.groupby(["dataset", "total_intensity", "sparse"]))
-        click.echo(f"Found {len(groups)} groups to process.")
-        
+        logger.info(f"Found {len(groups)} groups to process.")
+
         tasks = []
         use_tqdm = not parallel
         for (d, i, s), setting_df in groups:
-             tasks.append((d, i, s, setting_df, output_dir, log_scale, use_tqdm))
-        
+            tasks.append((d, i, s, setting_df, output_dir, log_scale, use_tqdm))
+
         if parallel:
-             click.echo("Processing in parallel...")
-             with concurrent.futures.ProcessPoolExecutor() as executor:
-                  results = list(tqdm(executor.map(process_single_group, tasks), total=len(tasks)))
+            logger.info("Processing in parallel...")
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                results = list(executor.map(process_single_group, tasks))
         else:
-             click.echo("Processing sequentially...")
-             for t in tqdm(tasks):
-                  process_single_group(t)
+            logger.info("Processing sequentially...")
+            for t in tqdm(tasks):
+                process_single_group(t)
 
     else:
         # Legacy path - requires specific arguments
         if dataset is None or intensity is None or sparse is None:
-             click.echo("Error: When not using --consolidated-file, you must specify --dataset, --intensity, and --sparse.")
-             return
-             
+            logger.error(
+                "Error: When not using --consolidated-file, you must specify --dataset, --intensity, and --sparse."
+            )
+            return
+
         latest_runs = load_runs(runs_dir, dataset, intensity, sparse)
         if not latest_runs:
-            click.echo("No matching runs found.")
+            logger.warning("No matching runs found.")
             return
 
         fmt_i = f"{intensity:.0e}".replace("+0", "").replace("+", "")
@@ -386,11 +445,11 @@ def main(
 
         if not ranking_df.empty:
             ranking_df = ranking_df.sort_values(by="avg_nll_final", ascending=True)
-            print("\nRanking Summary:")
-            print(ranking_df.to_string(index=False))
+            logger.info("\nRanking Summary:")
+            logger.info(ranking_df.to_string(index=False))
             csv_path = setting_dir / "ranking.csv"
             ranking_df.to_csv(csv_path, index=False)
-            click.echo(f"\nRanking saved to {csv_path}")
+            logger.info(f"\nRanking saved to {csv_path}")
 
 
 if __name__ == "__main__":

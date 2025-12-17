@@ -3,6 +3,10 @@ import re
 from pathlib import Path
 from typing import List, Optional
 
+from uqct.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 def _git_root(start: Path) -> Optional[Path]:
     current = start
@@ -57,7 +61,7 @@ def get_results_dir() -> Path:
     else:
         results_dir = get_root_dir() / "results"
     results_dir.mkdir(exist_ok=True, parents=True)
-    print(f"Results dir: {results_dir}")
+    logger.info(f"Results dir: {results_dir}")
     return results_dir
 
 
