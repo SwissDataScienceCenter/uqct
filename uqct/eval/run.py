@@ -195,8 +195,6 @@ def setup_experiment(
         )
         if (schedule[:-1] == schedule[1:]).any():
             raise ValueError("Schedule must be strictly increasing")
-
-        # print(f"Schedule: {schedule.tolist()}")
     else:
         n_rounds = schedule_length
         intensities = intensities.view(1, 1, 1, 1).expand(
@@ -359,7 +357,7 @@ def run_evaluation(
         dataset, image_range, total_intensity, sparse, seed, schedule_length
     )
 
-    preds = predictor_fn(experiment, schedule - 1 if schedule is not None else None)
+    preds = predictor_fn(experiment, schedule)
 
     ct_settings = CTSettings(
         dataset=dataset,
