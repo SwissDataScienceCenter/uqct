@@ -18,6 +18,9 @@ from uqct.datasets.utils import get_dataset
 from uqct.training.unet import N_ANGLES
 from uqct.utils import get_results_dir
 from uqct.metrics import get_metrics
+from uqct.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -60,7 +63,7 @@ class Run:
         s = []
         s.append(f"Run Summary (ID: {self.run_id})")
         if self.slurm_job_id:
-             s.append(f"  SLURM Job ID: {self.slurm_job_id}")
+            s.append(f"  SLURM Job ID: {self.slurm_job_id}")
         s.append(f"  Timestamp: {self.timestamp}")
         s.append(f"  Model: {self.model}")
         s.append(f"  Dataset: {self.ct_settings.dataset}")
@@ -126,7 +129,7 @@ class Run:
         with h5py.File(fp_preds, "w") as f:
             f.create_dataset("preds", data=self.preds, dtype="float32")
 
-        print(f"Saved run data at \n- {fp_parquet}\n- {fp_preds}")
+        logger.info(f"Saved run data at \n- {fp_parquet}\n- {fp_preds}")
 
 
 def setup_experiment(
@@ -334,7 +337,7 @@ def evaluate_and_save(
         slurm_job_id=slurm_id,
         extra=extra_metadata,
     )
-    print(run)
+    logger.info(run)
     run.dump_parquet()
 
 

@@ -379,7 +379,7 @@ class Diffusion:
                 side_length,
                 side_length,
             )
-        
+
         fbps, intensities, class_labels = prepare_inputs_from_experiment(
             experiment, schedule
         )
@@ -398,24 +398,24 @@ class Diffusion:
             -1, 1
         )
         n_angles_norm = ((n_angles - N_ANGLES / 2) / (N_ANGLES / 2)).clip(-1, 1)
-        
+
         intensities_norm = intensities_norm.view(1, *intensities_norm.shape).expand(
             replicates, *(-1 for _ in range(intensities_norm.ndim))
         )
         n_angles_norm = n_angles_norm.view(1, *n_angles_norm.shape).expand(
             replicates, *(-1 for _ in range(n_angles_norm.ndim))
         )
-        
+
         max_retries = 5
         out = None
-        
+
         for attempt in range(max_retries):
             # Init x_t
             x_t = torch.randn(x_t_shape, device=self.device)
-            
+
             it = tqdm(self.noise_scheduler.timesteps, disable=not self.verbose)
             failed = False
-            
+
             for t in it:
                 if self.cond:
                     noise_pred = self.predict_noise_cond(
@@ -425,8 +425,10 @@ class Diffusion:
                     noise_pred = self.predict_noise(t, x_t)  # type: ignore
 
                 if torch.isnan(noise_pred).any() or torch.isinf(noise_pred).any():
-                    if self.verbose: 
-                         warnings.warn(f"NaN/Inf in noise_pred (Attempt {attempt+1}/{max_retries})")
+                    if self.verbose:
+                        warnings.warn(
+                            f"NaN/Inf in noise_pred (Attempt {attempt+1}/{max_retries})"
+                        )
                     failed = True
                     break
 
@@ -436,10 +438,12 @@ class Diffusion:
 
                 if torch.isnan(x_t).any() or torch.isinf(x_t).any():
                     if self.verbose:
-                         warnings.warn(f"NaN/Inf in x_t (Attempt {attempt+1}/{max_retries})")
+                        warnings.warn(
+                            f"NaN/Inf in x_t (Attempt {attempt+1}/{max_retries})"
+                        )
                     failed = True
                     break
-            
+
             if not failed:
                 out = denorm_image(x_t)
                 break
@@ -448,7 +452,7 @@ class Diffusion:
                 out = fbps.expand(x_t_shape)
 
         if out is None:
-             out = fbps.expand(x_t_shape)
+            out = fbps.expand(x_t_shape)
 
         out = out.reshape(x_t_shape)
         out = apply_circular_mask(out)

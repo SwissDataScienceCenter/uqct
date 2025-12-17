@@ -4,6 +4,10 @@ from pathlib import Path
 from typing import Optional
 from uqct.utils import get_results_dir
 from uqct.loading import load_runs
+from uqct.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 @click.command()
 @click.option(
@@ -18,10 +22,10 @@ from uqct.loading import load_runs
     required=True,
     help="Path to save the consolidated parquet file.",
 )
+@click.option("--dataset", required=False, type=str, default=None, help="Dataset name.")
 @click.option(
-    "--dataset", required=False, type=str, default=None, help="Dataset name."
+    "--intensity", required=False, type=float, default=None, help="Total intensity."
 )
-@click.option("--intensity", required=False, type=float, default=None, help="Total intensity.")
 @click.option("--sparse/--no-sparse", default=None, help="Sparse setting flag.")
 def main(
     runs_dir: Path,
@@ -31,36 +35,30 @@ def main(
     sparse: Optional[bool],
 ):
     """Consolidate run results into a single parquet file."""
+    """Consolidate run results into a single parquet file."""
 
     if runs_dir is None:
         runs_dir = get_results_dir() / "runs"
 
-    click.echo("Configuration:")
-    click.echo(f"  Runs Dir:    {runs_dir}")
-    click.echo(f"  Output File: {output_file}")
-    click.echo(f"  Dataset:     {dataset if dataset else 'ALL'}")
-    click.echo(f"  Intensity:   {intensity if intensity is not None else 'ALL'}")
-    click.echo(f"  Sparse:      {sparse if sparse is not None else 'ALL'}")
+    logger.info("Configuration:")
+    logger.info(f"  Runs Dir:    {runs_dir}")
+    logger.info(f"  Output File: {output_file}")
+    logger.info(f"  Dataset:     {dataset if dataset else 'ALL'}")
+    logger.info(f"  Intensity:   {intensity if intensity is not None else 'ALL'}")
+    logger.info(f"  Sparse:      {sparse if sparse is not None else 'ALL'}")
 
     aggregated_runs = load_runs(runs_dir, dataset, intensity, sparse)
 
     if not aggregated_runs:
-        click.echo("No matching runs found.")
+        logger.warning("No matching runs found.")
         return
 
     # Consolidate all models into one dataframe
     all_runs = []
-    
-    # We want to ensure consistent image set (intersection) like in plot_runs?
-    # Or just dump everything we have?
-    # The user said "deduplicates and saves the resulting dataset".
-    # Usually "dataset" implies the clean, usable set.
-    # Let's perform the same intersection logic as plot_runs to be safe, 
-    # ensuring the output file is ready for analysis without further cleaning.
-    
+
     # Logic: Intersect models WITHIN the same (dataset, intensity, sparse) application
     # to ensure fair comparison, then concat everything.
-    
+
     # 1. Group keys by (dataset, intensity, sparse)
     groups = {}
     for key, df in aggregated_runs.items():
@@ -69,44 +67,95 @@ def main(
         if group_key not in groups:
             groups[group_key] = []
         groups[group_key].append(df)
-        
+
     all_runs = []
-    
+
     for group_key, dfs in groups.items():
-        if not dfs: continue
-        
+        if not dfs:
+            continue
+
         # Intersect within group
         min_len = min(len(df) for df in dfs)
-        if min_len == 0: continue
-        
+        if min_len == 0:
+            continue
+
         for df in dfs:
-             df_cropped = df.iloc[:min_len].copy()
-             all_runs.append(df_cropped)
+            df_cropped = df.iloc[:min_len].copy()
+            all_runs.append(df_cropped)
 
-    click.echo(f"Consolidating {len(all_runs)} model-runs across {len(groups)} configurations.")
-
+    logger.info(
+        f"Consolidating {len(all_runs)} model-runs across {len(groups)} configurations."
+    )
 
     # Filter out empty dataframes to avoid FutureWarning
     all_runs = [df for df in all_runs if not df.empty]
-    
+
+    # Also filter out all-NA columns from individual frames before concat to avoid FutureWarning
+    # "The behavior of DataFrame concatenation with empty or all-NA entries is deprecated."
+    all_runs = [df.dropna(axis=1, how="all") for df in all_runs]
+
     if not all_runs:
-         click.echo("No data to save.")
-         return
+        logger.warning("No data to save.")
+        return
 
     # Sort for tidiness
     final_df = pd.concat(all_runs, ignore_index=True)
-    
-    # Sort for tidiness
-    # Assuming we want to group by image, then model, or model then image?
-    # Usually model then image is good for reading chunks.
-    # But if we want to compare images: image then model.
-    # Let's do Model, Image Index (implicit)
-    # But wait, df has implicit index 0..N per model.
-    
+
+    # Integrity check on specific columns
+    required_cols = [
+        "dataset",
+        "model",
+        "total_intensity",
+        "sparse",
+        "psnr",
+        "ssim",
+        "nll_pred",
+        "nll_gt",
+        "timestamp",
+        "rmse",
+        "zeroone",
+        "l1",
+    ]
+
+    # Only check columns that exist (though they should all exist)
+    present_cols = [c for c in required_cols if c in final_df.columns]
+
+    # 1. Check for standard NaNs (top-level)
+    if final_df[present_cols].isnull().values.any():
+        null_counts = final_df[present_cols].isnull().sum()
+        logger.error(
+            f"Top-level NaN counts per column:\n{null_counts[null_counts > 0]}"
+        )
+        raise ValueError(
+            "NaN values detected in required columns of the consolidated dataframe!"
+        )
+
+    # 2. Deep check for NaNs in list/array columns
+    import numpy as np
+
+    list_cols = ["psnr", "ssim", "nll_pred", "nll_gt", "rmse", "zeroone", "l1"]
+    present_list_cols = [c for c in list_cols if c in final_df.columns]
+
+    for col in present_list_cols:
+        has_nan = (
+            final_df[col]
+            .apply(
+                lambda x: (
+                    np.isnan(x).any() if isinstance(x, (list, np.ndarray)) else False
+                )
+            )
+            .any()
+        )
+
+        if has_nan:
+            logger.error(f"NaN values detected INSIDE list column '{col}'!")
+            raise ValueError(f"NaN values detected INSIDE list column '{col}'!")
+
     # Let's save it
     output_file.parent.mkdir(parents=True, exist_ok=True)
     final_df.to_parquet(output_file)
-    click.echo(f"Saved {len(final_df)} rows to {output_file}")
+    logger.info(f"Saved {len(final_df)} rows to {output_file}")
+
 
 if __name__ == "__main__":
     main()
