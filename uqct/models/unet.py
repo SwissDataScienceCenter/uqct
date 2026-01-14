@@ -224,6 +224,7 @@ class FBPUNet:
                 / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
                 * 999
             )
+            intensity_norm = intensity_norm.clamp(0.0, 999.0)
 
             with torch.inference_mode():
                 with torch.autocast(

@@ -158,8 +158,8 @@ def reconstruct(
         # Enforce mask on parameters
         with torch.no_grad():
             x.data[..., ~mask] = 0.0
-            x.data[x.data < 0] = 0.0 + 1e-6
-            x.data[x.data > 1] = 1.0 - 1e-6
+            x.data[x.data < 0] = 0.0
+            x.data[x.data > 1] = 1.0
 
         current_loss = loss.item()
 

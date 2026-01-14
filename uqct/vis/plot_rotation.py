@@ -1,8 +1,3 @@
-import os
-
-# Set allocator config to reduce fragmentation
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 import math
 import click
 import torch
@@ -18,14 +13,12 @@ import scipy.ndimage as ndimage
 import torch.nn.functional as F
 import time
 from functools import lru_cache
-import gc
 
 import uqct
 from uqct.eval.run import setup_experiment
-from uqct.ct import nll_mixture_angle_schedule, Experiment, sample_observations, nll
-from uqct.utils import get_results_dir
+from uqct.ct import nll_mixture_angle_schedule
 from uqct.datasets.utils import get_dataset
-from uqct.training.unet import N_ANGLES
+from uqct.vis.style import MODEL_ORDER, get_style
 
 # Patch get_dataset to speed up repeated calls in setup_experiment
 uqct.eval.run.get_dataset = lru_cache(maxsize=None)(get_dataset)
@@ -38,9 +31,6 @@ plt.style.use(
 )
 plt.rcParams["figure.figsize"] = (10, 6)
 plt.rcParams["font.size"] = 12
-
-# Model Style
-from uqct.vis.style import MODEL_ORDER, MODEL_NAMES, MODEL_COLORS, get_style
 
 
 DELTA = 0.05
@@ -100,13 +90,6 @@ def compute_rotated_nll(
 
         # rot_np is (N, H, W)
         rotated_images_list.append(torch.from_numpy(rot_np))
-
-    # Stack: (A, N, H, W) -> Permute to (N, A, H, W) -> Reshape (N*A, H, W)
-    # We want to keep N grouped together? Or A?
-    # Actually results are keyed by Angle.
-    # But for calculation, order doesn't matter as long as we track it.
-    # Let's stack as (A * N, H, W) -> [Angle0_Img0, Angle0_Img1... Angle1_Img0...]
-    # This matches the loop order above.
 
     cat_images = torch.cat(rotated_images_list, dim=0).to(device, dtype=torch.float32)
 
@@ -253,8 +236,8 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
         sparse = keys["sparse"]
         seed = keys["seed"]
 
-        start_idx = keys.get("image_start_index", 0)
-        end_idx = keys.get("image_end_index", 5)
+        start_idx = keys.get("image_start_index")
+        end_idx = keys.get("image_end_index")
 
         schedule_length = default_schedule_len
 
@@ -262,7 +245,6 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
         experiment = None
         schedule = None
 
-        t0 = time.time()
         gt, experiment, schedule = setup_experiment(
             dataset=dataset,
             image_range=(start_idx, end_idx),
@@ -271,7 +253,6 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
             seed=seed,
             schedule_length=schedule_length,
         )
-        t1 = time.time()
 
         # Compute Rotated NLLs
         device_obj = torch.device(device)
@@ -282,12 +263,10 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
 
         # Map of angle -> NLL trajectory
         rot_nlls_map = compute_rotated_nll(gt, angles_deg, experiment, schedule)
-        t2 = time.time()
 
         # Now Check Exclusion for each Model
         # Iterate over unique models in this group
         for model, model_df in group_df.groupby("model"):
-
             n_images = min(len(model_df), len(gt))
 
             # We iterate images by index to match GT
@@ -418,7 +397,6 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
 
     intensities = sorted(global_agg["intensity"].unique())
     if len(intensities) > 0:
-
         # Global Directory
         global_dir = output_dir / "global"
         global_dir.mkdir(parents=True, exist_ok=True)
@@ -478,7 +456,7 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
             plt.ylim(-0.05, 1.05)
 
             # Global Directory: global/rotation/{intensity}/exclusion_rate.pdf
-            global_target_dir = output_dir / "global-rotation" / inten_str
+            global_target_dir = output_dir / "global" / "rotation" / inten_str
             global_target_dir.mkdir(parents=True, exist_ok=True)
 
             plt.savefig(global_target_dir / "exclusion_rate.pdf")
@@ -497,7 +475,7 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
             # The figure is created outside.
 
         # Save Stacked Figure
-        global_root = output_dir / "global-rotation"
+        global_root = output_dir / "global" / "rotation"
         global_root.mkdir(parents=True, exist_ok=True)
         fig_stack.tight_layout()
         fig_stack.savefig(global_root / "exclusion_stacked.pdf")

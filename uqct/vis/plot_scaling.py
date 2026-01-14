@@ -1,26 +1,23 @@
 import math
 from pathlib import Path
-from typing import List, Dict, Optional, Union
+from typing import Optional
 
 import click
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 from tqdm import tqdm
 
-from uqct.utils import get_results_dir
-from uqct.loading import load_runs
+from uqct.utils import get_results_dir, load_runs
 from uqct.logging import get_logger
+from uqct.vis.style import MODEL_ORDER, get_style
+
 
 logger = get_logger(__name__)
 
 # Constants
 DELTA = 0.05
 LOG_INV_DELTA = math.log(1 / DELTA)
-
-# Model style
-from uqct.vis.style import MODEL_ORDER, MODEL_NAMES, MODEL_COLORS, get_style
 
 
 def process_metrics(df: pd.DataFrame) -> pd.DataFrame:
@@ -73,7 +70,6 @@ def process_metrics(df: pd.DataFrame) -> pd.DataFrame:
                 and len(val_pred) == len(val_gt)
                 and len(val_pred) > 0
             ):
-
                 p_arr = np.array(val_pred)
                 g_arr = np.array(val_gt)
                 with np.errstate(divide="ignore", invalid="ignore"):

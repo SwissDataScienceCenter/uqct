@@ -1,24 +1,24 @@
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
 import math
 import os
-from typing import Any, Literal, Callable
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Literal
 from uuid import uuid4
 
+import einops
 import h5py
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-import einops
-from collections import defaultdict
 
-from uqct.ct import Experiment, sample_observations, nll_mixture_angle_schedule
+from uqct.ct import Experiment, nll_mixture_angle_schedule, sample_observations
 from uqct.datasets.utils import get_dataset
+from uqct.logging import get_logger
+from uqct.metrics import get_metrics
 from uqct.training.unet import N_ANGLES
 from uqct.utils import get_results_dir
-from uqct.metrics import get_metrics
-from uqct.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -139,6 +139,10 @@ def setup_experiment(
     sparse: bool,
     seed: int,
     schedule_length: int,
+    schedule_start: int = 10,
+    schedule_type: Literal["exp", "linear"] = "exp",
+    n_angles: int = N_ANGLES,
+    max_angle: int = 180,
 ) -> tuple[torch.Tensor, Experiment, torch.Tensor | None]:
     """Deterministically computes experiment (and angle schedule if sparse setting).
 
@@ -148,7 +152,11 @@ def setup_experiment(
         total_intensity (`float`): Total intensity over all angles/rounds
         seed (`int`): Random seed
         sparse (`bool`): Whether we are in a sparse setting
+        schedule_start (`int`): Start of the schedule
+        schedule_type (`Literal['exp', 'linear']`): Whether to use an exponential or linear schedule
         schedule_length (`int`): Number of angles/rounds to use for the schedule
+        n_angles (`int`): Number of angles
+        max_angle (`int`): Maximum angle
 
     Returns:
         `tuple[torch.Tensor, Experiment, torch.Tensor | None]`: Ground truth images (high resolution), experiment object, and schedule if sparse == True, otherwise None.
@@ -176,34 +184,46 @@ def setup_experiment(
         .squeeze(1)
     )
 
-    angles = torch.from_numpy(np.linspace(0, 180, N_ANGLES, endpoint=False)).to(device)
+    angles = torch.from_numpy(np.linspace(0, max_angle, n_angles, endpoint=False)).to(
+        device
+    )
     n_detectors_hr = gt.shape[-1]
     intensities = torch.tensor(total_intensity, device=device)
     if sparse:
-        intensities = intensities.view(1, 1, 1).expand(n_gt, N_ANGLES, -1) / (
-            N_ANGLES * n_detectors_hr
+        intensities = intensities.view(1, 1, 1).expand(n_gt, n_angles, -1) / (
+            n_angles * n_detectors_hr
         )
-        schedule = (
-            torch.logspace(
-                math.log10(10),
-                math.log10(199),
-                steps=schedule_length,
-                device=device,
+        if schedule_type == "linear":
+            schedule = (
+                torch.linspace(
+                    schedule_start, n_angles - 1, steps=schedule_length, device=device
+                )
+                .round()
+                .int()
             )
-            .round()
-            .int()
-        )
+        else:
+            schedule = (
+                torch.logspace(
+                    math.log10(schedule_start),
+                    math.log10(n_angles - 1),
+                    steps=schedule_length,
+                    device=device,
+                )
+                .round()
+                .int()
+            )
         if (schedule[:-1] == schedule[1:]).any():
             raise ValueError("Schedule must be strictly increasing")
     else:
         n_rounds = schedule_length
         intensities = intensities.view(1, 1, 1, 1).expand(
-            n_gt, n_rounds, N_ANGLES, -1
-        ) / (N_ANGLES * n_detectors_hr * n_rounds)
+            n_gt, n_rounds, n_angles, -1
+        ) / (n_angles * n_detectors_hr * n_rounds)
         schedule = None
     counts = sample_observations(gt, intensities, angles)
     intensities_lr = intensities * 2
     experiment = Experiment(counts, intensities_lr, angles, sparse)
+    print(f"Experiment: {experiment}")
     return gt, experiment, schedule
 
 
@@ -347,14 +367,27 @@ def run_evaluation(
     seed: int,
     model_name: str,
     predictor_fn: Callable[[Experiment, torch.Tensor | None], torch.Tensor],
+    n_angles: int,
+    schedule_start: int,
+    schedule_type: Literal["exp", "linear"],
     schedule_length: int,
+    max_angle: int,
     extra_metadata: dict[str, Any] | None = None,
 ) -> None:
     """
     Unified evaluation execution logic.
     """
     gt, experiment, schedule = setup_experiment(
-        dataset, image_range, total_intensity, sparse, seed, schedule_length
+        dataset,
+        image_range,
+        total_intensity,
+        sparse,
+        seed,
+        schedule_length,
+        schedule_start,
+        schedule_type,
+        n_angles,
+        max_angle,
     )
 
     preds = predictor_fn(experiment, schedule)

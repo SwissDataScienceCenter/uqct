@@ -33,7 +33,7 @@ def plot_img(*images, name=None, max_cols=5, share_range=False):
         axes[j].axis("off")
 
     if name is not None:
-        plt.savefig(f"/tmp/{name}.png", bbox_inches="tight")
+        plt.savefig(f"/tmp/{name}.pdf", bbox_inches="tight", dpi=300)
     else:
         plt.show()
     plt.close(fig)

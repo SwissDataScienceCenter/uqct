@@ -16,7 +16,11 @@ def run_fbp(
     total_intensity: float,
     image_range: tuple[int, int],
     seed: int,
+    n_angles: int,
+    schedule_start: int,
+    schedule_type: Literal["linear", "exp"],
     schedule_length: int,
+    max_angle: int,
 ):
     def predictor_fn(
         experiment: Experiment, schedule: torch.Tensor | None
@@ -33,7 +37,11 @@ def run_fbp(
         seed=seed,
         model_name="fbp",
         predictor_fn=predictor_fn,
+        n_angles=n_angles,
+        schedule_start=schedule_start,
+        schedule_type=schedule_type,
         schedule_length=schedule_length,
+        max_angle=max_angle,
     )
 
 
@@ -45,9 +53,24 @@ def main(
     total_intensity: float,
     image_range: tuple[int, int],
     seed: int,
+    n_angles: int,
+    schedule_start: int,
+    schedule_type: Literal["linear", "exp"],
     schedule_length: int,
+    max_angle: int,
 ):
-    run_fbp(dataset, sparse, total_intensity, image_range, seed, schedule_length)
+    run_fbp(
+        dataset,
+        sparse,
+        total_intensity,
+        image_range,
+        seed,
+        n_angles,
+        schedule_start,
+        schedule_type,
+        schedule_length,
+        max_angle,
+    )
 
 
 if __name__ == "__main__":
