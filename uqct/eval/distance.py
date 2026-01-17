@@ -265,14 +265,14 @@ def distance_maximization(
     confcoef: torch.Tensor,
     experiment: Experiment,
     schedule: torch.Tensor,
-    lr: float = 1e-3,
+    lr: float = 1,
     lr_reduce_threshold: int = 10,
     patience: int = 5,
     max_steps: int = 10000,
     projection_lr: float = 1e-2,
     projection_steps: int = 10000,
     verbose: bool = True,
-    use_l2_grad: bool = False,
+    use_l2_grad: bool = True,
     theta_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict]:
     """
@@ -387,7 +387,7 @@ def pairwise_distance_maximization(
     schedule: torch.Tensor,
     lr: float = 1e-3,
     lr_reduce_threshold: int = 10,
-    rotations: int = 5,
+    rotations: int = 1,
     patience: int = 5,
     max_steps: int = 10000,
     use_l2_grad: bool = False,
@@ -400,9 +400,10 @@ def pairwise_distance_maximization(
     N, S, H, _ = pred.shape
 
     # Initialize
+    print(f"{pred.shape=}")
     mask = circular_mask(H, device=device, dtype=torch.bool)
     theta1 = pred.clone()
-    theta2 = pred.clone() + torch.randn_like(pred) * 1e-4
+    theta2 = torch.full_like(pred, 0.5)
 
     theta1.clamp_(0, 1)
     theta2.clamp_(0, 1)
@@ -416,22 +417,22 @@ def pairwise_distance_maximization(
 
     for rotation in range(rotations):
         # 1. Optimize theta1 to be far from theta2 (fixed)
-        theta1, _ = distance_maximization(
-            pred=theta2,  # Maximize ||theta1 - theta2||
+        theta2, _ = distance_maximization(
+            pred=theta1,  # Maximize ||theta1 - theta2||
             confcoef=confcoef,
             experiment=experiment,
             schedule=schedule,
             lr=lr,
-            patience=patience if rotation > 1 else 1,
+            patience=patience if rotation > 0 else 1,
             max_steps=max_steps,
             lr_reduce_threshold=lr_reduce_threshold,
             use_l2_grad=use_l2_grad,
-            theta_init=theta1,
+            theta_init=theta2,
         )
 
         # 2. Optimize theta2 to be far from theta1 (fixed)
-        theta2, _ = distance_maximization(
-            pred=theta1,  # Maximize ||theta2 - theta1||
+        theta1, _ = distance_maximization(
+            pred=theta2,  # Maximize ||theta2 - theta1||
             confcoef=confcoef,
             experiment=experiment,
             schedule=schedule,
@@ -440,7 +441,7 @@ def pairwise_distance_maximization(
             lr_reduce_threshold=lr_reduce_threshold,
             patience=patience,
             use_l2_grad=use_l2_grad,
-            theta_init=theta2,
+            theta_init=theta1,
         )
 
         with torch.no_grad():

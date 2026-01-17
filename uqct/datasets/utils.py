@@ -88,4 +88,16 @@ def get_dataset(
 
 
 if __name__ == "__main__":
-    train_set, test_set = get_dataset("lung")
+    datasets = ("lung", "lamino", "composite")
+    for ds_name in datasets:
+        print(f"Dataset: {ds_name}")
+        print(f"Finding min and max pixel values in training and test set...")
+
+        train_set, test_set = get_dataset(ds_name)
+        train_min = min(x.min().item() for x in train_set)
+        train_max = max(x.max().item() for x in train_set)
+        test_min = min(x.min().item() for x in test_set)
+        test_max = max(x.max().item() for x in test_set)
+
+        print(f"Train set: min={train_min}, max={train_max}")
+        print(f"Test set: min={test_min}, max={test_max}")
