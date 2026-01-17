@@ -140,7 +140,7 @@ def setup_experiment(
     seed: int,
     schedule_length: int,
     schedule_start: int = 10,
-    schedule_type: Literal["exp", "linear"] = "exp",
+    schedule_type: Literal["exp", "linear", "all"] = "exp",
     n_angles: int = N_ANGLES,
     max_angle: int = 180,
 ) -> tuple[torch.Tensor, Experiment, torch.Tensor | None]:
@@ -201,7 +201,7 @@ def setup_experiment(
                 .round()
                 .int()
             )
-        else:
+        elif schedule_type == "exp":
             schedule = (
                 torch.logspace(
                     math.log10(schedule_start),
@@ -212,6 +212,8 @@ def setup_experiment(
                 .round()
                 .int()
             )
+        else:
+            schedule = torch.arange(schedule_start, n_angles - 1, device=device)
         if (schedule[:-1] == schedule[1:]).any():
             raise ValueError("Schedule must be strictly increasing")
     else:
