@@ -176,5 +176,5 @@ def reconstruct(
                 print(f"Converged at step {_} with loss {best_loss:.4e}")
             break
 
-        it.set_postfix({"loss": f"{current_loss:.2e}", "best": f"{best_loss:.2e}"})
+        it.set_postfix({"loss": f"{current_loss:.4e}", "best": f"{best_loss:.4e}"})
     return best_x
