@@ -65,6 +65,7 @@ def nll(
     intensities: torch.Tensor,
     angles: torch.Tensor,
     l: int = 5,
+    radon_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Poisson negative log-likelihood.
 
@@ -74,6 +75,7 @@ def nll(
         intensities (torch.Tensor): (..., n_angles, 1)
         angles (torch.Tensor): (n_angles)
         l (int)
+        radon_fn (Callable): Optional cached radon function.
     Returns:
         torch.Tensor: (..., n_angles, side_length)
     """
@@ -81,11 +83,35 @@ def nll(
         images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1
     ), f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
     intensities = intensities.clip(1e-9)
-    sino = radon(images, angles)
+    if radon_fn is not None:
+        sino = radon_fn(images, angles)
+    else:
+        sino = radon(images, angles)
     scale = l / images.shape[-1]
     log_lam = torch.log(intensities) - scale * sino
     nll = torch.exp(log_lam) - counts * log_lam + torch.lgamma(counts + 1)
     return nll
+
+
+def get_parallel_beam_op(
+    angles: torch.Tensor, im_size: int, n_slices: int
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """
+    Pre-creates an ASTRA parallel beam operator/layer for fixed geometry.
+    Useful for optimization loops where geometry doesn't change.
+
+    Args:
+        angles: (n_angles,)
+        im_size: image size (H, W common)
+        n_slices: batch size (number of slices flattened)
+
+    Returns:
+        Callable layer that takes (B, H, W) images and returns (B, n_angles, n_det)
+    """
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_3d(angles, im_size, n_slices)
+    op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
+    parallel3d_layer = make_radon_layer(op3d)
+    return parallel3d_layer
 
 
 def nll_mixture(
@@ -159,7 +185,6 @@ def nll_mixture_angle_schedule(
     n_angles = counts.shape[-2]
 
     # (s, n_angles)
-    schedule = schedule - 1
     schedule_lb = schedule.unsqueeze(1)
     schedule_ub = torch.cat(
         [schedule[1:], torch.tensor((n_angles,), device=device)]
@@ -650,9 +675,13 @@ def circular_mask(
         torch.arange(img_size, device=device),
         indexing="ij",
     )
+    # Note: Is this correct?
     r = img_size // 2
     mask = ((yy - r) ** 2 + (xx - r) ** 2 <= r**2).to(dtype)
-    return mask
+    # Center for ASTRA alignment
+    # center = (img_size - 1) / 2.0
+    # mask = (yy - center) ** 2 + (xx - center) ** 2 <= (img_size / 2.0) ** 2
+    return mask.to(dtype)
 
 
 ##################################################
@@ -922,7 +951,7 @@ def prepare_inputs_from_experiment(
         angles_i = experiment.angles[:i]
         counts_i = experiment.counts[..., :i, :]
         intensities_i = experiment.intensities[..., :i, :]
-        sino_i = sinogram_from_counts(counts_i, intensities_i)
+        sino_i = sinogram_from_counts(counts_i, intensities_i).clamp_min(0.0)
         fbp_i = fbp(sino_i, angles_i)
         fbps.append(fbp_i)
         intensities.append(intensities_i.sum((-2, -1)))

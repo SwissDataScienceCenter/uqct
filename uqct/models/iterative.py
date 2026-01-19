@@ -158,8 +158,8 @@ def reconstruct(
         # Enforce mask on parameters
         with torch.no_grad():
             x.data[..., ~mask] = 0.0
-            x.data[x.data < 0] = 0.0 + 1e-6
-            x.data[x.data > 1] = 1.0 - 1e-6
+            x.data[x.data < 0] = 0.0
+            x.data[x.data > 1] = 1.0
 
         current_loss = loss.item()
 
@@ -176,5 +176,5 @@ def reconstruct(
                 print(f"Converged at step {_} with loss {best_loss:.4e}")
             break
 
-        it.set_postfix({"loss": f"{current_loss:.2e}", "best": f"{best_loss:.2e}"})
+        it.set_postfix({"loss": f"{current_loss:.4e}", "best": f"{best_loss:.4e}"})
     return best_x

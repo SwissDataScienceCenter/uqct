@@ -1,7 +1,6 @@
-import os
 import math
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Optional, Tuple
 import concurrent.futures
 
 import click
@@ -10,8 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from uqct.utils import get_results_dir
-from uqct.loading import load_runs
+from uqct.utils import get_results_dir, load_runs
 from uqct.logging import get_logger
 
 logger = get_logger(__name__)
@@ -31,16 +29,12 @@ LOG_INV_DELTA = math.log(1 / DELTA)
 
 
 def process_and_plot(
-    latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFrame],
+    latest_runs: dict[Tuple[str, str, float, bool], pd.DataFrame],
     output_dir: Path,
     log_scale: bool = False,
     show_progress: bool = True,
 ):
     ranking_data = []
-
-    common_indices: Optional[set] = None
-
-    # First pass: Determine intersection of available image indices
 
     min_len = min(len(df) for df in latest_runs.values()) if latest_runs else 0
     if min_len == 0:
@@ -364,7 +358,6 @@ def main(
     log_scale: bool,
     parallel: bool,
 ):
-
     if runs_dir is None:
         runs_dir = get_results_dir() / "runs"
 

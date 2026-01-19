@@ -1,26 +1,50 @@
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
 import math
 import os
-from typing import Any, Literal, Callable
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Literal
 from uuid import uuid4
 
+import einops
 import h5py
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-import einops
-from collections import defaultdict
 
-from uqct.ct import Experiment, sample_observations, nll_mixture_angle_schedule
+from uqct.ct import Experiment, nll_mixture_angle_schedule, sample_observations
 from uqct.datasets.utils import get_dataset
+from uqct.logging import get_logger
+from uqct.metrics import get_metrics
 from uqct.training.unet import N_ANGLES
 from uqct.utils import get_results_dir
-from uqct.metrics import get_metrics
-from uqct.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def get_default_angle_schedule() -> list[int]:
+    """
+    Returns the default angle schedule used for dense metrics expansion.
+    Matches setup_experiment(..., schedule_length=32, schedule_start=10, schedule_type='exp', n_angles=N_ANGLES, max_angle=180)
+    """
+    schedule_length = 32
+    schedule_start = 10
+    n_angles = N_ANGLES  # 200 from uqct.training.unet
+
+    # device='cpu' for default generation
+    # Logic from setup_experiment 'exp' branch
+    schedule = (
+        torch.logspace(
+            math.log10(schedule_start),
+            math.log10(n_angles - 1),
+            steps=schedule_length,
+            device="cpu",
+        )
+        .round()
+        .int()
+    )
+    return schedule.tolist()
 
 
 @dataclass
@@ -30,9 +54,9 @@ class CTSettings:
     sparse: bool
     image_start_index: int
     image_end_index: int
-    pred_angles: list[int] | None = None
     intensity_schedule: list[float] | None = None
     num_rounds: int | None = None
+    angle_schedule: list[int] | None = field(default_factory=get_default_angle_schedule)
 
 
 @dataclass
@@ -40,7 +64,6 @@ class Metrics:
     psnr: list[list[float]]
     ssim: list[list[float]]
     rmse: list[list[float]]
-    zeroone: list[list[float]]
     l1: list[list[float]]
     nll_pred: list[list[float]]
     nll_gt: list[list[float]]
@@ -101,7 +124,10 @@ class Run:
         metrics_dict = asdict(self.metrics)
         df = pd.DataFrame(metrics_dict)
         for k, v in asdict(self.ct_settings).items():
-            df[k] = v
+            if isinstance(v, list):
+                df[k] = [v]
+            else:
+                df[k] = v
 
         # Load extra data into dataframe
         if self.extra:
@@ -139,6 +165,10 @@ def setup_experiment(
     sparse: bool,
     seed: int,
     schedule_length: int,
+    schedule_start: int = 10,
+    schedule_type: Literal["exp", "linear", "all"] = "exp",
+    n_angles: int = N_ANGLES,
+    max_angle: int = 180,
 ) -> tuple[torch.Tensor, Experiment, torch.Tensor | None]:
     """Deterministically computes experiment (and angle schedule if sparse setting).
 
@@ -148,7 +178,11 @@ def setup_experiment(
         total_intensity (`float`): Total intensity over all angles/rounds
         seed (`int`): Random seed
         sparse (`bool`): Whether we are in a sparse setting
+        schedule_start (`int`): Start of the schedule
+        schedule_type (`Literal['exp', 'linear']`): Whether to use an exponential or linear schedule
         schedule_length (`int`): Number of angles/rounds to use for the schedule
+        n_angles (`int`): Number of angles
+        max_angle (`int`): Maximum angle
 
     Returns:
         `tuple[torch.Tensor, Experiment, torch.Tensor | None]`: Ground truth images (high resolution), experiment object, and schedule if sparse == True, otherwise None.
@@ -176,34 +210,48 @@ def setup_experiment(
         .squeeze(1)
     )
 
-    angles = torch.from_numpy(np.linspace(0, 180, N_ANGLES, endpoint=False)).to(device)
+    angles = torch.from_numpy(np.linspace(0, max_angle, n_angles, endpoint=False)).to(
+        device
+    )
     n_detectors_hr = gt.shape[-1]
     intensities = torch.tensor(total_intensity, device=device)
     if sparse:
-        intensities = intensities.view(1, 1, 1).expand(n_gt, N_ANGLES, -1) / (
-            N_ANGLES * n_detectors_hr
+        intensities = intensities.view(1, 1, 1).expand(n_gt, n_angles, -1) / (
+            n_angles * n_detectors_hr
         )
-        schedule = (
-            torch.logspace(
-                math.log10(10),
-                math.log10(199),
-                steps=schedule_length,
-                device=device,
+        if schedule_type == "linear":
+            schedule = (
+                torch.linspace(
+                    schedule_start, n_angles - 1, steps=schedule_length, device=device
+                )
+                .round()
+                .int()
             )
-            .round()
-            .int()
-        )
+        elif schedule_type == "exp":
+            schedule = (
+                torch.logspace(
+                    math.log10(schedule_start),
+                    math.log10(n_angles - 1),
+                    steps=schedule_length,
+                    device=device,
+                )
+                .round()
+                .int()
+            )
+        else:
+            schedule = torch.arange(schedule_start, n_angles - 1, device=device)
         if (schedule[:-1] == schedule[1:]).any():
             raise ValueError("Schedule must be strictly increasing")
     else:
         n_rounds = schedule_length
         intensities = intensities.view(1, 1, 1, 1).expand(
-            n_gt, n_rounds, N_ANGLES, -1
-        ) / (N_ANGLES * n_detectors_hr * n_rounds)
+            n_gt, n_rounds, n_angles, -1
+        ) / (n_angles * n_detectors_hr * n_rounds)
         schedule = None
     counts = sample_observations(gt, intensities, angles)
     intensities_lr = intensities * 2
     experiment = Experiment(counts, intensities_lr, angles, sparse)
+    print(f"Experiment: {experiment}")
     return gt, experiment, schedule
 
 
@@ -257,7 +305,7 @@ def evaluate_and_save(
             for k, v in get_metrics(image_gt, image_pred).items():
                 if image_index + 1 > len(metric2lists[k]):
                     metric2lists[k].append(list())
-                metric2lists[k][image_index].append(v)
+                metric2lists[k][image_index].append(v.item())
     metric2lists = dict(metric2lists)
 
     # NLL calculation
@@ -316,7 +364,6 @@ def evaluate_and_save(
         psnr=metric2lists["PSNR"],
         ssim=metric2lists["SS"],
         rmse=metric2lists["RMSE"],
-        zeroone=metric2lists["ZeroOne"],
         l1=metric2lists["L1"],
         nll_pred=nlls_pred.tolist(),
         nll_gt=nlls_gt.tolist(),
@@ -347,25 +394,42 @@ def run_evaluation(
     seed: int,
     model_name: str,
     predictor_fn: Callable[[Experiment, torch.Tensor | None], torch.Tensor],
+    n_angles: int,
+    schedule_start: int,
+    schedule_type: Literal["exp", "linear"],
     schedule_length: int,
+    max_angle: int,
     extra_metadata: dict[str, Any] | None = None,
 ) -> None:
     """
     Unified evaluation execution logic.
     """
     gt, experiment, schedule = setup_experiment(
-        dataset, image_range, total_intensity, sparse, seed, schedule_length
+        dataset,
+        image_range,
+        total_intensity,
+        sparse,
+        seed,
+        schedule_length,
+        schedule_start,
+        schedule_type,
+        n_angles,
+        max_angle,
     )
 
     preds = predictor_fn(experiment, schedule)
 
-    ct_settings = CTSettings(
-        dataset=dataset,
-        total_intensity=total_intensity,
-        sparse=sparse,
-        image_start_index=image_range[0],
-        image_end_index=image_range[1],
-    )
+    ct_settings_kwargs = {
+        "dataset": dataset,
+        "total_intensity": total_intensity,
+        "sparse": sparse,
+        "image_start_index": image_range[0],
+        "image_end_index": image_range[1],
+    }
+    if schedule is not None:
+        ct_settings_kwargs["angle_schedule"] = schedule.tolist()
+
+    ct_settings = CTSettings(**ct_settings_kwargs)
 
     evaluate_and_save(
         preds=preds,

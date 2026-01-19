@@ -42,9 +42,9 @@ class Diffusion:
         onnx: bool = False,
         verbose: bool = False,
     ):
-        assert (
-            not onnx or cond
-        ), "ONNX-based inference is not supported for unconditional models."
+        assert not onnx or cond, (
+            "ONNX-based inference is not supported for unconditional models."
+        )
 
         self.verbose = verbose
         self.device = (
@@ -419,7 +419,11 @@ class Diffusion:
             for t in it:
                 if self.cond:
                     noise_pred = self.predict_noise_cond(
-                        t, x_t, fbps_norm, intensities_norm, n_angles_norm  # type: ignore
+                        t,
+                        x_t,
+                        fbps_norm,
+                        intensities_norm,
+                        n_angles_norm,  # type: ignore
                     )
                 else:
                     noise_pred = self.predict_noise(t, x_t)  # type: ignore
@@ -427,7 +431,7 @@ class Diffusion:
                 if torch.isnan(noise_pred).any() or torch.isinf(noise_pred).any():
                     if self.verbose:
                         warnings.warn(
-                            f"NaN/Inf in noise_pred (Attempt {attempt+1}/{max_retries})"
+                            f"NaN/Inf in noise_pred (Attempt {attempt + 1}/{max_retries})"
                         )
                     failed = True
                     break
@@ -439,7 +443,7 @@ class Diffusion:
                 if torch.isnan(x_t).any() or torch.isinf(x_t).any():
                     if self.verbose:
                         warnings.warn(
-                            f"NaN/Inf in x_t (Attempt {attempt+1}/{max_retries})"
+                            f"NaN/Inf in x_t (Attempt {attempt + 1}/{max_retries})"
                         )
                     failed = True
                     break
@@ -578,12 +582,12 @@ def get_guidance_loss_fn(
                 experiment.angles,
             )
             nlls[..., ~mask, :] = 0.0
-            return nlls.mean(-1).sum()
-
+            # return nlls.mean(-1).sum()
+            return nlls.sum()
     else:
-        assert (
-            schedule is None
-        ), "Schedules are currently unsupported for the dense setting."
+        assert schedule is None, (
+            "Schedules are currently unsupported for the dense setting."
+        )
         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
 

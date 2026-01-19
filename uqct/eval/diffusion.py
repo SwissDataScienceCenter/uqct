@@ -23,6 +23,10 @@ def run_diffusion(
     image_range: tuple[int, int],
     seed: int,
     replicates: int,
+    n_angles: int,
+    schedule_start: int,
+    schedule_type: Literal["linear", "exp"],
+    max_angle: int,
 ):
     diffusion = Diffusion(
         dataset,
@@ -56,7 +60,11 @@ def run_diffusion(
         seed=seed,
         model_name="diffusion",
         predictor_fn=predictor_fn,
+        n_angles=n_angles,
+        schedule_start=schedule_start,
+        schedule_type=schedule_type,
         schedule_length=schedule_length,
+        max_angle=max_angle,
         extra_metadata=dict(
             cond=cond, guidance_lr=guidance_lr, gradient_steps=gradient_steps
         ),
@@ -97,6 +105,10 @@ def main(
     image_range: tuple[int, int],
     seed: int,
     replicates: int,
+    n_angles: int,
+    schedule_start: int,
+    schedule_type: Literal["linear", "exp"],
+    max_angle: int,
 ):
     run_diffusion(
         dataset,
@@ -109,6 +121,10 @@ def main(
         image_range,
         seed,
         replicates,
+        n_angles,
+        schedule_start,
+        schedule_type,
+        max_angle,
     )
 
 

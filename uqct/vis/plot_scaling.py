@@ -1,17 +1,19 @@
 import math
 from pathlib import Path
-from typing import List, Dict, Optional, Union
+from typing import Optional
 
 import click
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 from tqdm import tqdm
 
-from uqct.utils import get_results_dir
-from uqct.loading import load_runs
+from uqct.training.unet import N_ANGLES
+from uqct.utils import get_results_dir, load_runs
 from uqct.logging import get_logger
+from uqct.vis.style import MODEL_ORDER, get_style
+from uqct.eval.run import get_default_angle_schedule
+
 
 logger = get_logger(__name__)
 
@@ -19,11 +21,19 @@ logger = get_logger(__name__)
 DELTA = 0.05
 LOG_INV_DELTA = math.log(1 / DELTA)
 
-# Model style
-from uqct.vis.style import MODEL_ORDER, MODEL_NAMES, MODEL_COLORS, get_style
+TABLE_MODEL_ORDER = ["fbp", "mle", "map", "unet", "diffusion"]
+MODEL_LABELS = {
+    "fbp": "FBP",
+    "mle": "MLE",
+    "map": "MAP",
+    "unet": "U-Net",
+    "diffusion": "Diff.",
+}
 
 
-def process_metrics(df: pd.DataFrame) -> pd.DataFrame:
+def process_metrics(
+    df: pd.DataFrame, metric_aggregation: str = "average"
+) -> pd.DataFrame:
     """expands list metrics to scalars (final step) and computes crossover rate."""
     processed_records = []
 
@@ -52,44 +62,80 @@ def process_metrics(df: pd.DataFrame) -> pd.DataFrame:
                     rate = 1.0 if has_crossover else 0.0
 
             # 2. Scalar Metrics (Average over trajectory)
+            # Scalar Metrics Logic
+
+            # Helper to compute scalar from trajectory
+            def compute_scalar(val, mode, row_data):
+                if not (isinstance(val, (list, np.ndarray)) and len(val) > 0):
+                    return float(val) if isinstance(val, (int, float)) else np.nan
+
+                if mode == "last":
+                    return float(val[-1])
+
+                if mode == "schedule":
+                    # Simple mean over predictions as is
+                    return float(np.mean(val))
+
+                if mode == "average":
+                    # Expanded weighted mean using schedule
+                    # Check for angle_schedule column
+                    angle_schedule = None
+                    val_sch = row_data.get("angle_schedule")
+                    if isinstance(val_sch, (list, np.ndarray)) and len(val_sch) > 0:
+                        angle_schedule = list(val_sch)
+                    elif "angle_schedule" not in row_data:
+                        angle_schedule = get_default_angle_schedule()
+
+                    if angle_schedule:
+                        n_angles = 200  # Constant
+                        intervals = []
+                        for i in range(len(angle_schedule)):
+                            start = angle_schedule[i]
+                            if i < len(angle_schedule) - 1:
+                                end = angle_schedule[i + 1]
+                            else:
+                                end = n_angles
+                            intervals.append(max(0, int(end - start)))
+
+                        if len(val) == len(intervals):
+                            expanded = []
+                            for v_idx, v in enumerate(val):
+                                expanded.extend([v] * intervals[v_idx])
+                            if expanded:
+                                return float(np.mean(expanded))
+
+                    # Fallback if schedule missing or mismatch
+                    return float(np.mean(val))
+
+                return np.nan
+
             metrics_vals = {}
             for m in scalar_metrics:
                 val = row.get(m)
-                if isinstance(val, (list, np.ndarray)) and len(val) > 0:
-                    metrics_vals[m] = float(np.mean(val))
-                elif isinstance(val, (int, float)):
-                    metrics_vals[m] = float(val)
+
+                if m == "nll_pred":
+                    # Always last for nll_pred metric logic (scalar extraction)
+                    if isinstance(val, (list, np.ndarray)) and len(val) > 0:
+                        metrics_vals[m] = float(val[-1])
+                    elif isinstance(val, (int, float)):
+                        metrics_vals[m] = float(val)
+                    else:
+                        metrics_vals[m] = np.nan
                 else:
-                    metrics_vals[m] = np.nan
+                    metrics_vals[m] = compute_scalar(val, metric_aggregation, row)
 
-            # Compute Relative NLL: Mean of pointwise (NLL - NLL_GT) / NLL_GT * 100
+            # Compute NLL Sum: Sum of valid NLL values over trajectory
+            # Formula: nll_pred[valid_mask].mean() * sum(valid_mask)
             val_pred = row.get("nll_pred")
-            val_gt = row.get("nll_gt")
 
-            nll_rel = np.nan
-            if (
-                isinstance(val_pred, (list, np.ndarray))
-                and isinstance(val_gt, (list, np.ndarray))
-                and len(val_pred) == len(val_gt)
-                and len(val_pred) > 0
-            ):
-
+            nll_sum = np.nan
+            if isinstance(val_pred, (list, np.ndarray)) and len(val_pred) > 0:
                 p_arr = np.array(val_pred)
-                g_arr = np.array(val_gt)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    rel_traj = (p_arr - g_arr) / g_arr * 100.0
-
-                # Filter nan/inf if any (though NLL usually finite)
-                valid_mask = np.isfinite(rel_traj)
+                valid_mask = np.isfinite(p_arr)
                 if np.any(valid_mask):
-                    nll_rel = float(np.mean(rel_traj[valid_mask]))
-
-            elif (
-                isinstance(val_pred, (int, float))
-                and isinstance(val_gt, (int, float))
-                and abs(val_gt) > 1e-9
-            ):
-                nll_rel = (val_pred - val_gt) / val_gt * 100.0
+                    nll_sum = float(p_arr[valid_mask].mean() * valid_mask.sum())
+            elif isinstance(val_pred, (int, float)):
+                nll_sum = float(val_pred)
 
             record = {
                 "dataset": row["dataset"],
@@ -97,7 +143,7 @@ def process_metrics(df: pd.DataFrame) -> pd.DataFrame:
                 "intensity": float(row["total_intensity"]),
                 "sparse": bool(row["sparse"]),
                 "rate": rate,
-                "nll_rel": nll_rel,
+                "nll_sum": nll_sum,
                 **metrics_vals,
             }
             # Rename nll_pred to nll (raw)
@@ -172,10 +218,10 @@ def plot_scaling_metric(
         pretty_name = "Crossover Rate"
     if metric == "nll":
         pretty_name = "NLL"
-    if metric == "nll_rel":
-        pretty_name = "Relative NLL (%)"
+    if metric == "nll_sum":
+        pretty_name = "NLL Sum"
 
-    if metric == "nll_rel":
+    if metric == "nll_sum":
         plt.yscale("log")
 
     plt.ylabel(f"{pretty_name} (Mean ± SEM)")
@@ -187,6 +233,95 @@ def plot_scaling_metric(
     plt.savefig(output_path)
     # logger.info(f"Saved {metric} plot to {output_path}")
     plt.close()
+
+
+def save_tables(
+    df: pd.DataFrame, output_dir: Path, dataset_name: str, aggregation: str
+):
+    """Generates and saves summary tables for a dataset."""
+
+    # 1. Aggregate: Mean over seeds/runs (if multiple)
+    # Group By: model, intensity, sparse
+    # Metrics to average: psnr, ssim, rmse, nll_sum
+
+    metrics = ["psnr", "ssim", "rmse", "nll_sum"]
+
+    # Filter only rows that have the metrics
+    cols = ["model", "intensity", "sparse"] + [m for m in metrics if m in df.columns]
+    agg_df = df[cols].copy()
+
+    # Groupby mean
+    table_df = agg_df.groupby(["model", "intensity", "sparse"]).mean().reset_index()
+
+    # Filter Models
+    table_df = table_df[table_df["model"].isin(TABLE_MODEL_ORDER)]
+
+    # Sort models by custom order
+    table_df["model_cat"] = pd.Categorical(
+        table_df["model"], categories=TABLE_MODEL_ORDER, ordered=True
+    )
+    table_df = table_df.sort_values(["intensity", "sparse", "model_cat"])
+
+    # Map model names to display names
+    # Note: Use a lambda to avoid type errors if map expects specific types
+    table_df["Model"] = table_df["model"].apply(lambda x: MODEL_LABELS.get(x, x))
+
+    # Map Sparse to "Sparse Setting" / "Dense Setting"
+    table_df["Setting"] = table_df["sparse"].apply(
+        lambda x: "Sparse Setting" if x else "Dense Setting"
+    )
+
+    # --- Table 1: PSNR Comparison ---
+    if "psnr" in table_df.columns:
+        psnr_df = table_df.pivot_table(
+            index="intensity", columns=["Setting", "Model"], values="psnr"
+        )
+
+        # Sort columns manually
+        sorted_models = [MODEL_LABELS[m] for m in TABLE_MODEL_ORDER]
+        desired_cols = []
+        for setting in ["Sparse Setting", "Dense Setting"]:
+            for model in sorted_models:
+                desired_cols.append((setting, model))
+
+        existing_cols = [c for c in desired_cols if c in psnr_df.columns]
+        psnr_df = psnr_df.reindex(columns=existing_cols)
+
+        out_path = output_dir / f"{dataset_name}_psnr_comparison_{aggregation}.csv"
+        psnr_df.to_csv(out_path)
+        logger.info(f"Saved {out_path}")
+
+    # --- Table 2: Detailed Metrics ---
+    values = [m for m in metrics if m in table_df.columns]
+
+    # Pivot to get (Metric, Setting) in columns initially from values
+    # Actually pivot_table with multiple values creates top level = Metric
+    detail_df = table_df.pivot_table(
+        index=["intensity", "Model"], columns=["Setting"], values=values
+    )
+
+    # detail_df columns is MultiIndex: (Metric, Setting)
+    # We want top level to be Setting.
+    if not detail_df.empty:
+        detail_df.columns = detail_df.columns.swaplevel(0, 1)
+        detail_df.sort_index(axis=1, level=0, inplace=True)
+
+        metric_order = ["psnr", "ssim", "rmse", "nll_sum"]
+        desired_detail_cols = []
+
+        for setting in ["Sparse Setting", "Dense Setting"]:
+            for m in metric_order:
+                if m in values:
+                    desired_detail_cols.append((setting, m))
+
+        existing_detail = [c for c in desired_detail_cols if c in detail_df.columns]
+        detail_df = detail_df.reindex(columns=existing_detail)
+
+        out_path_detail = (
+            output_dir / f"{dataset_name}_detailed_metrics_{aggregation}.csv"
+        )
+        detail_df.to_csv(out_path_detail)
+        logger.info(f"Saved {out_path_detail}")
 
 
 @click.command()
@@ -211,12 +346,19 @@ def plot_scaling_metric(
     "--dataset", required=False, type=str, default=None, help="Dataset name filter."
 )
 @click.option("--sparse/--no-sparse", default=None, help="Sparse setting filter.")
+@click.option(
+    "--aggregation",
+    type=click.Choice(["last", "average", "schedule"]),
+    default="average",
+    help="Aggregation method for scalar metrics (avg=weighted expanded, schedule=simple mean, last=final value).",
+)
 def main(
     runs_dir: Optional[Path],
     consolidated_file: Optional[Path],
     output_dir: Path,
     dataset: Optional[str],
     sparse: Optional[bool],
+    aggregation: str,
 ):
     """Plot scaling laws for all metrics."""
 
@@ -247,7 +389,7 @@ def main(
 
     # Process metrics
     # Extract final step for scaling plots
-    metric_df = process_metrics(df)
+    metric_df = process_metrics(df, aggregation)
 
     if metric_df.empty:
         logger.warning("No valid metrics extracted.")
@@ -260,8 +402,8 @@ def main(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Metrics to plot
-    # Replaced 'nll' with 'nll_rel'
-    metrics_to_plot = ["rate", "psnr", "ssim", "l1", "rmse", "nll_rel"]
+    # Replaced 'nll' with 'nll_sum'
+    metrics_to_plot = ["rate", "psnr", "ssim", "l1", "rmse", "nll_sum"]
 
     # --- 1. Per-Dataset Plots ---
     groups = metric_df.groupby(["dataset", "sparse"])
@@ -291,7 +433,7 @@ def main(
             # Or keep full name? "respect directory structure".
             # plot_correlations uses `correlation_...` filenames.
             # I will use `scaling_{m}.png`.
-            plot_path = target_dir / f"scaling_{m}.pdf"
+            plot_path = target_dir / f"scaling_{m}_{aggregation}.pdf"
             plot_scaling_metric(stats, m, plot_path, title_suffix=f"({ds}, {suffix})")
 
     # --- 2. Global Plots ---
@@ -311,8 +453,25 @@ def main(
         )
         stats["sem"] = stats["std"] / np.sqrt(stats["count"])
 
-        plot_path = global_dir / f"global_scaling_{m}.pdf"
+        plot_path = global_dir / f"global_scaling_{m}_{aggregation}.pdf"
         plot_scaling_metric(stats, m, plot_path, title_suffix="(Global)")
+
+    # --- 3. CSV Tables ---
+    logger.info("Generating CSV Tables...")
+
+    # Per Dataset Tables
+    # Iterate unique datasets in metric_df
+    unique_datasets = metric_df["dataset"].unique()
+    for ds in unique_datasets:
+        ds_dir = output_dir / ds
+        ds_dir.mkdir(parents=True, exist_ok=True)
+        ds_df = metric_df[metric_df["dataset"] == ds]
+        save_tables(ds_df, ds_dir, ds, aggregation)
+
+    # Global Table
+    global_tables_dir = output_dir / "global"
+    global_tables_dir.mkdir(parents=True, exist_ok=True)
+    save_tables(metric_df, global_tables_dir, "global", aggregation)
 
     logger.info("Done.")
 

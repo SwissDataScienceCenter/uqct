@@ -22,13 +22,17 @@ def run_iterative(
     patience: int,
     tv_weight: float,
     max_steps: int,
+    n_angles: int,
+    schedule_start: int,
+    schedule_type: Literal["linear", "exp"],
     schedule_length: int,
+    max_angle: int,
 ):
     def predictor_fn(
         experiment: Experiment, schedule: torch.Tensor | None
     ) -> torch.Tensor:
         # Output shape: (N, 1, H, W) or (N, T, H, W) -> (N, T, 1, H, W)
-        return reconstruct(
+        preds = reconstruct(
             experiment,
             schedule,
             method,
@@ -37,6 +41,7 @@ def run_iterative(
             tv_weight,
             max_steps,
         ).unsqueeze(2)
+        return preds
 
     run_evaluation(
         dataset=dataset,
@@ -46,7 +51,11 @@ def run_iterative(
         seed=seed,
         model_name=method,
         predictor_fn=predictor_fn,
+        n_angles=n_angles,
+        schedule_start=schedule_start,
+        schedule_type=schedule_type,
         schedule_length=schedule_length,
+        max_angle=max_angle,
         extra_metadata=dict(
             lr=lr,
             patience=patience,
@@ -99,7 +108,11 @@ def main(
     patience: int,
     tv_weight: float,
     max_steps: int,
+    n_angles: int,
+    schedule_start: int,
+    schedule_type: Literal["linear", "exp"],
     schedule_length: int,
+    max_angle: int,
 ):
     run_iterative(
         dataset,
@@ -112,7 +125,11 @@ def main(
         patience,
         tv_weight,
         max_steps,
+        n_angles,
+        schedule_start,
+        schedule_type,
         schedule_length,
+        max_angle,
     )
 
 

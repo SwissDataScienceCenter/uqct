@@ -2,8 +2,7 @@ import click
 import pandas as pd
 from pathlib import Path
 from typing import Optional
-from uqct.utils import get_results_dir
-from uqct.loading import load_runs
+from uqct.utils import get_results_dir, load_runs
 from uqct.logging import get_logger
 
 logger = get_logger(__name__)
