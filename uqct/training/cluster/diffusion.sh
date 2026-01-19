@@ -15,20 +15,20 @@ set -euo pipefail
 set -x
 
 # locate python and project root
-PYTHONBIN=/cluster/home/mgaetzner/micromamba/bin/python3
 GITROOT=/cluster/home/mgaetzner/uq-xray-ct
+UV_BIN=/cluster/home/mgaetzner/.local/bin/uv
 export PYTHONPATH=${GITROOT}
 
 cd $GITROOT
 
 # Experiment settings
-DATASETS=(composite lamino)
+DATASETS=(lamino lung)
 DATASET=${DATASETS[$SLURM_ARRAY_TASK_ID]}
 
 # run the actual job
-"$PYTHONBIN" "${GITROOT}/uqct/training/diffusion.py" \
+uv run -m uqct.training.diffusion \
 	--dataset "$DATASET" \
 	--epochs 500 \
 	--batch-size 64 \
 	--learning-rate 0.0001 \
-    --cond
+	--cond True

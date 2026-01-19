@@ -3,6 +3,7 @@ import argparse
 import glob
 import os
 import re
+import subprocess
 import time
 from collections import defaultdict
 
@@ -41,6 +42,22 @@ def parse_args():
         type=str,
         default=None,
         help="Path to save list of failed job indices",
+    )
+    parser.add_argument(
+        "--resubmit",
+        action="store_true",
+        help="Automatically resubmit failed jobs using sparse_eval.sh",
+    )
+    parser.add_argument(
+        "--resubmit-script",
+        type=str,
+        default="cluster_scripts/sparse_eval.sh",
+        help="Path to the submission script (default: cluster_scripts/sparse_eval.sh)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the resubmission command without executing it",
     )
     return parser.parse_args()
 
@@ -285,6 +302,11 @@ def main():
             while True:
                 stats, timestamps = monitor.update(indices)
                 print_summary(stats, timestamps, len(indices), args.job_id, clear=True)
+                
+                if len(stats["Running"]) == 0 and len(stats["Pending"]) == 0:
+                    print("\nAll jobs finished. Exiting dashboard.")
+                    break
+                    
                 time.sleep(5)
         except KeyboardInterrupt:
             print("\nDashboard stopped.")
@@ -296,8 +318,9 @@ def main():
         stats, timestamps = monitor.update(indices)
         print_summary(stats, timestamps, len(indices), args.job_id, clear=False)
 
-    # Save failed indices if requested
-    if args.save_failed:
+
+    # Handle failed jobs (save or resubmit)
+    if args.save_failed or args.resubmit:
         failed_indices = []
         for i, (status, _, _) in monitor.cache.items():
             if status == "Failed":
@@ -305,16 +328,61 @@ def main():
 
         failed_indices.sort()
 
-        if failed_indices:
-            with open(args.save_failed, "w") as f:
-                for idx in failed_indices:
-                    f.write(f"{idx}\n")
-            print(
-                f"\n{RED}Saved {len(failed_indices)} failed job indices to {args.save_failed}{RESET}"
-            )
+        if not failed_indices:
+            print(f"\n{GREEN}No failed jobs found. Nothing to save or resubmit.{RESET}")
         else:
-            print(f"\n{GREEN}No failed jobs to save.{RESET}")
+            # Determine filename
+            if args.save_failed:
+                failed_file = args.save_failed
+            else:
+                timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+                failed_file = f"failed_jobs_{args.job_id}_{timestamp_str}.txt"
+            
+            # Write to file
+            try:
+                with open(failed_file, "w") as f:
+                    for idx in failed_indices:
+                        f.write(f"{idx}\n")
+                print(f"\n{RED}Saved {len(failed_indices)} failed job indices to {failed_file}{RESET}")
+            except IOError as e:
+                print(f"\n{RED}Error writing failed jobs file: {e}{RESET}")
+                return
+
+            # Resubmit if requested
+            if args.resubmit:
+                abs_failed_file = os.path.abspath(failed_file)
+                array_range = f"0-{len(failed_indices) - 1}"
+                
+                # Check if script exists
+                if not os.path.exists(args.resubmit_script):
+                    print(f"\n{RED}Error: Submission script not found at {args.resubmit_script}{RESET}")
+                    return
+
+                cmd = [
+                    "sbatch",
+                    f"--array={array_range}",
+                    args.resubmit_script,
+                    abs_failed_file
+                ]
+                
+                cmd_str = " ".join(cmd)
+                print(f"\nResubmitting failed jobs...")
+                print(f"Command: {cmd_str}")
+
+                if args.dry_run:
+                    print(f"{YELLOW}[Dry Run] Command not executed.{RESET}")
+                else:
+                    try:
+                        result = subprocess.run(
+                            cmd, check=True, capture_output=True, text=True
+                        )
+                        print(f"{GREEN}Resubmission successful!{RESET}")
+                        print(result.stdout.strip())
+                    except subprocess.CalledProcessError as e:
+                        print(f"\n{RED}Resubmission failed with error code {e.returncode}:{RESET}")
+                        print(e.stderr)
 
 
 if __name__ == "__main__":
     main()
+

@@ -1,5 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=uqct-sparse-eval
+#SBATCH --account=ls_math
+#SBATCH --partition=gpu
 #SBATCH --array=0-2934
 #SBATCH --output=/cluster/scratch/mgaetzner/logs/%x_%A_%a.out
 #SBATCH --error=/cluster/scratch/mgaetzner/logs/%x_%A_%a.err
@@ -10,7 +12,6 @@
 #SBATCH --time=24:00:00
 
 # Normal:
-# #SBATCH --array=0-2934
 
 # Usage: sbatch cluster_scripts/sparse_eval.sh
 
@@ -50,4 +51,5 @@ else
 fi
 
 # Run evaluation
-python -m uqct.eval.cli run --job-id "${JOB_ID}" --sparse
+# python -m uqct.eval.cli run --job-id "${JOB_ID}" --sparse
+python -m uqct.eval.cli run --job-id "${JOB_ID}" --sparse --duplicate
