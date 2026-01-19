@@ -130,9 +130,9 @@ def main(results_dir: Path, output_dir: Path, limit: int | None):
             plt.close()
 
             # Samples
-            schedule = meta["pred_angles"]
-            if isinstance(schedule, np.ndarray):
-                schedule = schedule.tolist()
+            schedule = meta["angle_schedule"]
+            if isinstance(schedule, list):
+                schedule = np.array(schedule)
 
             n_images = uncertainty.shape[0]
             n_show = min(5, n_images)

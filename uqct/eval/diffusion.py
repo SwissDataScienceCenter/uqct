@@ -49,7 +49,6 @@ def run_diffusion(
             schedule,
             guidance_loss_fn,
         )
-        breakpoint()
         # Rearrange to (N, T, H, W)
         return einops.rearrange(sample, "n t r 1 w h -> n t r w h")
 

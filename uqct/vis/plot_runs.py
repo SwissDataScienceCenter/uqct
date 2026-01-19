@@ -29,7 +29,7 @@ LOG_INV_DELTA = math.log(1 / DELTA)
 
 
 def process_and_plot(
-    latest_runs: Dict[Tuple[str, str, float, bool], pd.DataFrame],
+    latest_runs: dict[Tuple[str, str, float, bool], pd.DataFrame],
     output_dir: Path,
     log_scale: bool = False,
     show_progress: bool = True,

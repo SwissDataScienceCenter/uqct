@@ -37,7 +37,7 @@ def common_options(func):
     )(func)
     func = click.option(
         "--schedule-type",
-        type=click.Choice(["exp", "linear"]),
+        type=click.Choice(["exp", "linear", "all"]),
         default="exp",
         help="Number of angles",
     )(func)

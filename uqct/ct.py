@@ -676,11 +676,11 @@ def circular_mask(
         indexing="ij",
     )
     # Note: Is this correct?
-    # r = img_size // 2
-    # mask = ((yy - r) ** 2 + (xx - r) ** 2 <= r**2).to(dtype)
+    r = img_size // 2
+    mask = ((yy - r) ** 2 + (xx - r) ** 2 <= r**2).to(dtype)
     # Center for ASTRA alignment
-    center = (img_size - 1) / 2.0
-    mask = (yy - center) ** 2 + (xx - center) ** 2 <= (img_size / 2.0) ** 2
+    # center = (img_size - 1) / 2.0
+    # mask = (yy - center) ** 2 + (xx - center) ** 2 <= (img_size / 2.0) ** 2
     return mask.to(dtype)
 
 

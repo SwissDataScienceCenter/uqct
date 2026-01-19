@@ -23,6 +23,30 @@ from uqct.utils import get_results_dir
 logger = get_logger(__name__)
 
 
+def get_default_angle_schedule() -> list[int]:
+    """
+    Returns the default angle schedule used for dense metrics expansion.
+    Matches setup_experiment(..., schedule_length=32, schedule_start=10, schedule_type='exp', n_angles=N_ANGLES, max_angle=180)
+    """
+    schedule_length = 32
+    schedule_start = 10
+    n_angles = N_ANGLES  # 200 from uqct.training.unet
+
+    # device='cpu' for default generation
+    # Logic from setup_experiment 'exp' branch
+    schedule = (
+        torch.logspace(
+            math.log10(schedule_start),
+            math.log10(n_angles - 1),
+            steps=schedule_length,
+            device="cpu",
+        )
+        .round()
+        .int()
+    )
+    return schedule.tolist()
+
+
 @dataclass
 class CTSettings:
     dataset: str
@@ -30,9 +54,9 @@ class CTSettings:
     sparse: bool
     image_start_index: int
     image_end_index: int
-    pred_angles: list[int] | None = None
     intensity_schedule: list[float] | None = None
     num_rounds: int | None = None
+    angle_schedule: list[int] | None = field(default_factory=get_default_angle_schedule)
 
 
 @dataclass
@@ -101,7 +125,10 @@ class Run:
         metrics_dict = asdict(self.metrics)
         df = pd.DataFrame(metrics_dict)
         for k, v in asdict(self.ct_settings).items():
-            df[k] = v
+            if isinstance(v, list):
+                df[k] = [v]
+            else:
+                df[k] = v
 
         # Load extra data into dataframe
         if self.extra:
@@ -394,13 +421,17 @@ def run_evaluation(
 
     preds = predictor_fn(experiment, schedule)
 
-    ct_settings = CTSettings(
-        dataset=dataset,
-        total_intensity=total_intensity,
-        sparse=sparse,
-        image_start_index=image_range[0],
-        image_end_index=image_range[1],
-    )
+    ct_settings_kwargs = {
+        "dataset": dataset,
+        "total_intensity": total_intensity,
+        "sparse": sparse,
+        "image_start_index": image_range[0],
+        "image_end_index": image_range[1],
+    }
+    if schedule is not None:
+        ct_settings_kwargs["angle_schedule"] = schedule.tolist()
+
+    ct_settings = CTSettings(**ct_settings_kwargs)
 
     evaluate_and_save(
         preds=preds,
