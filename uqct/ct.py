@@ -49,15 +49,15 @@ def anscombe_transform(x):
     return torch.sqrt(x + 3 / 8)
 
 
-def poisson(input):
+def poisson(input, generator=None):
     """
     Sample from a Poisson distribution with the given input.
     If the input is too large, it will sample on CPU to avoid overflow issues.
     """
     if torch.max(input) > 1e9 and input.device.type != "cpu":
         # https://github.com/pytorch/pytorch/issues/86782
-        return torch.poisson(input.cpu()).to(input.device)
-    return torch.poisson(input)
+        return torch.poisson(input.cpu(), generator=generator).to(input.device)
+    return torch.poisson(input, generator=generator)
 
 
 def nll(
@@ -293,6 +293,7 @@ def sample_observations(
     intensities: torch.Tensor,
     angles: torch.Tensor,
     l: float = 5.0,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Samples Poisson counts based on high-res images
 
@@ -307,7 +308,7 @@ def sample_observations(
     """
     scale = l / images.shape[-1]
     sino = radon(images, angles)
-    counts = poisson(intensities * torch.exp(-scale * sino))
+    counts = poisson(intensities * torch.exp(-scale * sino), generator=generator)
     counts_lr = counts.view(*counts.shape[:-1], counts.shape[-1] // 2, 2).sum(-1)
     return counts_lr
 
