@@ -3,6 +3,7 @@ import click
 from typing import Optional, Tuple, Union, Literal
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler, DDPMSchedulerOutput
 from diffusers.utils.torch_utils import randn_tensor
+from diffusers.models.unets.unet_2d import UNet2DOutput
 import torch
 from tqdm.auto import tqdm
 
@@ -12,7 +13,7 @@ class GradientGuidance:
     Applies gradient-based guidance to an image tensor during diffusion model sampling.
     """
 
-    def __init__(self, loss_fct, num_gradient_steps=10, guidance_start=1000, guidance_end=0, lr=1e-1):
+    def __init__(self, loss_fct, num_gradient_steps=10, guidance_start=1000, guidance_end=0, lr=1e-1, learning_rate_decay=False):
         """
         Initialize the GradientGuidance class.
 
@@ -28,6 +29,7 @@ class GradientGuidance:
         self.guidance_start = guidance_start
         self.guidance_end = guidance_end
         self.lr = lr
+        self.learning_rate_decay = learning_rate_decay
     
     def __call__(self, pred_original_sample, t):
         """
@@ -42,7 +44,11 @@ class GradientGuidance:
             return pred_original_sample
         with torch.enable_grad():
             image = torch.nn.Parameter(pred_original_sample.detach().clone())
-            optimizer = torch.optim.Adam([image], lr=self.lr)
+            if self.learning_rate_decay:
+                lr = self.lr * t / 1000
+            else:
+                lr = self.lr
+            optimizer = torch.optim.Adam([image], lr=lr)
 
             for _ in range(self.num_gradient_steps):
                 optimizer.zero_grad()
@@ -74,8 +80,11 @@ class GuidedDiffusionPipeline:
             batch_size: int = 1,
             generator: Optional[torch.Generator] = None,
             num_inference_steps: int = 1000,
+            timesteps=None,
             guidance=None,
-            verbose=False
+            verbose=False,
+            cond_kwargs=None,
+            image_shape=None,
         ):
         """
             Generates images using the guided diffusion process.
@@ -90,15 +99,16 @@ class GuidedDiffusionPipeline:
             """
         
         # Sample gaussian noise to begin loop
-        if isinstance(self.unet.config.sample_size, int):
-            image_shape = (
-                batch_size,
-                self.unet.config.in_channels,
-                self.unet.config.sample_size,
-                self.unet.config.sample_size,
-            )
-        else:
-            image_shape = (batch_size, self.unet.config.in_channels, *self.unet.config.sample_size)
+        if image_shape is None:
+            if isinstance(self.unet.config.sample_size, int):
+                image_shape = (
+                    batch_size,
+                    self.unet.config.in_channels,
+                    self.unet.config.sample_size,
+                    self.unet.config.sample_size,
+                )
+            else:
+                image_shape = (batch_size, self.unet.config.in_channels, *self.unet.config.sample_size)
 
         device = self.unet.device
         if device.type == "mps":
@@ -109,12 +119,18 @@ class GuidedDiffusionPipeline:
             image = randn_tensor(image_shape, generator=generator, device=device)
                  
         # set step values
-        self.scheduler.set_timesteps(num_inference_steps)
+        self.scheduler.set_timesteps(num_inference_steps, timesteps=timesteps)
 
+        cond_kwargs = cond_kwargs if cond_kwargs is not None else {}
         for t in tqdm(self.scheduler.timesteps, disable=not verbose):
             # 1. predict noise model_output
             with torch.no_grad():
-                model_output = self.unet(image, t).sample
+                
+                model_output = self.unet(image, timestep=t, **cond_kwargs)
+                if isinstance(model_output, tuple):
+                    model_output = model_output[0]
+                elif isinstance(model_output, UNet2DOutput):
+                    model_output = model_output.sample
 
             # 2. compute previous image: x_t -> x_t-1
             image = self.step(model_output, t, image, guidance=guidance, generator=generator).prev_sample
