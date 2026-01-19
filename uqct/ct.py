@@ -951,7 +951,7 @@ def prepare_inputs_from_experiment(
         angles_i = experiment.angles[:i]
         counts_i = experiment.counts[..., :i, :]
         intensities_i = experiment.intensities[..., :i, :]
-        sino_i = sinogram_from_counts(counts_i, intensities_i)
+        sino_i = sinogram_from_counts(counts_i, intensities_i).clamp_min(0.0)
         fbp_i = fbp(sino_i, angles_i)
         fbps.append(fbp_i)
         intensities.append(intensities_i.sum((-2, -1)))

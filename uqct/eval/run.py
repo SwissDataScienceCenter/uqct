@@ -64,7 +64,6 @@ class Metrics:
     psnr: list[list[float]]
     ssim: list[list[float]]
     rmse: list[list[float]]
-    zeroone: list[list[float]]
     l1: list[list[float]]
     nll_pred: list[list[float]]
     nll_gt: list[list[float]]
@@ -306,7 +305,7 @@ def evaluate_and_save(
             for k, v in get_metrics(image_gt, image_pred).items():
                 if image_index + 1 > len(metric2lists[k]):
                     metric2lists[k].append(list())
-                metric2lists[k][image_index].append(v)
+                metric2lists[k][image_index].append(v.item())
     metric2lists = dict(metric2lists)
 
     # NLL calculation
@@ -365,7 +364,6 @@ def evaluate_and_save(
         psnr=metric2lists["PSNR"],
         ssim=metric2lists["SS"],
         rmse=metric2lists["RMSE"],
-        zeroone=metric2lists["ZeroOne"],
         l1=metric2lists["L1"],
         nll_pred=nlls_pred.tolist(),
         nll_gt=nlls_gt.tolist(),
