@@ -67,47 +67,76 @@ class JobMonitor:
         self.job_id = job_id
         self.log_dir = log_dir
         self.cache = {}  # index -> (status, msg, timestamp)
+        # index -> {'out': int_offset, 'err': int_offset}
+        self.file_offsets = defaultdict(lambda: {"out": 0, "err": 0})
+
+        # Compile regex once for performance
+        # Matches: ..._jobID_INDEX.out or .err
+        self._filename_regex = re.compile(
+            rf"_{re.escape(self.job_id)}_(\d+)\.(out|err)$"
+        )
 
     def get_indices(self, args_range=None):
         if args_range:
             return list(range(args_range[0], args_range[1] + 1))
 
+        # Initial scan to find indices
         pattern = os.path.join(self.log_dir, f"*_{self.job_id}_*")
         files = glob.glob(pattern)
         found_indices = set()
         for fp in files:
-            match = re.search(rf"_{self.job_id}_(\d+)\.(out|err)$", fp)
+            match = self._filename_regex.search(fp)
             if match:
                 found_indices.add(int(match.group(1)))
         return sorted(list(found_indices))
 
-    def check_status(self, index):
+    def _scan_active_files(self):
+        """
+        Performs a SINGLE directory scan to find all current files for this job.
+        Returns: dict[index] -> {'out': path, 'err': path}
+        """
+        active_map = defaultdict(dict)
+        pattern = os.path.join(self.log_dir, f"*_{self.job_id}_*")
+
+        # This is the heavy I/O operation (done once per update)
+        all_files = glob.glob(pattern)
+
+        for fp in all_files:
+            match = self._filename_regex.search(fp)
+            if match:
+                idx = int(match.group(1))
+                ftype = match.group(2)  # 'out' or 'err'
+                # If multiple files exist (rare), this keeps the last one found
+                active_map[idx][ftype] = fp
+
+        return active_map
+
+    def check_status(self, index, file_paths=None):
         # Return cached terminal state
         if index in self.cache:
             return index, *self.cache[index]
 
         # Check file logic
-        status, msg, ts = self._check_files(index)
+        # If no file paths provided, we treat it as Pending immediately
+        if not file_paths:
+            return index, "Pending", None, None
+
+        status, msg, ts = self._check_files(index, file_paths)
 
         # Cache terminal states
         if status in ["Success", "Failed"]:
             self.cache[index] = (status, msg, ts)
+            if index in self.file_offsets:
+                del self.file_offsets[index]
 
         return index, status, msg, ts
 
-    def _check_files(self, index):
-        out_pattern = os.path.join(self.log_dir, f"*_{self.job_id}_{index}.out")
-        err_pattern = os.path.join(self.log_dir, f"*_{self.job_id}_{index}.err")
+    def _check_files(self, index, file_paths):
+        out_file = file_paths.get("out")
+        err_file = file_paths.get("err")
 
-        out_files = glob.glob(out_pattern)
-        err_files = glob.glob(err_pattern)
-
-        if not out_files and not err_files:
+        if not out_file and not err_file:
             return "Pending", None, None
-
-        # Prefer latest file if multiple matches
-        out_file = out_files[0] if out_files else None
-        err_file = err_files[0] if err_files else None
 
         timestamp = None
         if out_file:
@@ -116,21 +145,34 @@ class JobMonitor:
             except OSError:
                 pass
 
-        # Check for success
+        # --- 1. Process Output File (Read Chunk) ---
+        out_chunk = ""
         if out_file:
             try:
+                f_size = os.path.getsize(out_file)
+                if self.file_offsets[index]["out"] > f_size:
+                    self.file_offsets[index]["out"] = 0
+
                 with open(out_file, "r") as f:
-                    content = f.read()
-                    if "Saved run data at" in content:
-                        return "Success", None, timestamp
+                    f.seek(self.file_offsets[index]["out"])
+                    out_chunk = f.read()
+                    self.file_offsets[index]["out"] = f.tell()
+
+                if "Saved run data at" in out_chunk:
+                    return "Success", None, timestamp
             except Exception:
                 pass
 
-        # Check for failure in err file
+        # --- 2. Process Error File (Read Lines) ---
         error_msg = None
         if err_file:
             try:
+                f_size = os.path.getsize(err_file)
+                if self.file_offsets[index]["err"] > f_size:
+                    self.file_offsets[index]["err"] = 0
+
                 with open(err_file, "r") as f:
+                    f.seek(self.file_offsets[index]["err"])
                     for line in f:
                         if (
                             "Using an engine plan file across different models of devices"
@@ -141,25 +183,25 @@ class JobMonitor:
                             r"(Error|Traceback|Exception)", line, re.IGNORECASE
                         ):
                             error_msg = line.strip()
+                            self.file_offsets[index]["err"] = f.tell()
                             return "Failed", error_msg, timestamp
+
+                    self.file_offsets[index]["err"] = f.tell()
             except Exception:
                 pass
 
-        # Check for failure in out file
-        if out_file and not error_msg:
+        # --- 3. Check Output Chunk for Errors ---
+        if out_chunk and not error_msg:
             try:
-                with open(out_file, "r") as f:
-                    for line in f:
-                        if (
-                            "Using an engine plan file across different models of devices"
-                            in line
-                        ):
-                            continue
-                        if re.search(
-                            r"(Error|Traceback|Exception)", line, re.IGNORECASE
-                        ):
-                            error_msg = line.strip()
-                            return "Failed", error_msg, timestamp
+                for line in out_chunk.splitlines():
+                    if (
+                        "Using an engine plan file across different models of devices"
+                        in line
+                    ):
+                        continue
+                    if re.search(r"(Error|Traceback|Exception)", line, re.IGNORECASE):
+                        error_msg = line.strip()
+                        return "Failed", error_msg, timestamp
             except Exception:
                 pass
 
@@ -176,18 +218,28 @@ class JobMonitor:
                 finished_timestamps.append(ts)
 
         todo_indices = [i for i in indices if i not in self.cache]
+
+        # --- OPTIMIZATION START ---
+        # 1. Scan the directory ONCE to find what's actually there
+        active_files_map = self._scan_active_files()
+        # --- OPTIMIZATION END ---
+
         total_todo = len(todo_indices)
 
         for j, i in enumerate(todo_indices):
-            if j % 10 == 0 or j == total_todo - 1:
+            if j % 50 == 0 or j == total_todo - 1:
                 print(f"Checking status: {j + 1}/{total_todo}...", end="\r", flush=True)
 
-            idx, status, msg, ts = self.check_status(i)
+            # 2. Only pass the file paths if they exist in our scan
+            file_paths = active_files_map.get(i)
+
+            # If the index isn't in our active map, check_status will instantly return "Pending"
+            idx, status, msg, ts = self.check_status(i, file_paths)
+
             stats[status].append((idx, msg))
             if status in ["Success", "Failed"] and ts is not None:
                 finished_timestamps.append(ts)
 
-        # Clear the progress line
         if total_todo > 0:
             print(" " * 40, end="\r", flush=True)
 
@@ -209,13 +261,10 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
     n_failed = len(stats["Failed"])
     n_running = len(stats["Running"])
     n_pending = len(stats["Pending"])
-    # If using cache, 'Running' implies we checked and it's still running (or didn't check but it wasn't cached)
-    # Actually, check_status returns 'Running' if files exist but no done/error.
-    # Note: 'Pending' means no files.
 
     output = []
     if clear:
-        output.append("\033[2J\033[H")  # Clear screen and move cursor home
+        output.append("\033[2J\033[H")
 
     output.append(f"Monitoring Job ID: {job_id}")
     output.append(f"Last updated: {time.strftime('%H:%M:%S')}")
@@ -236,7 +285,6 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
         f"  {YELLOW}Pending: {n_pending}{RESET} ({n_pending/total_indices*100:.1f}%)"
     )
 
-    # Runtime Estimation
     output.append("-" * 40)
 
     if len(finished_timestamps) >= 2:
@@ -265,7 +313,6 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
             "  Estimated Remaining Time: Unknown (Need at least 2 finished jobs)"
         )
 
-    # Details
     failed_tasks = sorted(stats["Failed"], key=lambda x: x[0])
     running_tasks = sorted(stats["Running"], key=lambda x: x[0])
 
@@ -279,6 +326,7 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
             output.append(
                 f"\n{CYAN}Running Indices:{RESET} {[i for i, _ in running_tasks]}"
             )
+        else:
             output.append(
                 f"\n{CYAN}Running Indices:{RESET} (first 20) {[i for i, _ in running_tasks][:20]} ..."
             )
@@ -299,6 +347,7 @@ def main():
     # Load settings and build grid for mapping
     try:
         import tomllib
+        from collections import defaultdict
         from uqct.eval.cli import build_grid
         from uqct.utils import get_root_dir
 
@@ -452,7 +501,6 @@ def main():
         stats, timestamps = monitor.update(indices)
         print_breakdown(stats, timestamps, len(indices))
 
-    # Handle failed jobs (save or resubmit)
     if args.save_failed or args.resubmit:
         failed_indices = []
         for i, (status, _, _) in monitor.cache.items():
@@ -464,14 +512,12 @@ def main():
         if not failed_indices:
             print(f"\n{GREEN}No failed jobs found. Nothing to save or resubmit.{RESET}")
         else:
-            # Determine filename
             if args.save_failed:
                 failed_file = args.save_failed
             else:
                 timestamp_str = time.strftime("%Y%m%d_%H%M%S")
                 failed_file = f"failed_jobs_{args.job_id}_{timestamp_str}.txt"
 
-            # Write to file
             try:
                 with open(failed_file, "w") as f:
                     for idx in failed_indices:
@@ -483,12 +529,10 @@ def main():
                 print(f"\n{RED}Error writing failed jobs file: {e}{RESET}")
                 return
 
-            # Resubmit if requested
             if args.resubmit:
                 abs_failed_file = os.path.abspath(failed_file)
                 array_range = f"0-{len(failed_indices) - 1}"
 
-                # Check if script exists
                 if not os.path.exists(args.resubmit_script):
                     print(
                         f"\n{RED}Error: Submission script not found at {args.resubmit_script}{RESET}"
