@@ -218,3 +218,5 @@ tools
 caches
 
 *.nc
+
+scratch/
