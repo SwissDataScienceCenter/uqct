@@ -216,3 +216,5 @@ tools
 .DS_Store
 .vscode/
 caches
+
+*.nc
