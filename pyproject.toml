@@ -21,6 +21,7 @@ dependencies = [
   "astra-toolbox==2.4.0",
   "ruff>=0.14.4",
   "torchmetrics>=1.8.2",
+  "gitpython>=3.1.45",
 ]
 
 [tool.uv]
