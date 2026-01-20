@@ -576,7 +576,7 @@ if __name__ == "__main__":
         # Combined dirty check
         print(f"Git commit: {experiment_params['git_commit']}")
         print(f"Git branch: {experiment_params['git_branch']}")
-        print(f"Git branch: {experiment_params['git_diff']}")
+        print(f"Git diff: {experiment_params['git_diff']}")
 
     # Output dir
     if not os.path.exists(args.output_dir):
