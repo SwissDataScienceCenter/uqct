@@ -42,9 +42,9 @@ class Diffusion:
         onnx: bool = False,
         verbose: bool = False,
     ):
-        assert not onnx or cond, (
-            "ONNX-based inference is not supported for unconditional models."
-        )
+        assert (
+            not onnx or cond
+        ), "ONNX-based inference is not supported for unconditional models."
 
         self.verbose = verbose
         self.device = (
@@ -584,10 +584,11 @@ def get_guidance_loss_fn(
             nlls[..., ~mask, :] = 0.0
             # return nlls.mean(-1).sum()
             return nlls.sum()
+
     else:
-        assert schedule is None, (
-            "Schedules are currently unsupported for the dense setting."
-        )
+        assert (
+            schedule is None
+        ), "Schedules are currently unsupported for the dense setting."
         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
 
