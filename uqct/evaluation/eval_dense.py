@@ -18,15 +18,13 @@ from uqct.models.diffusion import load_unet as load_diffusion_unet
 from diffusers.models.unets.unet_2d import UNet2DModel
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from uqct.models.guided_diffusion import GradientGuidance, GuidedDiffusionPipeline
+from uqct.metrics import psnr, rmse, ssim
 import xarray as xr
 
 from uqct.training.unet import N_BINS_HR
 import datetime
 import hashlib
 import json
-
-from torchmetrics.image import StructuralSimilarityIndexMeasure
-
 
 
 class ObservationDataset(torch.utils.data.Dataset):
@@ -63,49 +61,11 @@ class ObservationDataset(torch.utils.data.Dataset):
         return idx, seed, image, data
 
 
-def rmse(prediction, target, circle_mask=False):
-    """
-    Computes the Root Mean Square Error (RMSE) between two images.
-    Args:
-        prediction (torch.Tensor): (..., H, W) Predicted image tensor.
-        target (torch.Tensor): (..., H, W) Target image tensor.
-        circle_mask (bool): If True, applies a circular mask to both images before computing RM
-    """
-    if circle_mask:
-        mask = circular_mask(target.shape[-1], device=target.device)
-        target = target * mask
-        prediction = prediction * mask
-    mse = torch.sqrt(torch.mean((target - prediction) ** 2, dim=(-2, -1)))
-    return mse
-
-
-def psnr(prediction, target, max_pixel=None, circle_mask=False):
-    if circle_mask:
-        mask = circular_mask(target.shape[-1], device=target.device)
-        target = target * mask
-        prediction = prediction * mask
-    if max_pixel is None:
-        max_pixel = torch.max(target)
-    mse = torch.mean((target - prediction) ** 2, dim=(-2, -1))
-    psnr = 10 * torch.log10(max_pixel ** 2 / mse)
-    return psnr
-
-def ssim(prediction, target, data_range=1.0, circle_mask=False):
-    if circle_mask:
-        mask = circular_mask(target.shape[-1], device=target.device)
-        target = target * mask
-        prediction = prediction * mask
-    batch_dims = prediction.size()[:-3]
-    img_shape = prediction.shape[-3:]
-    target = target.expand_as(prediction).reshape(-1, *img_shape)
-    prediction = prediction.view(-1, *img_shape)
-    ssim_fct = StructuralSimilarityIndexMeasure(data_range=data_range, reduction=None)
-    return ssim_fct(prediction, target).view(*batch_dims)
-
 def fbp_recon(counts, intensities, angles):
     """Simple FBP reconstruction from an Experiment object."""
     sinogram = sinogram_from_counts(counts, intensities)
     return fbp(sinogram, angles)
+
 
 def tv_loss(image: torch.Tensor) -> torch.Tensor:
     """Compute Total Variation (TV) prior."""
@@ -768,9 +728,9 @@ if __name__ == "__main__":
             all_seq_nll_mix.append(_seq_nll_mix.detach().cpu())
             pred = pred.mean(dim=0)  # average over samples for remaining metrics
 
-        _psnr = psnr(pred, images_lr.unsqueeze(1), circle_mask=True).squeeze(-1)
         _rmse = rmse(pred, images_lr.unsqueeze(1), circle_mask=True).squeeze(-1)
-        _ssim = ssim(pred, images_lr.unsqueeze(1), circle_mask=True).squeeze(-1)
+        _psnr = psnr(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1)
+        _ssim = ssim(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1)
         _seq_nll = nll(pred[:, :-1].contiguous(), data[:, 1:], schedule[1:], angles).sum((-1,-2)).squeeze(-1)
         _nll = nll(pred.unsqueeze(2), data.unsqueeze(1), schedule, angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2) 
 
