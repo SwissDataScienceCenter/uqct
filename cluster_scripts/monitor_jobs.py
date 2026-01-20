@@ -279,7 +279,6 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
             output.append(
                 f"\n{CYAN}Running Indices:{RESET} {[i for i, _ in running_tasks]}"
             )
-        else:
             output.append(
                 f"\n{CYAN}Running Indices:{RESET} (first 20) {[i for i, _ in running_tasks][:20]} ..."
             )
@@ -297,16 +296,151 @@ def main():
         print(f"No logs found for job ID {args.job_id} and no range specified.")
         return
 
+    # Load settings and build grid for mapping
+    try:
+        import tomllib
+        from uqct.eval.cli import build_grid
+        from uqct.utils import get_root_dir
+
+        root = get_root_dir()
+        settings_path = root / "uqct" / "settings.toml"
+
+        # Determine sparse/dense based on checking first log or args?
+        # Actually we don't know if it's sparse or dense from CLI args here easily without parsing logs.
+        # But usually we run sparse. Let's try to infer or default to sparse.
+        # Or just load both and check which one matches the grid size?
+        # A simpler way: just assume sparse for now as per current context.
+        # Better: check the first log file content?
+        # fallback: try sparse first.
+        sparse = True
+        section = "eval-sparse" if sparse else "eval-dense"
+
+        idx_to_model = {}
+        if settings_path.exists():
+            with open(settings_path, "rb") as f:
+                full_config = tomllib.load(f)
+                if section in full_config:
+                    settings = full_config[section]
+                    grid = build_grid(settings)
+                    # Map indices
+                    for i, task in enumerate(grid):
+                        idx_to_model[i] = task["model"]
+    except ImportError:
+        print(
+            f"{YELLOW}Warning: Could not import uqct.eval.cli. Detailed breakdown unavailable.{RESET}"
+        )
+        idx_to_model = {}
+    except Exception as e:
+        print(
+            f"{YELLOW}Warning: Could not load grid ({e}). Detailed breakdown unavailable.{RESET}"
+        )
+        idx_to_model = {}
+
+    def print_breakdown(stats, finished_timestamps, total_indices):
+        # Overall Summary
+        print_summary(
+            stats, finished_timestamps, total_indices, args.job_id, clear=False
+        )
+
+        if not idx_to_model:
+            return
+
+        # Per-Predictor Breakdown
+        print("-" * 40)
+        print("Predictor Breakdown:")
+        print(
+            f"{'Predictor':<15} | {'Total':<6} | {'Failed':<6} | {'Finished':<8} | {'Pending':<7} | {'Running':<7} | {'ETA':<10}"
+        )
+        print("-" * 80)
+
+        # Helper to get model for index
+        # Group indices by model
+        model_indices = defaultdict(list)
+        all_monitored_indices = set()
+        for s in stats.values():
+            for idx, _ in s:
+                all_monitored_indices.add(idx)
+
+        # Only consider indices we are actually monitoring
+        for idx in all_monitored_indices:
+            model = idx_to_model.get(idx, "Unknown")
+            model_indices[model].append(idx)
+
+        # Helper to get status for an index from stats
+        idx_status = {}
+        for s, items in stats.items():
+            for idx, _ in items:
+                idx_status[idx] = s
+
+        for model in sorted(model_indices.keys()):
+            m_idxs = model_indices[model]
+            total = len(m_idxs)
+            n_failed = sum(1 for i in m_idxs if idx_status[i] == "Failed")
+            n_success = sum(1 for i in m_idxs if idx_status[i] == "Success")
+            n_pending = sum(1 for i in m_idxs if idx_status[i] == "Pending")
+            n_running = sum(1 for i in m_idxs if idx_status[i] == "Running")
+
+            # Simple ETA calculation for this model
+            # Retrieve timestamps for successful jobs of this model
+            m_finished_ts = []
+            for i in m_idxs:
+                if idx_status[i] == "Success":
+                    # Find timestamp in cache/current check
+                    # We need to access monitor logic... slightly hacky to pass it or re-read
+                    # But wait, print_summary received finished_timestamps list, but that's global.
+                    # We can use monitor.cache or check_status result if passed.
+                    # 'stats' contains (idx, msg), but not timestamp.
+                    # Let's peek into monitor.cache
+                    if i in monitor.cache:
+                        _, _, ts = monitor.cache[i]
+                        if ts:
+                            m_finished_ts.append(ts)
+
+            eta_str = "N/A"
+            if len(m_finished_ts) >= 2 and (n_running + n_pending) > 0:
+                m_finished_ts.sort()
+                duration = m_finished_ts[-1] - m_finished_ts[0]
+                if duration > 10:
+                    thru = (len(m_finished_ts) - 1) / duration
+                    if thru > 0:
+                        rem = n_running + n_pending
+                        eta_sec = rem / thru
+                        eta_str = format_time(eta_sec)
+
+            # Colors
+            c_fail = RED if n_failed > 0 else ""
+            c_succ = GREEN if n_success > 0 else ""
+            c_run = CYAN if n_running > 0 else ""
+            c_pend = YELLOW if n_pending > 0 else ""
+
+            # Format row
+            # predictor | Total | Failed | Finished | Pending | Running | ETA
+            # Use colors for numbers only
+
+            row = (
+                f"{model:<15} | "
+                f"{total:<6} | "
+                f"{c_fail}{n_failed:<6}{RESET} | "
+                f"{c_succ}{n_success:<8}{RESET} | "
+                f"{c_pend}{n_pending:<7}{RESET} | "
+                f"{c_run}{n_running:<7}{RESET} | "
+                f"{eta_str:<10}"
+            )
+            print(row)
+        print("-" * 80)
+
     if args.dashboard:
         try:
             while True:
                 stats, timestamps = monitor.update(indices)
-                print_summary(stats, timestamps, len(indices), args.job_id, clear=True)
-                
+                if args.dashboard:
+                    print("\033[2J\033[H", end="")  # Clear
+                print_breakdown(stats, timestamps, len(indices))
+
                 if len(stats["Running"]) == 0 and len(stats["Pending"]) == 0:
                     print("\nAll jobs finished. Exiting dashboard.")
                     break
-                    
+
                 time.sleep(5)
         except KeyboardInterrupt:
             print("\nDashboard stopped.")
@@ -316,8 +450,7 @@ def main():
         print(f"Checking {len(indices)} tasks...")
         print("-" * 40)
         stats, timestamps = monitor.update(indices)
-        print_summary(stats, timestamps, len(indices), args.job_id, clear=False)
-
+        print_breakdown(stats, timestamps, len(indices))
 
     # Handle failed jobs (save or resubmit)
     if args.save_failed or args.resubmit:
@@ -337,13 +470,15 @@ def main():
             else:
                 timestamp_str = time.strftime("%Y%m%d_%H%M%S")
                 failed_file = f"failed_jobs_{args.job_id}_{timestamp_str}.txt"
-            
+
             # Write to file
             try:
                 with open(failed_file, "w") as f:
                     for idx in failed_indices:
                         f.write(f"{idx}\n")
-                print(f"\n{RED}Saved {len(failed_indices)} failed job indices to {failed_file}{RESET}")
+                print(
+                    f"\n{RED}Saved {len(failed_indices)} failed job indices to {failed_file}{RESET}"
+                )
             except IOError as e:
                 print(f"\n{RED}Error writing failed jobs file: {e}{RESET}")
                 return
@@ -352,19 +487,21 @@ def main():
             if args.resubmit:
                 abs_failed_file = os.path.abspath(failed_file)
                 array_range = f"0-{len(failed_indices) - 1}"
-                
+
                 # Check if script exists
                 if not os.path.exists(args.resubmit_script):
-                    print(f"\n{RED}Error: Submission script not found at {args.resubmit_script}{RESET}")
+                    print(
+                        f"\n{RED}Error: Submission script not found at {args.resubmit_script}{RESET}"
+                    )
                     return
 
                 cmd = [
                     "sbatch",
                     f"--array={array_range}",
                     args.resubmit_script,
-                    abs_failed_file
+                    abs_failed_file,
                 ]
-                
+
                 cmd_str = " ".join(cmd)
                 print(f"\nResubmitting failed jobs...")
                 print(f"Command: {cmd_str}")
@@ -379,10 +516,11 @@ def main():
                         print(f"{GREEN}Resubmission successful!{RESET}")
                         print(result.stdout.strip())
                     except subprocess.CalledProcessError as e:
-                        print(f"\n{RED}Resubmission failed with error code {e.returncode}:{RESET}")
+                        print(
+                            f"\n{RED}Resubmission failed with error code {e.returncode}:{RESET}"
+                        )
                         print(e.stderr)
 
 
 if __name__ == "__main__":
     main()
-

@@ -14,6 +14,96 @@ from uqct.eval.unet_ensemble import run_unet_ensemble
 from uqct.utils import get_root_dir
 
 
+def build_grid(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build the job grid based on settings."""
+    all_models = settings.get(
+        "models", ["fbp", "mle", "map", "unet", "unet_ensemble", "diffusion"]
+    )
+    datasets = settings["datasets"]
+    intensities = settings["total_intensity_values"]
+    seed_range = settings.get("seed_range", [0, 1])
+    seeds = list(range(seed_range[0], seed_range[1]))
+    full_image_range = tuple(settings["image_range"])
+    start, end = full_image_range
+
+    grid = []
+
+    # 1. FBP: 1 Global Job. Loops Datasets, Intensities, Seeds. Full range.
+    if "fbp" in all_models:
+        grid.append(
+            {
+                "model": "fbp",
+                "datasets": datasets,  # List -> Loop
+                "intensities": intensities,  # List -> Loop
+                "image_range": full_image_range,
+                "seeds": seeds,  # List -> Loop
+            }
+        )
+
+    # 2. MLE/MAP: 1 Job per (Model, Dataset, Intensity). Loops seeds, chunk-20.
+    iterative = ["mle"]
+    chunks_20 = [(i, min(i + 20, end)) for i in range(start, end, 20)]
+    for m in iterative:
+        for d in datasets:
+            for i in intensities:
+                grid.append(
+                    {
+                        "model": m,
+                        "dataset": d,
+                        "intensity": i,  # Scalar -> One Job
+                        "seeds": seeds,  # List -> Loop
+                        "image_ranges": chunks_20,  # List -> Loop
+                    }
+                )
+
+    # 3. U-Net: 1 Job per (Dataset, Intensity). Loops seeds. Full range.
+    if "unet" in all_models:
+        for d in datasets:
+            for i in intensities:
+                grid.append(
+                    {
+                        "model": "unet",
+                        "dataset": d,  # Scalar -> One Job
+                        "intensity": i,  # Scalar -> One Job
+                        "seeds": seeds,  # List -> Loop
+                        "image_range": full_image_range,
+                    }
+                )
+
+    # 4. U-Net Ensemble: 1 Job per (Dataset, Intensity, Seed). Full range.
+    if "unet_ensemble" in all_models:
+        for d in datasets:
+            for i in intensities:
+                for s in seeds:
+                    grid.append(
+                        {
+                            "model": "unet_ensemble",
+                            "dataset": d,
+                            "intensity": i,
+                            "seed": s,  # Scalar -> Scalar
+                            "image_range": full_image_range,
+                        }
+                    )
+
+    # 5. Diffusion: Granular. 1 Job per (Dataset, Intensity, Seed, Chunk-10).
+    if "diffusion" in all_models:
+        chunks_10 = [(i, min(i + 10, end)) for i in range(start, end, 10)]
+        for d in datasets:
+            for i in intensities:
+                for s in seeds:
+                    for r in chunks_10:
+                        grid.append(
+                            {
+                                "model": "diffusion",
+                                "dataset": d,
+                                "intensity": i,
+                                "seed": s,
+                                "image_range": r,
+                            }
+                        )
+    return grid
+
+
 @click.group()
 def cli():
     """Unified evaluation CLI."""
@@ -75,84 +165,11 @@ def run(
     # ---------------------------------------------------------
     # Build Heterogeneous Job Grid
     # ---------------------------------------------------------
-    grid = []
+    grid = build_grid(settings)
 
-    # 1. FBP: 1 Global Job. Loops Datasets, Intensities, Seeds. Full range.
-    if "fbp" in all_models:
-        grid.append(
-            {
-                "model": "fbp",
-                "datasets": datasets,  # List -> Loop
-                "intensities": intensities,  # List -> Loop
-                "image_range": full_image_range,
-                "seeds": seeds,  # List -> Loop
-            }
-        )
-
-    # 2. MLE/MAP: 1 Job per (Model, Dataset, Intensity). Loops seeds, chunk-20.
-    # User requested: Split by intensity for more parallelism.
-    # iterative = [m for m in all_models if m in ["mle", "map"]]
-    iterative = ["mle"]
-    chunks_20 = [(i, min(i + 20, end)) for i in range(start, end, 20)]
-    for m in iterative:
-        for d in datasets:
-            for i in intensities:
-                grid.append(
-                    {
-                        "model": m,
-                        "dataset": d,
-                        "intensity": i,  # Scalar -> One Job
-                        "seeds": seeds,  # List -> Loop
-                        "image_ranges": chunks_20,  # List -> Loop
-                    }
-                )
-
-    # 3. U-Net: 1 Job per (Dataset, Intensity). Loops seeds. Full range.
-    if "unet" in all_models:
-        for d in datasets:
-            for i in intensities:
-                grid.append(
-                    {
-                        "model": "unet",
-                        "dataset": d,  # Scalar -> One Job
-                        "intensity": i,  # Scalar -> One Job
-                        "seeds": seeds,  # List -> Loop
-                        "image_range": full_image_range,
-                    }
-                )
-
-    # 4. U-Net Ensemble: 1 Job per (Dataset, Intensity, Seed). Full range.
-    if "unet_ensemble" in all_models:
-        for d in datasets:
-            for i in intensities:
-                for s in seeds:
-                    grid.append(
-                        {
-                            "model": "unet_ensemble",
-                            "dataset": d,
-                            "intensity": i,
-                            "seed": s,  # Scalar -> Scalar
-                            "image_range": full_image_range,
-                        }
-                    )
-
-    # 4. Diffusion: Granular. 1 Job per (Dataset, Intensity, Seed, Chunk-10).
-    if "diffusion" in all_models:
-        chunks_10 = [(i, min(i + 10, end)) for i in range(start, end, 10)]
-        for d in datasets:
-            for i in intensities:
-                for s in seeds:
-                    for r in chunks_10:
-                        grid.append(
-                            {
-                                "model": "diffusion",
-                                "dataset": d,
-                                "intensity": i,
-                                "seed": s,
-                                "image_range": r,
-                            }
-                        )
-
+    # ---------------------------------------------------------
+    # Execution Logic
+    # ---------------------------------------------------------
     # ---------------------------------------------------------
     # Execution Logic
     # ---------------------------------------------------------
