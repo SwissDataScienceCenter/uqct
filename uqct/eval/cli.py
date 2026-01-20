@@ -1,14 +1,16 @@
-import click
-import tomllib
-import itertools
 import sys
-from typing import Literal, Any
+import tomllib
+from typing import Any, Literal
+
+import click
 
 from uqct.datasets.utils import DatasetName
+from uqct.eval.diffusion import run_diffusion
 from uqct.eval.fbp import run_fbp
 from uqct.eval.iterative import run_iterative
-from uqct.eval.diffusion import run_diffusion
+from uqct.eval.iterative import run_iterative
 from uqct.eval.unet import run_unet
+from uqct.eval.unet_ensemble import run_unet_ensemble
 from uqct.utils import get_root_dir
 
 
@@ -22,9 +24,9 @@ def cli():
 @click.option(
     "--model",
     required=False,
-    type=click.Choice(["fbp", "mle", "map", "unet", "diffusion"]),
+    type=click.Choice(["fbp", "mle", "map", "unet", "unet_ensemble", "diffusion"]),
     default=None,
-    help="Model name (fbp, mle, map, unet, diffusion). Required only if running locally without job-id to filter.",
+    help="Model name (fbp, mle, map, unet, unet_ensemble, diffusion). Required only if running locally without job-id to filter.",
 )
 @click.option(
     "--job-id", type=int, default=None, help="SLURM array job ID to select config"
@@ -37,7 +39,7 @@ def cli():
     help="Allow duplicate runs. If False, skips if run exists.",
 )
 def run(
-    model: Literal["fbp", "mle", "map", "unet", "diffusion"] | None,
+    model: Literal["fbp", "mle", "map", "unet", "unet_ensemble", "diffusion"] | None,
     job_id: int | None,
     sparse: bool,
     duplicate: bool,
@@ -59,7 +61,9 @@ def run(
             sys.exit(1)
         settings = full_config[section]
 
-    all_models = settings.get("models", ["fbp", "mle", "map", "unet", "diffusion"])
+    all_models = settings.get(
+        "models", ["fbp", "map", "unet", "unet_ensemble", "diffusion"]
+    )
     datasets = settings["datasets"]
     intensities = settings["total_intensity_values"]
     schedule_length = settings.get("schedule_length", 32)
@@ -87,7 +91,8 @@ def run(
 
     # 2. MLE/MAP: 1 Job per (Model, Dataset, Intensity). Loops seeds, chunk-20.
     # User requested: Split by intensity for more parallelism.
-    iterative = [m for m in all_models if m in ["mle", "map"]]
+    # iterative = [m for m in all_models if m in ["mle", "map"]]
+    iterative = ["mle"]
     chunks_20 = [(i, min(i + 20, end)) for i in range(start, end, 20)]
     for m in iterative:
         for d in datasets:
@@ -116,6 +121,21 @@ def run(
                     }
                 )
 
+    # 4. U-Net Ensemble: 1 Job per (Dataset, Intensity, Seed). Full range.
+    if "unet_ensemble" in all_models:
+        for d in datasets:
+            for i in intensities:
+                for s in seeds:
+                    grid.append(
+                        {
+                            "model": "unet_ensemble",
+                            "dataset": d,
+                            "intensity": i,
+                            "seed": s,  # Scalar -> Scalar
+                            "image_range": full_image_range,
+                        }
+                    )
+
     # 4. Diffusion: Granular. 1 Job per (Dataset, Intensity, Seed, Chunk-10).
     if "diffusion" in all_models:
         chunks_10 = [(i, min(i + 10, end)) for i in range(start, end, 10)]
@@ -139,7 +159,7 @@ def run(
 
     if job_id is not None:
         if job_id < 0 or job_id >= len(grid):
-            click.echo(f"Job ID {job_id} out of range (0-{len(grid)-1})")
+            click.echo(f"Job ID {job_id} out of range (0-{len(grid) - 1})")
             sys.exit(1)
 
         task = grid[job_id]
@@ -160,7 +180,7 @@ def run(
         click.echo(f"Running {len(tasks_to_run)} jobs locally...")
         for i, task in enumerate(tasks_to_run):
             click.echo(
-                f"\n--- Local Job {i+1}/{len(tasks_to_run)}: {task['model']} ---"
+                f"\n--- Local Job {i + 1}/{len(tasks_to_run)}: {task['model']} ---"
             )
             execute_task(task, sparse, schedule_length, settings, duplicate)
 
@@ -347,6 +367,20 @@ def _dispatch(
             max_angle,
         )
 
+    elif model == "unet_ensemble":
+        run_unet_ensemble(
+            dataset,
+            sparse,
+            intensity,
+            image_range,
+            seed,
+            n_angles,
+            schedule_start,
+            schedule_type,
+            schedule_length,
+            max_angle,
+        )
+
     elif model == "diffusion":
         cfg = settings.get("diffusion", {})
         gradient_steps = cfg.get("gradient_steps", 20)
@@ -372,7 +406,7 @@ def _dispatch(
         )
     else:
         click.echo(
-            f"Unknown model '{model}'. Supported: fbp, mle, map, unet, diffusion."
+            f"Unknown model '{model}'. Supported: fbp, mle, map, unet, unet_ensemble, diffusion."
         )
         sys.exit(1)
 

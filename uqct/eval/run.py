@@ -320,6 +320,8 @@ def evaluate_and_save(
         else:
             preds_nll = preds
 
+        preds_nll = preds_nll.float()
+
         # Ensure prediction time dimension matches schedule length strict
         # User requested to not repeat across dimension to make it work.
         assert preds_nll.shape[1] == len(schedule), (
