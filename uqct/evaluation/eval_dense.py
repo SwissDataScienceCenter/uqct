@@ -26,6 +26,10 @@ import datetime
 import hashlib
 import json
 
+try:
+    import git
+except ImportError:
+    git = None
 
 class ObservationDataset(torch.utils.data.Dataset):
 
@@ -540,6 +544,24 @@ if __name__ == "__main__":
     parser.add_argument("--tv_weight", type=float, default=1e3, help="Total Variation weight for iterative reconstruction.")
     args = parser.parse_args()
 
+    # check git state and warn if not clean, ask for confirmation to proceed
+    commit = branch = None
+    if git is None:
+        print("gitpython not installed, skipping git state check.")
+    else:
+        repo = git.Repo(search_parent_directories=True)
+        if repo.is_dirty():
+            print("Warning: Git repository has uncommitted changes.")
+            resp = input("Proceed anyway? [y/N]: ").strip().lower()
+            if resp != "y":
+                print("Exiting.")
+                exit(0)
+        else:
+            commit = repo.head.object.hexsha
+            print(f"Git commit: {commit}")
+            branch = repo.active_branch.name
+            print(f"Git branch: {branch}")
+
     # device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -557,6 +579,11 @@ if __name__ == "__main__":
     # Add extra metadata
     experiment_params["experiment_id"] = output_file_name
     experiment_params["datetime"] = datetime.datetime.now().isoformat()
+    if commit is not None:
+        experiment_params["git_commit"] = commit
+    if branch is not None:
+        experiment_params["git_branch"] = branch
+
 
     # Output dir
     if not os.path.exists(args.output_dir):
