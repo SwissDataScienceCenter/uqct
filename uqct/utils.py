@@ -48,6 +48,10 @@ def get_checkpoint_dir() -> Path:
         ckpt_path = Path(env_ckpt).expanduser()
         if ckpt_path.is_dir():
             return ckpt_path
+
+    cluster_ckpt = Path("/cluster/scratch/mgaetzner/uqct/checkpoints/")
+    if cluster_ckpt.exists():
+        return cluster_ckpt
     ckpt_dir = Path("/mydata/chip/shared/checkpoints/uqct/")
     if ckpt_dir.exists():
         return ckpt_dir
