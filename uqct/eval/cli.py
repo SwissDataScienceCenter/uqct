@@ -284,11 +284,9 @@ def _dispatch(
             return
 
     # Common parameters from settings
-    n_angles = settings.get("n_angles", 50)
-    # Default schedule_type to "linear", start to 0, max_angle to 180 if not present?
-    # Better to assume they are in settings if they are common.
-    schedule_start = settings.get("schedule_start", 0)
-    schedule_type = settings.get("schedule_type", "linear")
+    n_angles = settings.get("n_angles", 200)
+    schedule_start = settings.get("schedule_start", 10)
+    schedule_type = settings.get("schedule_type", "exp")
     max_angle = settings.get("max_angle", 180)
 
     if model == "fbp":

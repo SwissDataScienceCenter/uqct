@@ -1,11 +1,11 @@
-from torchmetrics import StructuralSimilarityIndexMeasure
+from torchmetrics.image import StructuralSimilarityIndexMeasure
 import torch
 
 from uqct.ct import circular_mask
 
 
 def rmse(
-    prediction: torch.Tensor, target: torch.Tensor, circle_mask: bool = False
+    prediction: torch.Tensor, target: torch.Tensor, circle_mask: bool = True
 ) -> torch.Tensor:
     """
     Computes the Root Mean Square Error (RMSE) between two images.
@@ -27,8 +27,8 @@ def rmse(
 def psnr(
     prediction: torch.Tensor,
     target: torch.Tensor,
-    max_pixel: float | None = None,
-    circle_mask: bool = False,
+    max_pixel: float | None = 1.0,
+    circle_mask: bool = True,
 ) -> torch.Tensor:
     """
     Computes the Peak Signal-to-Noise Ratio (PSNR) between two images.
@@ -55,7 +55,7 @@ def ssim(
     prediction: torch.Tensor,
     target: torch.Tensor,
     data_range: float = 1.0,
-    circle_mask: bool = False,
+    circle_mask: bool = True,
 ) -> torch.Tensor:
     """
     Computes the Structural Similarity Index (SSIM) between two images.
@@ -85,7 +85,7 @@ def get_metrics(
     prediction: torch.Tensor,
     target: torch.Tensor,
     max_pixel: float | None = 1.0,
-    circle_mask: bool = False,
+    circle_mask: bool = True,
     data_range: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     """

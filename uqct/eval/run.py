@@ -123,9 +123,10 @@ class Run:
         # Load metrics into dataframe
         metrics_dict = asdict(self.metrics)
         df = pd.DataFrame(metrics_dict)
+        n_images = self.ct_settings.image_end_index - self.ct_settings.image_start_index
         for k, v in asdict(self.ct_settings).items():
             if isinstance(v, list):
-                df[k] = [v]
+                df[k] = n_images * [v]
             else:
                 df[k] = v
 
@@ -302,7 +303,7 @@ def evaluate_and_save(
         for t in range(preds_mean.shape[1]):
             image_gt = gt_lr[image_index]
             image_pred = preds_mean[image_index, t]
-            for k, v in get_metrics(image_gt, image_pred).items():
+            for k, v in get_metrics(image_pred, image_gt).items():
                 if image_index + 1 > len(metric2lists[k]):
                     metric2lists[k].append(list())
                 metric2lists[k][image_index].append(v.item())
