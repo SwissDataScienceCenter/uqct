@@ -20,6 +20,8 @@ class H5Wrapper:
             folder = [os.path.basename(path)]
             path = os.path.dirname(path)
 
+        folder = sorted(folder)
+
         self.path = path
         self.folder = folder
         idx_to_file_list = []

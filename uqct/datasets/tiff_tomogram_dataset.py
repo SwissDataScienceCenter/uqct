@@ -23,6 +23,8 @@ class TIFFWrapper:
             folder = [os.path.basename(path)]
             path = os.path.dirname(path)
 
+        folder = sorted(folder)
+
         self.path = path
         self.folder = folder
         self.im_size = im_size
