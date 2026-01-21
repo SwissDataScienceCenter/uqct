@@ -1,9 +1,11 @@
-import click
-import pandas as pd
 from pathlib import Path
 from typing import Optional
-from uqct.utils import get_results_dir, load_runs
+
+import click
+import pandas as pd
+
 from uqct.logging import get_logger
+from uqct.utils import get_results_dir, load_runs
 
 logger = get_logger(__name__)
 
@@ -25,15 +27,21 @@ logger = get_logger(__name__)
 @click.option(
     "--intensity", required=False, type=float, default=None, help="Total intensity."
 )
+@click.option(
+    "--jobid",
+    default=[54717753, 54757527],
+    multiple=True,
+    help="Total intensity.",
+)
 @click.option("--sparse/--no-sparse", default=None, help="Sparse setting flag.")
 def main(
-    runs_dir: Path,
+    runs_dir: Optional[Path],
     output_file: Path,
+    jobid: tuple[int, ...],
     dataset: Optional[str],
     intensity: Optional[float],
     sparse: Optional[bool],
 ):
-    """Consolidate run results into a single parquet file."""
     """Consolidate run results into a single parquet file."""
 
     if runs_dir is None:
@@ -46,7 +54,7 @@ def main(
     logger.info(f"  Intensity:   {intensity if intensity is not None else 'ALL'}")
     logger.info(f"  Sparse:      {sparse if sparse is not None else 'ALL'}")
 
-    aggregated_runs = load_runs(runs_dir, dataset, intensity, sparse)
+    aggregated_runs = load_runs(runs_dir, dataset, intensity, sparse, jobid)
 
     if not aggregated_runs:
         logger.warning("No matching runs found.")
@@ -112,7 +120,6 @@ def main(
         "nll_gt",
         "timestamp",
         "rmse",
-        "zeroone",
         "l1",
     ]
 
@@ -132,7 +139,7 @@ def main(
     # 2. Deep check for NaNs in list/array columns
     import numpy as np
 
-    list_cols = ["psnr", "ssim", "nll_pred", "nll_gt", "rmse", "zeroone", "l1"]
+    list_cols = ["psnr", "ssim", "nll_pred", "nll_gt", "rmse", "l1"]
     present_list_cols = [c for c in list_cols if c in final_df.columns]
 
     for col in present_list_cols:
@@ -153,6 +160,7 @@ def main(
     # Let's save it
     output_file.parent.mkdir(parents=True, exist_ok=True)
     final_df.to_parquet(output_file)
+    breakpoint()
     logger.info(f"Saved {len(final_df)} rows to {output_file}")
 
 

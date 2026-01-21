@@ -1,16 +1,15 @@
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 
 # Standard Model Order
-MODEL_ORDER = ["diffusion", "fbp", "map", "mle", "unet"]
+MODEL_ORDER = ["fbp", "mle", "unet", "unet_ensemble", "diffusion"]
 
 # Display Names
 MODEL_NAMES = {
     "diffusion": "Diffusion",
     "fbp": "FBP",
-    "map": "MAP",
     "mle": "MLE",
     "unet": "U-Net",
+    "unet_ensemble": "U-Net Ens.",
 }
 
 

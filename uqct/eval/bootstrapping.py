@@ -6,6 +6,7 @@ from uqct.other_methods.bootstrapping import run_bootstrapping
 @click.command()
 @common_options
 @click.option("--n-bootstraps", default=20, help="Number of bootstrap samples")
+@click.option("--method", default="fbp", help="Method to bootstrap (fbp, unet)")
 @click.option(
     "--comparison", is_flag=True, default=False, help="Run in comparison mode"
 )
@@ -21,6 +22,7 @@ def main(
     schedule_length,
     max_angle,
     n_bootstraps,
+    method,
     comparison,
 ):
     run_bootstrapping(
@@ -35,7 +37,8 @@ def main(
         schedule_length,
         max_angle,
         n_bootstraps,
-        comparison,
+        method=method,
+        comparison=comparison,
     )
 
 

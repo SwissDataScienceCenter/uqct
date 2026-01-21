@@ -5,9 +5,9 @@ from typing import Any, Literal
 import click
 
 from uqct.datasets.utils import DatasetName
+from uqct.eval.bootstrapping import run_bootstrapping
 from uqct.eval.diffusion import run_diffusion
 from uqct.eval.fbp import run_fbp
-from uqct.eval.iterative import run_iterative
 from uqct.eval.iterative import run_iterative
 from uqct.eval.unet import run_unet
 from uqct.eval.unet_ensemble import run_unet_ensemble
@@ -17,7 +17,8 @@ from uqct.utils import get_root_dir
 def build_grid(settings: dict[str, Any]) -> list[dict[str, Any]]:
     """Build the job grid based on settings."""
     all_models = settings.get(
-        "models", ["fbp", "mle", "map", "unet", "unet_ensemble", "diffusion"]
+        "models",
+        ["fbp", "mle", "map", "unet", "unet_ensemble", "diffusion"],
     )
     datasets = settings["datasets"]
     intensities = settings["total_intensity_values"]
@@ -44,17 +45,18 @@ def build_grid(settings: dict[str, Any]) -> list[dict[str, Any]]:
     iterative = ["mle"]
     chunks_20 = [(i, min(i + 20, end)) for i in range(start, end, 20)]
     for m in iterative:
-        for d in datasets:
-            for i in intensities:
-                grid.append(
-                    {
-                        "model": m,
-                        "dataset": d,
-                        "intensity": i,  # Scalar -> One Job
-                        "seeds": seeds,  # List -> Loop
-                        "image_ranges": chunks_20,  # List -> Loop
-                    }
-                )
+        if m in all_models:
+            for d in datasets:
+                for i in intensities:
+                    grid.append(
+                        {
+                            "model": m,
+                            "dataset": d,
+                            "intensity": i,  # Scalar -> One Job
+                            "seeds": seeds,  # List -> Loop
+                            "image_ranges": chunks_20,  # List -> Loop
+                        }
+                    )
 
     # 3. U-Net: 1 Job per (Dataset, Intensity). Loops seeds. Full range.
     if "unet" in all_models:
@@ -101,6 +103,39 @@ def build_grid(settings: dict[str, Any]) -> list[dict[str, Any]]:
                                 "image_range": r,
                             }
                         )
+
+    return grid
+
+
+def build_bootstrapping_grid(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build the bootstrapping job grid (Unchunked)."""
+    datasets = settings["datasets"]
+    intensities = settings["total_intensity_values"]
+    seed_range = settings.get("seed_range", [0, 1])
+    seeds = list(range(seed_range[0], seed_range[1]))
+    full_image_range = tuple(settings["image_range"])
+    # No chunking for bootstrapping as per throughput optimization
+
+    bs_cfg = settings.get("bootstrapping", {})
+    methods = bs_cfg.get("methods", ["fbp"])
+    if "intensities" in bs_cfg:
+        intensities = bs_cfg["intensities"]
+
+    grid = []
+    # Order: Dataset -> Intensity -> Seeds -> Method
+    for d in datasets:
+        for i_lvl in intensities:
+            for s in seeds:
+                for m in methods:
+                    grid.append(
+                        {
+                            "method": m,
+                            "dataset": d,
+                            "intensity": i_lvl,
+                            "seed": s,
+                            "image_range": full_image_range,
+                        }
+                    )
     return grid
 
 
@@ -151,21 +186,13 @@ def run(
             sys.exit(1)
         settings = full_config[section]
 
-    all_models = settings.get(
-        "models", ["fbp", "map", "unet", "unet_ensemble", "diffusion"]
-    )
-    datasets = settings["datasets"]
-    intensities = settings["total_intensity_values"]
     schedule_length = settings.get("schedule_length", 32)
-    seed_range = settings.get("seed_range", [0, 1])
-    seeds = list(range(seed_range[0], seed_range[1]))
-    full_image_range = tuple(settings["image_range"])
-    start, end = full_image_range
 
     # ---------------------------------------------------------
     # Build Heterogeneous Job Grid
     # ---------------------------------------------------------
     grid = build_grid(settings)
+    breakpoint()
 
     # ---------------------------------------------------------
     # Execution Logic
@@ -421,11 +448,86 @@ def _dispatch(
             schedule_length=schedule_length,
             max_angle=max_angle,
         )
+
     else:
         click.echo(
             f"Unknown model '{model}'. Supported: fbp, mle, map, unet, unet_ensemble, diffusion."
         )
         sys.exit(1)
+
+
+@cli.command(name="bootstrapping")
+@click.option(
+    "--job-id", type=int, default=None, help="SLURM array job ID to select config"
+)
+@click.option("--sparse", is_flag=True, default=True, help="Use sparse setting")
+def bootstrapping(job_id: int | None, sparse: bool):
+    """Run bootstrapping evaluation."""
+    root = get_root_dir()
+    settings_path = root / "uqct" / "settings.toml"
+
+    if not settings_path.exists():
+        click.echo(f"Settings file not found at {settings_path}")
+        sys.exit(1)
+
+    section = "eval-sparse" if sparse else "eval-dense"
+    with open(settings_path, "rb") as f:
+        full_config = tomllib.load(f)
+        if section not in full_config:
+            click.echo(f"Section [{section}] not found in settings.toml")
+            sys.exit(1)
+        settings = full_config[section]
+
+    # Check if bootstrapping config exists
+    if "bootstrapping" not in settings:
+        click.echo(f"No [bootstrapping] config found in {section}")
+        sys.exit(1)
+
+    bs_cfg = settings["bootstrapping"]
+    n_bootstraps = bs_cfg.get("n_bootstraps", 20)
+
+    # Build Grid
+    grid = build_bootstrapping_grid(settings)
+
+    # Execution
+    if job_id is not None:
+        if job_id < 0 or job_id >= len(grid):
+            click.echo(f"Job ID {job_id} out of range (0-{len(grid) - 1})")
+            sys.exit(1)
+
+        task = grid[job_id]
+        click.echo(f"Running Bootstrapping Job ID {job_id} (Method: {task['method']})")
+        execute_bootstrapping_task(task, sparse, settings, n_bootstraps)
+    else:
+        click.echo(f"Running {len(grid)} bootstrapping jobs locally...")
+        for i, task in enumerate(grid):
+            click.echo(f"\n--- Job {i + 1}/{len(grid)}: {task['method']} ---")
+            execute_bootstrapping_task(task, sparse, settings, n_bootstraps)
+
+
+def execute_bootstrapping_task(task, sparse, settings, n_bootstraps):
+    # Common parameters
+    n_angles = settings.get("n_angles", 200)
+    schedule_start = settings.get("schedule_start", 10)
+    schedule_type = settings.get("schedule_type", "exp")
+    max_angle = settings.get("max_angle", 180)
+    schedule_length = settings.get("schedule_length", 32)
+
+    run_bootstrapping(
+        dataset=task["dataset"],
+        sparse=sparse,
+        total_intensity=task["intensity"],
+        image_range=task["image_range"],
+        seed=task["seed"],
+        n_angles=n_angles,
+        schedule_start=schedule_start,
+        schedule_type=schedule_type,
+        schedule_length=schedule_length,
+        max_angle=max_angle,
+        n_bootstraps=n_bootstraps,
+        method=task["method"],
+        comparison=False,
+    )
 
 
 if __name__ == "__main__":
