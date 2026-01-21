@@ -21,7 +21,7 @@ from uqct.models.guided_diffusion import GradientGuidance, GuidedDiffusionPipeli
 from uqct.metrics import psnr, rmse, ssim
 import xarray as xr
 
-from uqct.training.unet import N_BINS_HR
+from uqct.training.unet import N_BINS_HR, N_BINS_LR
 import datetime
 import hashlib
 import json
@@ -67,8 +67,8 @@ class ObservationDataset(torch.utils.data.Dataset):
 
 def fbp_recon(counts, intensities, angles):
     """Simple FBP reconstruction from an Experiment object."""
-    sinogram = sinogram_from_counts(counts, intensities)
-    return fbp(sinogram, angles)
+    sinogram = sinogram_from_counts(counts, intensities).clamp_min(0.)
+    return fbp(sinogram, angles).clamp(0., 1.)
 
 
 def tv_loss(image: torch.Tensor) -> torch.Tensor:
@@ -101,8 +101,8 @@ class IterativeRecon:
 
     def _build_prior(self, counts, angles, intensities):
         if self.init_method == "fbp":
-            sinogram = sinogram_from_counts(counts, intensities)
-            prior = fbp(sinogram, angles)
+            sinogram = sinogram_from_counts(counts, intensities).clamp_min(0.)
+            prior = fbp(sinogram, angles).clamp(0., 1.)
         # elif self.init_method == "fbp_weighted":
         #     prior = fbp(counts, angles, intensities, weighted=True)
         elif self.init_method == "zeros":
@@ -187,16 +187,17 @@ class UNetRecon:
         self.unet = unet
     
     def __call__(self, counts, intensities, angles):
-        sinogram = sinogram_from_counts(counts, intensities)
-        fbp_recon = fbp(sinogram, angles)
-
-        total_intensities = intensities.expand(counts.shape).sum(dim=(-1, -2))
+        sinogram = sinogram_from_counts(counts, intensities).clamp_min(0.)
+        fbp_recon = fbp(sinogram, angles).clamp(0., 1.)
+        
+        # ToDo: added a factor 2 to account for HR normalization
+        total_intensities = 2 * intensities.expand(counts.shape).sum(dim=(-1, -2))
 
         x_in = (fbp_recon * 2.0 - 1.0)
         exposure_norm = (
             (total_intensities - MIN_TOTAL_INTENSITY) / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY) * 999
         )
-
+        exposure_norm = exposure_norm.clamp(0.0, 999.0)
 
         batch_dims = x_in.size()[:-2]
         img_shape = x_in.shape[-2:]
@@ -349,21 +350,20 @@ class CondDiffusionRecon:
         )
 
         # compute fbps
-        sinogram = sinogram_from_counts(counts, intensities)
-        fbps = fbp(sinogram, angles)
-        intensities = intensities.expand(counts.shape).sum(dim=(-1, -2)).squeeze(0)
+        sinogram = sinogram_from_counts(counts, intensities).clamp_min(0.)
+        fbps = fbp(sinogram, angles).clamp(0., 1.)
+        # ToDo: added a factor 2 to account for HR normalization
+        total_intensities =  2 * intensities.expand(counts.shape).sum(dim=(-1, -2)).squeeze(0)
+    
+
 
         # print(fbps.shape, counts.shape, intensities.shape)
-        fbps_norm = (fbps * 2.0 - 1.0)
+        fbps_norm = fbps * 2.0 - 1.0
         fbps_norm = fbps_norm.unsqueeze(0).expand(num_samples, -1, -1, -1, -1).reshape(-1, 1, fbps.shape[-2], fbps.shape[-1])
         # print(fbps_norm.shape)
-        
 
         # compute intensity
-
-        intensities_norm = (2 * ((norm_intensities(intensities) / 999) - 0.5)).clip(
-            -1, 1
-        )
+        intensities_norm = (2 * ((norm_intensities(total_intensities) / 999) - 0.5)).clip(-1, 1)
         intensities_norm = intensities_norm.unsqueeze(0).expand(num_samples, -1, -1).reshape(-1)
 
         n_angles = torch.tensor(len(angles), device=angles.device).float()
@@ -823,7 +823,6 @@ if __name__ == "__main__":
         ds = xr.concat([ds, ds_mix], dim="model")
 
     # Add schedule intensity as value, indexed by step
-    schedule_values = schedule.reshape(-1).cpu().numpy()
     ds["intensity"] = ("step", total_intensities.cpu().numpy())
 
     # Attach to xarray Dataset
