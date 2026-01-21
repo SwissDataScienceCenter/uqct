@@ -27,7 +27,7 @@ seeds="0"
 num_images=50
 init_fraction=false
 num_steps=10
-num_samples=5
+num_samples=10
 bypass_inverse_crime=false
 verbose=false
 iterative_num_gradient_steps=80
@@ -88,9 +88,11 @@ for dataset in "${datasets[@]}"; do
         # Set batch_size depending on model if batch_size is -1
         if [[ "$batch_size" -eq -1 ]]; then
             if [[ "$model" == "cond_diffusion" || "$model" == "diffusion" ]]; then
-            model_batch_size=12
+            model_batch_size=12  # 0.2 A100
+            # model_batch_size=  # 0.5 A100
             else
-            model_batch_size=100
+            model_batch_size=100 # 0.2 A100
+            # model_batch_size=300 # 0.5 A100
             fi
         else
             model_batch_size="$batch_size"
