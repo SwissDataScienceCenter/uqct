@@ -16,32 +16,6 @@ CYAN = "\033[96m"
 RESET = "\033[0m"
 
 
-def is_updated_within(file_obj: IO[Any], minutes: float) -> bool:
-    """
-    Checks if an open file was modified within the last 'minutes'.
-    
-    Args:
-        file_obj: An open file object (e.g., from open(...)).
-        minutes: The time window in minutes to check against.
-        
-    Returns:
-        True if modified within the window, False otherwise.
-    """
-    # Get the file descriptor and statistics
-    fd = file_obj.fileno()
-    stat_info = os.fstat(fd)
-    
-    # Get modification time and current time
-    last_modified = stat_info.st_mtime
-    now = time.time()
-    
-    # Calculate age in seconds
-    age_seconds = now - last_modified
-    
-    # Compare against the threshold (converted to seconds)
-    return age_seconds <= (minutes * 60)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Monitor SLURM job logs.")
     parser.add_argument("job_id", type=str, help="SLURM job ID (or array job ID)")
@@ -177,8 +151,8 @@ class JobMonitor:
             try:
                 with open(out_file, "r") as f:
                     out_chunk = f.read()
-                    is_fresh = is_updated_within(f, 3)
-                if "Saved run data at" in out_chunk and not is_fresh:
+                finished_str = f"JOB {index} FINISHED"
+                if finished_str in out_chunk:
                     return "Success", None, timestamp
             except Exception as _:
                 pass
@@ -199,8 +173,6 @@ class JobMonitor:
                         ):
                             error_msg = line.strip()
                             return "Failed", error_msg, timestamp
-                    if is_updated_within(f, 3):
-                        return "Running", None, None
             except Exception:
                 pass
 
@@ -367,13 +339,6 @@ def main():
         root = get_root_dir()
         settings_path = root / "uqct" / "settings.toml"
 
-        # Determine sparse/dense based on checking first log or args?
-        # Actually we don't know if it's sparse or dense from CLI args here easily without parsing logs.
-        # But usually we run sparse. Let's try to infer or default to sparse.
-        # Or just load both and check which one matches the grid size?
-        # A simpler way: just assume sparse for now as per current context.
-        # Better: check the first log file content?
-        # fallback: try sparse first.
         sparse = True
         section = "eval-sparse" if sparse else "eval-dense"
 

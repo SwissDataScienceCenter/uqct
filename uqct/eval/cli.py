@@ -192,11 +192,7 @@ def run(
     # Build Heterogeneous Job Grid
     # ---------------------------------------------------------
     grid = build_grid(settings)
-    breakpoint()
 
-    # ---------------------------------------------------------
-    # Execution Logic
-    # ---------------------------------------------------------
     # ---------------------------------------------------------
     # Execution Logic
     # ---------------------------------------------------------
@@ -371,9 +367,9 @@ def _dispatch(
         # Load from settings
         cfg = settings.get(model, {})
         # Fallback defaults if not in settings (though settings.toml should have them)
-        lr = cfg.get("lr", 1e-2)
+        lr = cfg.get("lr", 1e-1)
         patience = cfg.get("patience", 50)
-        max_steps = cfg.get("max_steps", 20000)
+        max_steps = cfg.get("max_steps", 100)
         tv_weight = cfg.get("tv_weight", -1.0)
 
         run_iterative(
