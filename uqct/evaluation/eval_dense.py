@@ -7,9 +7,11 @@ from typing import Any
 import argparse
 import os
 
+from uqct import metrics
 from uqct.datasets.utils import get_dataset
 from uqct.metrics import get_metrics
 from uqct.ct import fbp, nll, Experiment, Tomogram, anscombe_transform, radon, sinogram_from_counts, poisson, sample_observations, circular_mask
+from uqct.uq import basic_ci, gaussian_ci, percentile_ci, mean_std, coverage, error_correlation, error_r2
 
 import torch.nn.functional as F
 import astra
@@ -485,6 +487,40 @@ def nll_mixture(
     mix = -torch.logsumexp(nlls, dim=0)  # (...)
     return mix.float()
 
+def guidance_loss_beta(counts, intensities, angles, beta, data_steps, schedule_steps, l=5.):
+    """
+    Define a loss function for the diffusion model.
+    This can be used to guide the diffusion process.
+    """
+    data_shape = counts.shape[:-2]
+    circle_mask = circular_mask(counts.shape[-1], device=counts.device)
+    def loss_fn(image):
+        img_shape = image.shape[-2:]
+        image = image.view(-1, *data_shape, *img_shape)
+        image = ((image + 1.0)/2).clip(0, 1)
+        image = image * circle_mask
+        image = image.unsqueeze(-4)  # add step dimension
+
+        # print("data", data_shape)
+        # print("image", image.shape)
+        # print("data_steps", data_steps.shape)
+        # print("schedule_steps", schedule_steps.shape)
+
+        step_nll = nll(image, data_steps, schedule_steps, angles, l=l).sum(dim=[-1,-2, -3])
+        # print('step nll', step_nll.shape)
+        # print('beta', beta.shape)
+        # first_step_nll = step_nll[:,0]
+        remaining_step_nll = step_nll[...,1:]
+        beta_loss = remaining_step_nll.sum(dim=-1)
+        # print("beta_loss:", beta_loss.shape)
+
+        loss = torch.abs(beta_loss - beta)# + first_step_nll
+        # print("loss", loss.shape)
+        # exit()
+        # print(beta_loss - beta)
+        return loss.sum()  # remaining dimensions (samples, batch, steps)
+    return loss_fn
+
 import torchvision.transforms.functional as TF
 
 def rotate_images(images, degree):
@@ -500,7 +536,7 @@ def experiment_id(params):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate image quality metrics.")
     parser.add_argument("--dataset", type=str, choices=["composite", "lamino", "lung"], default="lung", help="Dataset to use for evaluation.")
-    parser.add_argument("--model", type=str, choices=["fbp", "unet", "cond_diffusion", "diffusion", "gt", "unet_ensemble", "mle", "map"], default="fbp", help="Model to use for evaluation.")
+    parser.add_argument("--model", type=str, choices=["fbp", "unet", "cond_diffusion", "beta_cond_diffusion", "diffusion", "gt", "unet_ensemble", "mle", "map", "fbp_bootstrap", "unet_bootstrap"], default="fbp", help="Model to use for evaluation.")
     def parse_seeds(arg):
         # Accepts comma-separated ints or ranges like 0-100
         seeds = []
@@ -538,10 +574,11 @@ if __name__ == "__main__":
     parser.add_argument("--guidance_lr", type=float, default=1e-3, help="Learning rate for diffusion guidance.")
     parser.add_argument("--guidance_lr_decay", action='store_true', help="Whether to use learning rate decay for diffusion guidance.")
     parser.add_argument("--guidance_end", type=int, default=10, help="Guidance end timestep for diffusion models.")
-    parser.add_argument("--num_bootstrap_samples", type=int, default=None, help="Number of bootstrap samples for uncertainty estimation.")
+    parser.add_argument("--num_bootstrap_samples", type=int, default=10, help="Number of bootstrap samples for uncertainty estimation.")
     parser.add_argument("--existing", default=None, choices=["skip", "overwrite"], 
     help="Behavior if output file exists.")
     parser.add_argument("--tv_weight", type=float, default=1e3, help="Total Variation weight for iterative reconstruction.")
+    parser.add_argument("--delta", type=float, nargs='+', default=[0.05], help="Confidence level for metrics.")
     args = parser.parse_args()
 
     # device
@@ -549,7 +586,7 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
     print(f"Dataset: {args.dataset}, Model: {args.model}")
 
-    mixing_models = ["diffusion", "cond_diffusion", "unet_ensemble"]
+    mixing_models = ["diffusion", "cond_diffusion", "unet_ensemble", "fbp_bootstrap", "unet_bootstrap", "beta_cond_diffusion"]
 
      # List of argument names to include as metadata
     excluded_keys = ['existing']
@@ -576,7 +613,7 @@ if __name__ == "__main__":
         # Combined dirty check
         print(f"Git commit: {experiment_params['git_commit']}")
         print(f"Git branch: {experiment_params['git_branch']}")
-        print(f"Git diff: {experiment_params['git_diff']}")
+        # print(f"Git diff: {experiment_params['git_diff']}")
 
     # Output dir
     if not os.path.exists(args.output_dir):
@@ -588,8 +625,6 @@ if __name__ == "__main__":
     if args.model == 'gt' and args.rotation is not None:
         model_name += f"_rot{args.rotation}"
 
-    if args.num_bootstrap_samples is not None:
-        model_name += f"_bootstrap"
     # output_file = Path(args.output_dir) / f"eval_{args.dataset}_{model_name}.nc"
     output_file = os.path.join(args.output_dir, output_file_name + ".nc")
     if os.path.exists(output_file):
@@ -606,7 +641,6 @@ if __name__ == "__main__":
             else:
                 print("Exiting without overwriting existing results.")
                 exit(0)
-
 
     # get dataset
     _ , test_set = get_dataset(args.dataset, True)
@@ -636,7 +670,7 @@ if __name__ == "__main__":
     # load model
     if args.model == "gt":
         recon = None
-    elif args.model == "fbp":
+    elif args.model in ["fbp", "fbp_bootstrap"]:
         recon = fbp_recon
     elif args.model == "mle":
         recon = IterativeRecon(
@@ -657,7 +691,7 @@ if __name__ == "__main__":
             tv_weight=args.tv_weight,
             device=device
         )
-    elif args.model == "unet":
+    elif args.model in ["unet", "unet_bootstrap"]:
         ckpt_path = Path(f'/mydata/chip/shared/checkpoints/uqct/unet_dense/unet_dense_128_{args.dataset}_0.pt')
         print(f"Loading UNet checkpoint from {ckpt_path}")
         unet = load_unet(ckpt_path, sparse=False).to(device).eval()
@@ -686,10 +720,37 @@ if __name__ == "__main__":
             guidance_lr_decay=args.guidance_lr_decay,
             seed=args.diffusion_seed if args.diffusion_seed != -1 else None
         )
-    elif args.model == "cond_diffusion":
+    elif args.model in ["cond_diffusion", 'beta_cond_diffusion']:
         ckpt_path = Path(f"/mydata/chip/shared/checkpoints/uqct/diffusion/ddpm_conditional_128_{args.dataset}.pt")
         unet = load_diffusion_unet(ckpt_path, cond=True)
         scheduler = DDPMScheduler(num_train_timesteps=1000, beta_schedule="linear")
+
+        if args.model == 'beta_cond_diffusion':
+            # find beta dataset
+            # list all *.nc files in the checkpoint directory
+            import glob
+            import xarray as xr
+            nc_files = sorted(glob.glob(f"{args.output_dir}/*.nc", recursive=False))
+            beta_file = None
+            beta_ds = None
+            for f in nc_files:
+                ds = xr.open_dataset(f)
+                match_kwargs = ['model', 'dataset', 'diffusion_num_inference_steps', 'guidance_end', 'guidance_num_gradient_steps', 'guidance_lr', 'guidance_lr_decay', 'diffusion_seed']
+                target_str_args = {k: str(v) for k, v in vars(args).items()}
+                target_str_args['model'] = 'cond_diffusion'  # match cond_diffusion
+                 # check if all match
+                if all(target_str_args[k] == ds.attrs[k] for k in match_kwargs):
+                    if beta_file is not None:
+                        raise ValueError(f"Multiple matching beta datasets found: {beta_file} and {f}")
+
+                    print(f"Found matching beta dataset: {f}")
+                    beta_file = f
+                    beta_ds = ds
+            beta_ds['beta'] = beta_ds['seq_nll'].cumsum(dim='step')
+            beta_ds['beta_mix'] = beta_ds['seq_nll_mix'].cumsum(dim='step')
+            guidance_loss_fn = guidance_loss_beta
+        else:
+            guidance_loss_fn = guidance_loss
         recon = CondDiffusionRecon(
             unet,
             scheduler,
@@ -700,25 +761,19 @@ if __name__ == "__main__":
             guidance_num_gradient_steps=args.guidance_num_gradient_steps,
             guidance_lr=args.guidance_lr,
             guidance_lr_decay=args.guidance_lr_decay,
-            seed=args.diffusion_seed if args.diffusion_seed != -1 else None
+            seed=args.diffusion_seed if args.diffusion_seed != -1 else None,
+            guidance_loss=guidance_loss_fn
         )
     else:
         raise ValueError(f"Unknown model: {args.model}")
     
 
-    if args.num_bootstrap_samples is not None and args.model in ["mle", "unet", "fbp"]:
+    if model_name.endswith("_bootstrap"):
         print(f"Wrapping reconstructor with BootstrapRecon using {args.num_bootstrap_samples} samples.")
         recon = BootstrapRecon(recon, num_samples=args.num_bootstrap_samples)
     
     # Prepare to collect batched results
-    all_psnr = []
-    all_rmse = []
-    all_ssim = []
-    all_index = []
-    all_seed = []
-    all_seq_nll = []
-    all_nll = []
-    all_seq_nll_mix = []
+    res = collections.defaultdict(list)
 
     for indices, seed, images, data in tqdm(obs_dataloader):
         images = images.to(device)
@@ -738,51 +793,78 @@ if __name__ == "__main__":
             data_cumsum = data.cumsum(dim=1)
             schedule_cumsum = schedule.unsqueeze(0).cumsum(dim=1)
             with torch.no_grad():
-                pred = [recon(data_cumsum[:, i], schedule_cumsum[:, i], angles) for i in range(data.shape[1])]
+
+                if args.model == 'beta_cond_diffusion':
+                    # print(indices, seed)
+                    indices_np = indices.cpu().numpy()
+                    seeds_np = seed.cpu().numpy()
+
+                    # Build tuples for selection
+                    pairs = list(zip(indices_np, seeds_np))
+
+                    # Select using .sel with a list of tuples
+                    beta = beta_ds.sel(model='cond_diffusion')['beta_mix'].stack(sample=("index", "seed")).sel(sample=pairs).squeeze().transpose('sample', 'step')
+
+                    beta = torch.from_numpy(beta.values).to(device).float()
+
+                    data_steps = data
+                    schedule_steps = schedule.unsqueeze(0)
+
+                    beta_delta = beta + torch.log(1/torch.tensor(0.05))
+                    pred = [recon(data_cumsum[:, i], schedule_cumsum[:, i], angles, beta=beta_delta[:, i], data_steps=data_steps[:, :i+1], schedule_steps=schedule_steps[:, :i+1]) for i in range(data.shape[1])]
+
+                else:
+                    pred = [recon(data_cumsum[:, i], schedule_cumsum[:, i], angles) for i in range(data.shape[1])]
             pred = torch.stack(pred, dim=-4)
 
         if args.model in mixing_models:
             _seq_nll_mix = nll_mixture(
                 pred[:, :, :-1].contiguous(), data[:, 1:], schedule[1:], angles
             ).squeeze(-1)
-            all_seq_nll_mix.append(_seq_nll_mix.detach().cpu())
-            pred = pred.mean(dim=0)  # average over samples for remaining metrics
+            # all_seq_nll_mix.append(_seq_nll_mix.detach().cpu())
+            mean_pred = pred.mean(dim=0)  # average over samples for remaining metrics
+            abs_error = torch.abs(mean_pred - images_lr.unsqueeze(1))
 
-        _rmse = rmse(pred, images_lr.unsqueeze(1), circle_mask=True).squeeze(-1)
-        _psnr = psnr(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1)
-        _ssim = ssim(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1)
-        _seq_nll = nll(pred[:, :-1].contiguous(), data[:, 1:], schedule[1:], angles).sum((-1,-2)).squeeze(-1)
-        _nll = nll(pred.unsqueeze(2), data.unsqueeze(1), schedule, angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2) 
+            res['seq_nll_mix'].append(_seq_nll_mix.detach().cpu())
 
-        all_psnr.append(_psnr.detach().cpu())
-        all_rmse.append(_rmse.detach().cpu())
-        all_ssim.append(_ssim.detach().cpu())
-        all_index.append(torch.as_tensor(indices).view(-1).cpu())
-        all_seed.append(torch.as_tensor(seed).view(-1).cpu())
+            for _delta in args.delta:
+                for ci_fun, ci_name in [(percentile_ci, 'percentile'), (gaussian_ci, 'gaussian'), (basic_ci, 'basic')]:
+                    lo, hi = ci_fun(pred, _delta)
+
+                    _coverage = coverage(lo, hi, images_lr.unsqueeze(1)).squeeze(-1)
+                    _error_correlation = error_correlation(hi - lo, abs_error).squeeze(-1)
+                    _error_r2 = error_r2(hi - lo, abs_error).squeeze(-1)
+                    res[f'uq_coverage_{ci_name}_{_delta}'].append(_coverage.detach().cpu())
+                    res[f'uq_error_correlation_{ci_name}_{_delta}'].append(_error_correlation.detach().cpu())
+                    res[f'uq_error_r2_{ci_name}_{_delta}'].append(_error_r2.detach().cpu())
+
+            # all subsequent metrics use point prediction
+            pred = mean_pred
+
+        res['rmse'].append(rmse(pred, images_lr.unsqueeze(1), circle_mask=True).squeeze(-1).detach().cpu())
+        res['psnr'].append(psnr(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
+        res['ssim'].append(ssim(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
+        res['seq_nll'].append(nll(pred[:, :-1].contiguous(), data[:, 1:], schedule[1:], angles).sum((-1,-2)).squeeze(-1).detach().cpu())
+        res['nll'].append(nll(pred.unsqueeze(2), data.unsqueeze(1), schedule, angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu())
+        res['seed'].append(torch.as_tensor(seed).view(-1).cpu())
+        res['index'].append(torch.as_tensor(indices).view(-1).cpu())
         
-        all_seq_nll.append(_seq_nll.detach().cpu())
-        all_nll.append(_nll.detach().cpu())
 
-    # stack all batches -> (N_samples, N_steps)
-    psnr_tensor = torch.cat(all_psnr, dim=0)   # (N_samples, N_steps)
-    rmse_tensor = torch.cat(all_rmse, dim=0)   # (N_samples, N_steps)
-    ssim_tensor = torch.cat(all_ssim, dim=0)   # (N_samples, N_steps)
-    index_tensor = torch.cat(all_index, dim=0) # (N_samples,)
-    seed_tensor = torch.cat(all_seed, dim=0)   # (N_samples,)
-    N_samples, N_steps = psnr_tensor.shape
-    seq_nll_tensor = torch.cat(all_seq_nll, dim=0)     # (N_samples - 1, N_steps)
-    nll_tensor = torch.cat(all_nll, dim=0)         # (N_samples, N_steps)
+    # stack all results
+    for k in res:
+        res[k] = torch.cat(res[k], dim=0)
 
     # Insert NaN values in front to match shape (N_samples, N_steps)
-    seq_nll_tensor = torch.cat([torch.full((N_samples, 1), 0.), seq_nll_tensor], dim=1)
+    N_samples, N_steps = res['psnr'].shape
+    res['seq_nll'] = torch.cat([torch.full((N_samples, 1), 0.), res['seq_nll']], dim=1)
 
-    data_vars = {
-            "psnr": (["sample", "step"], psnr_tensor.numpy()),
-            "rmse": (["sample", "step"], rmse_tensor.numpy()),
-            "ssim": (["sample", "step"], ssim_tensor.numpy()),
-            "nll": (["sample", "step"], nll_tensor.numpy()),
-            "seq_nll": (["sample", "step"], seq_nll_tensor.numpy()),
-    }
+    if 'seq_nll_mix' in res:
+        # seq_nll_mix_tensor = torch.cat(res['seq_nll_mix'], dim=0)  # expected (N_samples, N_steps-1)
+        res['seq_nll_mix'] = torch.cat(
+            [torch.full((N_samples, 1), 0., dtype=res['seq_nll_mix'].dtype), res['seq_nll_mix']],
+            dim=1,
+        )
+    data_vars = { k : (["sample", "step"], v.numpy()) for k, v in res.items() if k in ['psnr', 'rmse', 'ssim', 'nll', 'seq_nll', 'seq_nll_mix'] or k.startswith('uq_') }
 
     # First build a sample/step dataset, then reshape to (dataset, index, seed, step, model)
     ds = xr.Dataset(
@@ -790,8 +872,8 @@ if __name__ == "__main__":
         coords={
             "sample": np.arange(N_samples),
             "step": np.arange(N_steps),
-            "index": ("sample", index_tensor.numpy()),
-            "seed": ("sample", seed_tensor.numpy()),
+            "index": ("sample", res["index"].numpy()),
+            "seed": ("sample", res["seed"].numpy()),
         },
     )
     # Turn (sample) into a MultiIndex of (index, seed) and unstack -> dims (index, seed, step)
@@ -799,28 +881,6 @@ if __name__ == "__main__":
     ds = ds.expand_dims(dataset=[args.dataset], model=[model_name])
     ds = ds.transpose("dataset", "index", "seed", "step", "model")
 
-    # Optional: add mixture NLL as a separate "model" entry (model=f"{args.model}_mix")
-    if all_seq_nll_mix:
-        seq_nll_mix_tensor = torch.cat(all_seq_nll_mix, dim=0)  # expected (N_samples, N_steps-1)
-        seq_nll_mix_tensor = torch.cat(
-            [torch.full((N_samples, 1), 0., dtype=seq_nll_mix_tensor.dtype), seq_nll_mix_tensor],
-            dim=1,
-        )
-
-        ds_mix = xr.Dataset(
-            data_vars={"seq_nll": (["sample", "step"], seq_nll_mix_tensor.numpy())},
-            coords={
-                "sample": np.arange(N_samples),
-                "step": np.arange(N_steps),
-                "index": ("sample", index_tensor.numpy()),
-                "seed": ("sample", seed_tensor.numpy()),
-            },
-        )
-        ds_mix = ds_mix.set_index(sample=("index", "seed")).unstack("sample")
-        ds_mix = ds_mix.expand_dims(dataset=[args.dataset], model=[f"{args.model}_mix"])
-        ds_mix = ds_mix.transpose("dataset", "index", "seed", "step", "model")
-
-        ds = xr.concat([ds, ds_mix], dim="model")
 
     # Add schedule intensity as value, indexed by step
     ds["intensity"] = ("step", total_intensities.cpu().numpy())
