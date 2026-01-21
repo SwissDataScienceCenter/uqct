@@ -27,7 +27,7 @@ def rmse(
 def psnr(
     prediction: torch.Tensor,
     target: torch.Tensor,
-    max_pixel: float | None = 1.0,
+    data_range: float = 1.0,
     circle_mask: bool = True,
 ) -> torch.Tensor:
     """
@@ -35,7 +35,7 @@ def psnr(
     Args:
         prediction (torch.Tensor): (..., H, W) Predicted image tensor.
         target (torch.Tensor): (..., H, W) Target image tensor.
-        max_pixel (float | None): Maximum pixel value.
+        data_range (float): Maximum pixel value.
         circle_mask (bool): If True, applies a circular mask to both images before computing PSNR.
     Returns:
         torch.Tensor: PSNR values for each image in the batch. Output shape: (...)
@@ -44,10 +44,8 @@ def psnr(
         mask = circular_mask(target.shape[-1], device=target.device)
         target = target * mask
         prediction = prediction * mask
-    if max_pixel is None:
-        max_pixel = torch.max(target)  # type: ignore
     mse = torch.mean((target - prediction) ** 2, dim=(-2, -1))
-    psnr = 10 * torch.log10(max_pixel**2 / mse)  # type: ignore
+    psnr = 10 * torch.log10(data_range**2 / mse)  # type: ignore
     return psnr  # type: ignore
 
 
@@ -84,7 +82,6 @@ def ssim(
 def get_metrics(
     prediction: torch.Tensor,
     target: torch.Tensor,
-    max_pixel: float | None = 1.0,
     circle_mask: bool = True,
     data_range: float = 1.0,
 ) -> dict[str, torch.Tensor]:
@@ -106,15 +103,10 @@ def get_metrics(
         target = target.unsqueeze(-3)
 
     return {
-        "PSNR": psnr(prediction, target, max_pixel, circle_mask),
-        "RMSE": rmse(prediction, target, circle_mask),
+        "PSNR": psnr(prediction, target, data_range=data_range, circle_mask=circle_mask),
+        "RMSE": rmse(prediction, target, circle_mask=circle_mask),
         "L1": torch.mean(torch.abs(target - prediction), dim=(-2, -1)),
-        "SS": ssim(
-            prediction,
-            target,
-            data_range=data_range,
-            circle_mask=circle_mask,
-        ),
+        "SS": ssim(prediction, target, data_range=data_range, circle_mask=circle_mask),
     }
 
 
