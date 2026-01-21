@@ -184,7 +184,11 @@ def run(
         if section not in full_config:
             click.echo(f"Section [{section}] not found in settings.toml")
             sys.exit(1)
-        settings = full_config[section]
+        settings = full_config[section].copy()
+
+        # Merge model-specific configs (mle, map, unet, diffusion) which live in [eval]
+        if "eval" in full_config:
+            settings.update(full_config["eval"])
 
     schedule_length = settings.get("schedule_length", 32)
 
