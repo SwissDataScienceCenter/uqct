@@ -13,7 +13,13 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from uqct.ct import Experiment, nll_mixture_angle_schedule, sample_observations
+from uqct.ct import (
+    Experiment,
+    nll,
+    nll_mixture,
+    nll_mixture_angle_schedule,
+    sample_observations,
+)
 from uqct.datasets.utils import get_dataset
 from uqct.logging import get_logger
 from uqct.metrics import get_metrics
@@ -66,8 +72,10 @@ class Metrics:
     rmse: list[list[float]]
     l1: list[list[float]]
     nll_pred: list[list[float]]
+    nll_pred_mix: list[list[float]]
+    nll_pred_last: list[float]
+    nll_pred_last_mix: list[float]
     nll_gt: list[list[float]]
-    nll_pred_mix: list[list[float]] | None = None
 
 
 @dataclass
@@ -79,7 +87,7 @@ class Run:
     preds: np.ndarray
 
     run_id: str = field(default_factory=lambda: str(uuid4()))
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime | str = field(default_factory=datetime.now)
     slurm_job_id: str | int | None = None
     extra: dict[str, Any] | None = None
 
@@ -106,7 +114,11 @@ class Run:
             # v is list[list[float]]
             # Flatten and calculate mean
             try:
-                values = [item for sublist in v for item in sublist]
+                if isinstance(v[0], list):
+                    values = [sublist[-1] for sublist in v]
+                else:
+                    values = v
+
                 if values:
                     mean_val = sum(values) / len(values)
                     s.append(f"    {k}: {mean_val:.4f}")
@@ -122,9 +134,9 @@ class Run:
 
     def dump_parquet(self) -> None:
         # Load metrics into dataframe
+        n_images = self.ct_settings.image_end_index - self.ct_settings.image_start_index
         metrics_dict = asdict(self.metrics)
         df = pd.DataFrame(metrics_dict)
-        n_images = self.ct_settings.image_end_index - self.ct_settings.image_start_index
         for k, v in asdict(self.ct_settings).items():
             if isinstance(v, list):
                 df[k] = n_images * [v]
@@ -266,6 +278,7 @@ def evaluate_and_save(
     model_name: str,
     seed: int,
     extra_metadata: dict[str, Any] | None = None,
+    timestamp: datetime | str | None = None,
 ) -> None:
     """
     Evaluates predictions against ground truth and saves the results.
@@ -279,6 +292,7 @@ def evaluate_and_save(
         model_name: Name of the model
         seed: Random seed
         extra_metadata: Additional metadata to save
+        timestamp: Optional timestamp to use for the run (default: datetime.now())
     """
     n_gt = len(gt)
 
@@ -332,10 +346,6 @@ def evaluate_and_save(
 
         preds_nll_mix = preds_nll_mix.contiguous()
 
-        # nll_mixture_angle_schedule expects (..., s, n_preds, H, W)
-        # Our preds_nll is (N, s, R, H, W).
-        # We pass it directly. R corresponds to n_preds.
-
         nlls_pred_mix = nll_mixture_angle_schedule(
             preds_nll_mix,
             experiment.counts,
@@ -351,6 +361,21 @@ def evaluate_and_save(
             experiment.angles,
             schedule,
             reduce=False,
+        )
+
+        preds_last = preds_nll_mix.mean(-3)[:, -1].contiguous()
+
+        nlls_pred_last = nll(
+            preds_last,
+            experiment.counts[..., schedule[0] :, :],
+            experiment.intensities[..., schedule[0] :, :],
+            experiment.angles[schedule[0] :],
+        ).sum((1, 2))
+        nlls_pred_last_mix = nll_mixture(
+            preds_nll_mix[:, -1].contiguous(),
+            experiment.counts[..., schedule[0] :, :],
+            experiment.intensities[..., schedule[0] :, :],
+            experiment.angles[schedule[0] :],
         )
 
         # For GT, we treat it as single replicate (R=1).
@@ -378,6 +403,8 @@ def evaluate_and_save(
         l1=metric2lists["L1"],
         nll_pred=nlls_pred.tolist(),
         nll_pred_mix=nlls_pred_mix.tolist(),
+        nll_pred_last=nlls_pred_last.tolist(),
+        nll_pred_last_mix=nlls_pred_last_mix.tolist(),
         nll_gt=nlls_gt.tolist(),
     )
 
@@ -393,6 +420,7 @@ def evaluate_and_save(
         preds=preds.cpu().numpy(),
         slurm_job_id=slurm_id,
         extra=extra_metadata,
+        **({"timestamp": timestamp} if timestamp is not None else {}),
     )
     logger.info(run)
     run.dump_parquet()

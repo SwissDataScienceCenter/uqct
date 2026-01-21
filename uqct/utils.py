@@ -149,7 +149,7 @@ def load_runs(
     dataset: str,
     intensity: float,
     sparse: bool,
-    jobids: tuple[int, ...],
+    job_ids: tuple[int, ...],
 ) -> dict[str, pd.DataFrame]:
     """
     Scans the runs directory and returns the most recent run for each model
@@ -190,6 +190,8 @@ def load_runs(
 
     # Iterate over all parquet files
     for file_path in files:
+        if file_path.name.startswith("bootstrap"):
+            continue
         try:
             # Filename format: model:dataset:intensity:sparse:range:timestamp.parquet
             # Example: fbp:lung:10000.0:True:0-10:2025-12-08...
@@ -213,7 +215,7 @@ def load_runs(
             # We need to ensure it's the right run configuration
             df = pd.read_parquet(file_path)
             job_id = int(df["slurm_job_id"][0])  # type: ignore
-            if df.empty or job_id not in jobids:
+            if df.empty or job_id not in job_ids:
                 logger.debug(f"Skipping {file_path.name}")
                 continue
 

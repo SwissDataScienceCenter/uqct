@@ -82,9 +82,6 @@ def get_dataset(
     dataset = dataset_class(**kwargs)
     torch.manual_seed(0)
     perm = torch.randperm(len(dataset))
-    with open(f"{name}_perm.txt", "w") as f:
-        for idx in perm:
-            f.write(f"{idx}\n")
     train_set = Subset(dataset, perm[: round(0.95 * len(dataset))])  # type: ignore
     test_set = Subset(dataset, perm[round(0.95 * len(dataset)) :])  # type: ignore
     return train_set, test_set  # type: ignore

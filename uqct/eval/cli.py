@@ -4,6 +4,7 @@ from typing import Any, Literal
 
 import click
 
+import torch
 from uqct.datasets.utils import DatasetName
 from uqct.eval.bootstrapping import run_bootstrapping
 from uqct.eval.diffusion import run_diffusion
@@ -111,15 +112,14 @@ def build_bootstrapping_grid(settings: dict[str, Any]) -> list[dict[str, Any]]:
     """Build the bootstrapping job grid (Unchunked)."""
     datasets = settings["datasets"]
     intensities = settings["total_intensity_values"]
-    seed_range = settings.get("seed_range", [0, 1])
-    seeds = list(range(seed_range[0], seed_range[1]))
     full_image_range = tuple(settings["image_range"])
-    # No chunking for bootstrapping as per throughput optimization
 
     bs_cfg = settings.get("bootstrapping", {})
     methods = bs_cfg.get("methods", ["fbp"])
     if "intensities" in bs_cfg:
         intensities = bs_cfg["intensities"]
+    seed_range = bs_cfg.get("seed_range", [0, 1])
+    seeds = list(range(seed_range[0], seed_range[1]))
 
     grid = []
     # Order: Dataset -> Intensity -> Seeds -> Method
@@ -163,11 +163,18 @@ def cli():
     show_default=True,
     help="Allow duplicate runs. If False, skips if run exists.",
 )
+@click.option(
+    "--recompute-metrics",
+    is_flag=True,
+    default=False,
+    help="Recompute metrics using existing predictions.",
+)
 def run(
     model: Literal["fbp", "mle", "map", "unet", "unet_ensemble", "diffusion"] | None,
     job_id: int | None,
     sparse: bool,
     duplicate: bool,
+    recompute_metrics: bool,
 ):
     """Run evaluation for a specific model and configuration."""
 
@@ -213,7 +220,9 @@ def run(
             pass
 
         click.echo(f"Running Job ID {job_id} (Model: {task['model']})")
-        execute_task(task, sparse, schedule_length, settings, duplicate)
+        execute_task(
+            task, sparse, schedule_length, settings, duplicate, recompute_metrics
+        )
 
     else:
         # Local execution - run all or filter
@@ -226,7 +235,9 @@ def run(
             click.echo(
                 f"\n--- Local Job {i + 1}/{len(tasks_to_run)}: {task['model']} ---"
             )
-            execute_task(task, sparse, schedule_length, settings, duplicate)
+            execute_task(
+                task, sparse, schedule_length, settings, duplicate, recompute_metrics
+            )
 
 
 def execute_task(
@@ -235,6 +246,7 @@ def execute_task(
     schedule_length: int,
     settings: dict[str, Any],
     duplicate: bool,
+    recompute_metrics: bool,
 ):
     """
     Recursively unfolds lists in `task` dict to call _dispatch with scalar values.
@@ -251,7 +263,9 @@ def execute_task(
             sub = task.copy()
             sub["dataset"] = d
             sub.pop("datasets", None)
-            execute_task(sub, sparse, schedule_length, settings, duplicate)
+            execute_task(
+                sub, sparse, schedule_length, settings, duplicate, recompute_metrics
+            )
         return
     else:
         dataset = ds_arg
@@ -263,7 +277,9 @@ def execute_task(
             sub = task.copy()
             sub["intensity"] = i
             sub.pop("intensities", None)
-            execute_task(sub, sparse, schedule_length, settings, duplicate)
+            execute_task(
+                sub, sparse, schedule_length, settings, duplicate, recompute_metrics
+            )
         return
     else:
         intensity = int_arg
@@ -275,7 +291,9 @@ def execute_task(
             sub = task.copy()
             sub["seed"] = s
             sub.pop("seeds", None)
-            execute_task(sub, sparse, schedule_length, settings, duplicate)
+            execute_task(
+                sub, sparse, schedule_length, settings, duplicate, recompute_metrics
+            )
         return
     else:
         seed = seed_arg
@@ -287,7 +305,9 @@ def execute_task(
             sub = task.copy()
             sub["image_range"] = r
             sub.pop("image_ranges", None)
-            execute_task(sub, sparse, schedule_length, settings, duplicate)
+            execute_task(
+                sub, sparse, schedule_length, settings, duplicate, recompute_metrics
+            )
         return
     else:
         image_range = rng_arg
@@ -302,14 +322,15 @@ def execute_task(
     try:
         _dispatch(
             model=model,
-            dataset=dataset,
-            intensity=intensity,
+            dataset=dataset,  # type: ignore
+            intensity=intensity,  # type: ignore
             sparse=sparse,
-            image_range=image_range,
+            image_range=image_range,  # type: ignore
             schedule_length=schedule_length,
             settings=settings,
             duplicate=duplicate,
-            seed=seed,
+            recompute_metrics=recompute_metrics,
+            seed=seed,  # type: ignore
         )
     except Exception as e:
         # Log error but try to continue if this is part of a larger loop?
@@ -333,17 +354,100 @@ def _dispatch(
     schedule_length: int,
     settings: dict[str, Any],
     duplicate: bool,
+    recompute_metrics: bool,
     seed: int,
 ):
+    import h5py
+
+    from uqct.eval.run import evaluate_and_save, setup_experiment
     from uqct.utils import get_results_dir
 
     # Check for existing run
-    if not duplicate:
-        results_dir = get_results_dir() / "runs"
-        # Format: model:dataset:intensity:sparse:start-end:seed:timestamp.parquet
-        pattern = f"{model}:{dataset}:{intensity}:{sparse}:{image_range[0]}-{image_range[1]}:{seed}:*.parquet"
-        files = list(results_dir.glob(pattern))
-        if files:
+    results_dir = get_results_dir() / "runs"
+    # Format: model:dataset:intensity:sparse:start-end:seed:timestamp.parquet
+    prefix = f"{model}:{dataset}:{intensity}:{sparse}:{image_range[0]}-{image_range[1]}:{seed}:"
+    pattern = f"{prefix}*.parquet"
+    files = list(results_dir.glob(pattern))
+
+    if files:
+        if recompute_metrics:
+            # Pick the latest one just in case there are multiple (though duplicate=False prevents that usually)
+            files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+            target_metric_file = files[0]
+            timestamp_str = target_metric_file.name[len(prefix) : -len(".parquet")]
+            h5_file = target_metric_file.with_suffix(".h5")
+
+            if not h5_file.exists():
+                click.echo(
+                    f"Warning: Found metrics file {target_metric_file} but no matching h5 file {h5_file}. Skipping recompute."
+                )
+                return
+
+            click.echo(
+                f"Recomputing metrics for {model} (Using existing predictions from {h5_file})"
+            )
+
+            # Load predictions
+            with h5py.File(h5_file, "r") as f:
+                preds = torch.from_numpy(f["preds"][:])
+
+            # Setup experiment (needed for GT and Experiment object)
+            # Common parameters from settings
+            n_angles = settings.get("n_angles", 200)
+            schedule_start = settings.get("schedule_start", 10)
+            schedule_type = settings.get("schedule_type", "exp")
+            max_angle = settings.get("max_angle", 180)
+
+            # For recompute, we need to load preds to device if we want to be consistent, but evaluate_and_save expects tensor.
+            # Usually preds are on CPU when loaded. evaluate_and_save handles it?
+            # evaluate_and_save calls get_metrics which expects tensors.
+            # verify device.
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            preds = preds.to(device)
+
+            # Re-run setup to get GT and Experiment
+            gt, experiment, schedule = setup_experiment(
+                dataset,
+                image_range,
+                intensity,
+                sparse,
+                seed,
+                schedule_length,
+                schedule_start,
+                schedule_type,
+                n_angles,
+                max_angle,
+            )
+
+            ct_settings_kwargs = {
+                "dataset": dataset,
+                "total_intensity": intensity,
+                "sparse": sparse,
+                "image_start_index": image_range[0],
+                "image_end_index": image_range[1],
+            }
+            if schedule is not None:
+                ct_settings_kwargs["angle_schedule"] = schedule.tolist()
+
+            from uqct.eval.run import CTSettings
+
+            ct_settings = CTSettings(**ct_settings_kwargs)
+
+            # Evaluate and save (overwriting logic is inside dump_parquet if we reuse timestamp)
+            evaluate_and_save(
+                preds=preds,
+                gt=gt,
+                experiment=experiment,
+                schedule=schedule,
+                ct_settings=ct_settings,
+                model_name=model,
+                seed=seed,
+                extra_metadata=None,  # We lose extra metadata if we don't load it from old parquet...
+                timestamp=timestamp_str,
+            )
+            return
+
+        elif not duplicate:
             click.echo(f"Skipping {model} run (found {len(files)} existing files).")
             return
 
@@ -484,7 +588,7 @@ def bootstrapping(job_id: int | None, sparse: bool):
         sys.exit(1)
 
     bs_cfg = settings["bootstrapping"]
-    n_bootstraps = bs_cfg.get("n_bootstraps", 20)
+    n_bootstraps = bs_cfg.get("n_bootstraps", 10)
 
     # Build Grid
     grid = build_bootstrapping_grid(settings)
@@ -508,10 +612,7 @@ def bootstrapping(job_id: int | None, sparse: bool):
 def execute_bootstrapping_task(task, sparse, settings, n_bootstraps):
     # Common parameters
     n_angles = settings.get("n_angles", 200)
-    schedule_start = settings.get("schedule_start", 10)
-    schedule_type = settings.get("schedule_type", "exp")
     max_angle = settings.get("max_angle", 180)
-    schedule_length = settings.get("schedule_length", 32)
 
     run_bootstrapping(
         dataset=task["dataset"],
@@ -520,13 +621,9 @@ def execute_bootstrapping_task(task, sparse, settings, n_bootstraps):
         image_range=task["image_range"],
         seed=task["seed"],
         n_angles=n_angles,
-        schedule_start=schedule_start,
-        schedule_type=schedule_type,
-        schedule_length=schedule_length,
         max_angle=max_angle,
         n_bootstraps=n_bootstraps,
         method=task["method"],
-        comparison=False,
     )
 
 

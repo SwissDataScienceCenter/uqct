@@ -36,18 +36,28 @@ def get_data(
 ) -> np.ndarray:
     files = sorted(glob(f"results/runs/{predictor}:{dataset}*.parquet"))
     toti2psnr = defaultdict(list)
+    not_found = []
 
     for total_intensity in total_intensities:
         for gt_range in gt_ranges:
             for seed in seeds:
                 prefix = f"results/runs/{predictor}:{dataset}:{total_intensity}:True:{gt_range[0]}-{gt_range[1]}:{seed}"
                 matches = [x for x in files if x.startswith(prefix)]
-                assert (
-                    len(matches) == 1
-                ), f"Not exactly one match for {total_intensity=}, {gt_range=}, {seed=}, {prefix=}: {matches=}"
+                if not matches:
+                    not_found.append((total_intensity, gt_range, seed, prefix))
+                    continue
+
+                # assert (
+                #     len(matches) == 1
+                # ), f"Not exactly one match for {total_intensity=}, {gt_range=}, {seed=}, {prefix=}: {matches=}"
                 psnr = np.array([x for x in pd.read_parquet(matches[0])["psnr"]])
                 toti2psnr[total_intensity].append(psnr)
+    if len(not_found) > 0:
+        print("Not found:")
+        for x in not_found:
+            print(x)
     out = np.array(list(toti2psnr.values()))[..., -1]
+
     if len(gt_ranges) > 1:
         out = np.permute_dims(out, (0, 2, 1))
     out = out.reshape(out.shape[0], -1)

@@ -19,9 +19,6 @@ class TIFFWrapper:
                 for filename in os.listdir(path)
                 if filename.endswith(".tiff") or filename.endswith(".tif")
             ]
-            with open("lamino.txt", "w") as f:
-                for filename in folder:
-                    f.write(filename + "\n")
         else:
             folder = [os.path.basename(path)]
             path = os.path.dirname(path)

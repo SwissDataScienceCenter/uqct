@@ -36,8 +36,6 @@ class DistanceRun:
     seed: int
     # Results
     uncertainty_mean: float
-    projection_steps_avg: float
-    optimization_steps_avg: float
     # Metadata
     initial_lr: float
 
@@ -142,8 +140,9 @@ def find_prediction_files(
     runs_dir = get_results_dir() / "runs"
 
     # format: {model}:{dataset}:{total_intensity}:{sparse}:{start}-{end}:{seed}:{timestamp}.h5
-    pattern = f"{model}:{dataset}:*:{sparse}:*:{seed}:*.h5"
+    pattern = f"{model}:{dataset}:{total_intensity}:{sparse}:*:{seed}:*.h5"
     candidates = list(runs_dir.glob(pattern))
+    breakpoint()
 
     req_start, req_end = image_range
 
@@ -390,8 +389,8 @@ def pairwise_distance_maximization(
     rotations: int = 1,
     patience: int = 5,
     max_steps: int = 10000,
-    use_l2_grad: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, dict]:
+    use_l2_grad: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Finds two images (theta1, theta2) on the boundary of the confidence set that are maximally distant.
     Recycles distance_maximization by alternating the reference 'pred'.
@@ -453,11 +452,7 @@ def pairwise_distance_maximization(
                 best_theta1[improved] = theta1[improved]
                 best_theta2[improved] = theta2[improved]
 
-    return (
-        best_theta1,
-        best_theta2,
-        {"steps": max_steps},
-    )
+    return best_theta1, best_theta2
 
 
 def check_confidence_set_violation(
@@ -509,14 +504,15 @@ def check_confidence_set_violation(
     default=2.0,
     help="Initial learning rate/step size for distance maximization (pixel values)",
 )
-@click.option(
-    "--projection-lr",
-    type=float,
-    default=1e-2,
-    help="Learning rate for initial projection",
-)
+# @click.option(
+#     "--projection-lr",
+#     type=float,
+#     default=1e-2,
+#     help="Learning rate for initial projection",
+# )
 @click.option("--patience", type=int, default=5)
 @click.option("--max-steps", type=int, default=1000)
+@click.option("--last-only", default=False, is_flag=True)
 def main(
     dataset,
     model,
@@ -525,9 +521,10 @@ def main(
     seed,
     image_range,
     lr,
-    projection_lr,
+    # projection_lr,
     patience,
     max_steps,
+    last_only,
 ):
     schedule_length = 32
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -537,7 +534,7 @@ def main(
     )
 
     # Load and concatenate
-    preds_list = []
+    # preds_list = []
     dfs_list = []
     counts_list = []
     intensities_list = []
@@ -549,15 +546,15 @@ def main(
     # Keep track of coverage
     loaded_start = pred_files[0][1][0]
 
-    logger.info(
-        f"Loading predictions from {len(pred_files)} files: {[p.name for p, _ in pred_files]}"
-    )
+    # logger.info(
+    #     f"Loading predictions from {len(pred_files)} files: {[p.name for p, _ in pred_files]}"
+    # )
 
     for i, (pred_path, (file_start, file_end)) in enumerate(pred_files):
         # 1. Load Preds & DF
-        with h5py.File(pred_path, "r") as f:
-            chunk_preds = torch.from_numpy(f["preds"][:])  # type: ignore
-            preds_list.append(chunk_preds)
+        # with h5py.File(pred_path, "r") as f:
+        #     chunk_preds = torch.from_numpy(f["preds"][:])  # type: ignore
+        #     preds_list.append(chunk_preds)
 
         pq_path = pred_path.with_suffix(".parquet")
         if not pq_path.exists():
@@ -587,7 +584,7 @@ def main(
     assert experiment_sparse is not None
 
     # Concatenate
-    preds = torch.cat(preds_list, dim=0)
+    # preds = torch.cat(preds_list, dim=0)
     df = pd.concat(dfs_list, ignore_index=True)
 
     # Concatenate experiment data
@@ -607,12 +604,12 @@ def main(
     rel_start = req_start - loaded_start
     rel_end = rel_start + (req_end - req_start)
 
-    if rel_start < 0 or rel_end > preds.shape[0]:
-        raise ValueError(
-            f"Calculated slice [{rel_start}:{rel_end}] is out of bounds for combined preds shape {preds.shape} (Start {loaded_start}, Req {image_range})"
-        )
+    # if rel_start < 0 or rel_end > preds.shape[0]:
+    #     raise ValueError(
+    #         f"Calculated slice [{rel_start}:{rel_end}] is out of bounds for combined preds shape {preds.shape} (Start {loaded_start}, Req {image_range})"
+    #     )
 
-    preds = preds[rel_start:rel_end]
+    # preds = preds[rel_start:rel_end]
     # Slice DF as well to match preds
     # Note: df usually has one row per image. concat order matches preds order.
     df = df.iloc[rel_start:rel_end].reset_index(drop=True)
@@ -629,32 +626,29 @@ def main(
         sparse=full_experiment.sparse,
     )
 
-    req_range_str = f"{req_start}-{req_end}"
+    # req_range_str = f"{req_start}-{req_end}"
 
-    logger.info(f"Sliced predictions to {req_range_str}, new shape: {preds.shape}")
+    # logger.info(f"Sliced predictions to {req_range_str}, new shape: {preds.shape}")
 
-    if preds.ndim == 4:
-        preds = preds.unsqueeze(2)
+    # if preds.ndim == 4:
+    #     preds = preds.unsqueeze(2)
 
-    # Using mean prediction across replicates
-    preds = preds.mean(dim=2).to(device)  # (N, S, H, W)
+    # # Using mean prediction across replicates
+    # preds = preds.mean(dim=2).to(device)  # (N, S, H, W)
 
     batch_uncertainties = []
     batch_maximizers = []
 
-    total_proj_steps = 0
-    total_opt_steps = 0
-
     # Process in batches
     batch_size = 32
-    num_images = preds.shape[0]
+    num_images = experiment.counts.shape[0]
 
     for start_idx in range(0, num_images, batch_size):
         end_idx = min(start_idx + batch_size, num_images)
 
         # Slice batch
-        p_batch = preds[start_idx:end_idx]  # (B, S, H, W)
-        B = p_batch.shape[0]
+        # p_batch = preds[start_idx:end_idx]  # (B, S, H, W)
+        # B = p_batch.shape[0]
 
         # Slice experiment for batch
         # Need to slice dim 0
@@ -671,7 +665,7 @@ def main(
 
         # Convert to tensor and threshold
         nll_pred_full = torch.tensor(
-            batch_nll_preds, device=p_batch.device, dtype=torch.float32
+            batch_nll_preds, device=device, dtype=torch.float32
         )  # (B, S_full)
         indices = (
             torch.cat([schedule[1:], torch.tensor([200], device=device)])
@@ -681,29 +675,50 @@ def main(
         nll_pred_cum = torch.cumsum(nll_pred_full, dim=-1)[..., indices]
         log_inv_delta = math.log(1.0 / 0.05)
         confcoef = nll_pred_cum + log_inv_delta
+        B, S, r = (
+            exp_slice.counts.shape[0],
+            len(schedule),
+            exp_slice.counts.shape[-1],
+        )
 
-        maximizers_batch, stats = distance_maximization(
-            p_batch,  # (B, S, H, W)
-            confcoef,
+        if last_only:
+            schedule_slice = schedule[-1].view(1)
+            confcoef_slice = confcoef[:, -1].view(B, 1)
+            p_batch_slice = (
+                torch.full((B, 1, r, r), 0.5, device=device)
+                + torch.rand(B, 1, r, r, device=device) * 0.01
+            )
+        else:
+            schedule_slice = schedule
+            confcoef_slice = confcoef
+            p_batch_slice = (
+                torch.full((B, S, r, r), 0.5, device=device)
+                + torch.rand(B, S, r, r, device=device) * 0.01
+            )
+
+        best_theta_0, best_theta_1 = pairwise_distance_maximization(
+            p_batch_slice,
+            confcoef_slice,
             exp_slice,
-            schedule,
+            schedule_slice,
             lr=lr,
             patience=patience,
             max_steps=max_steps,
-            projection_lr=projection_lr,
         )
-
         check_confidence_set_violation(
-            maximizers_batch, exp_slice, schedule, confcoef, start_idx, end_idx
+            best_theta_0, exp_slice, schedule_slice, confcoef_slice, start_idx, end_idx
+        )
+        check_confidence_set_violation(
+            best_theta_1, exp_slice, schedule_slice, confcoef_slice, start_idx, end_idx
         )
 
         # maximizers_batch: (B, S, H, W)
         # p_batch: (B, S, H, W)
-        u_p_batch = (p_batch - maximizers_batch).abs()
+        u_p_batch = (best_theta_0 - best_theta_1).abs()
         batch_uncertainties.append(u_p_batch.cpu().numpy())
-        batch_maximizers.append(maximizers_batch.cpu().numpy())
-        total_proj_steps += stats["proj_steps"] * B
-        total_opt_steps += stats["opt_steps"] * B
+        batch_maximizers.append(
+            np.stack([best_theta_0.cpu().numpy(), best_theta_1.cpu().numpy()], axis=1)
+        )
 
     batch_uncertainties = np.concatenate(batch_uncertainties, axis=0)  # (N, S, H, W)
     batch_uncertainties[
@@ -720,7 +735,7 @@ def main(
         image_start_index=req_start,
         image_end_index=req_end,
         intensity_schedule=None,
-        pred_angles=schedule.tolist(),
+        angle_schedule=schedule.tolist(),
     )
 
     # Compute mean pixel uncertainty
@@ -733,8 +748,6 @@ def main(
         model=model,
         seed=seed,
         uncertainty_mean=float(mean_u),
-        projection_steps_avg=total_proj_steps / num_images,
-        optimization_steps_avg=total_opt_steps / num_images,
         initial_lr=lr,
         uncertainty_images=batch_uncertainties,
         distance_maximizers=batch_maximizers,

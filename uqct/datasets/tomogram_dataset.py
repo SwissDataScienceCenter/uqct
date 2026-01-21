@@ -16,9 +16,6 @@ class H5Wrapper:
                 or filename.endswith(".hdf5")
                 or filename.endswith(".mat")
             ]
-            with open("lung.txt", "w") as f:
-                for filename in folder:
-                    f.write(filename + "\n")
         else:
             folder = [os.path.basename(path)]
             path = os.path.dirname(path)

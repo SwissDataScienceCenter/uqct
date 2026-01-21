@@ -14,6 +14,35 @@ from uqct.logging import get_logger
 from uqct.vis.style import MODEL_ORDER, get_style
 from uqct.eval.run import get_default_angle_schedule
 
+plt.rcParams.update(
+    {
+        "text.usetex": True,  # Use LaTeX fonts
+        "font.family": "serif",  # Matches Latex default
+        "font.serif": ["Times"],  # Times New Roman usually matches body
+        "font.size": 9,  # ICML caption size is usually 9pt
+        "axes.labelsize": 9,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "legend.fontsize": 8,
+        "figure.titlesize": 10,
+    }
+)
+
+# plt.rcParams.update(
+#     {
+#         "text.usetex": True,  # Keep LaTeX for proper math rendering
+#         "font.family": "sans-serif",  # Switch to sans-serif
+#         "font.sans-serif": ["Helvetica"],  # Helvetica is the standard print sans
+#         "font.size": 10,  # Match ICML 10pt body
+#         "axes.labelsize": 10,
+#         "axes.titlesize": 10,
+#         "legend.fontsize": 8,  # 8pt or 9pt for legend
+#         "xtick.labelsize": 8,  # 8pt for ticks
+#         "ytick.labelsize": 8,
+#         "figure.figsize": (6.75, 2.5),  # Full width
+#     }
+# )
+
 
 logger = get_logger(__name__)
 
@@ -157,14 +186,12 @@ def process_metrics(
     return pd.DataFrame(processed_records)
 
 
-def plot_scaling_metric(
-    stats_df: pd.DataFrame, metric: str, output_path: Path, title_suffix: str = ""
-):
+def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     """Generic scaling plotter."""
     if stats_df.empty:
         return
 
-    plt.figure(figsize=(8, 6))
+    # plt.figure(figsize=(8, 6))
     available_models = set(stats_df["model"].unique())
     models = [m for m in MODEL_ORDER if m in available_models]  # Enforce order
 
@@ -173,16 +200,14 @@ def plot_scaling_metric(
         if m not in models:
             models.append(m)
 
-    markers = ["o", "s", "^", "D", "v", "<", ">"]
-    linestyles = ["-", "--", "-.", ":"]
+    # linestyles = ["-", "--", "-.", ":"]
 
     for i, model in enumerate(models):
         sub = stats_df[stats_df["model"] == model].sort_values("intensity")
         if sub.empty:
             continue
 
-        marker = markers[i % len(markers)]
-        ls = linestyles[i % len(linestyles)]
+        # ls = linestyles[i % len(linestyles)]
 
         style = get_style(model)
         color = style["color"]
@@ -193,8 +218,8 @@ def plot_scaling_metric(
             sub["intensity"],
             sub["mean"],
             label=label,
-            marker=marker,
-            linestyle=ls,
+            marker="x",
+            # linestyle=ls,
             color=color,
             alpha=0.9,
         )
@@ -214,6 +239,8 @@ def plot_scaling_metric(
 
     # Label formatting
     pretty_name = metric.upper()
+    if metric == "psnr":
+        pretty_name = "PSNR (dB)"
     if metric == "rate":
         pretty_name = "Crossover Rate"
     if metric == "nll":
@@ -224,13 +251,13 @@ def plot_scaling_metric(
     if metric == "nll_sum":
         plt.yscale("log")
 
-    plt.ylabel(f"{pretty_name} (Mean ± SEM)")
+    plt.ylabel(f"{pretty_name}")
 
     # Legend Inside
     plt.legend(loc="best")
     plt.grid(True, which="both", ls="-", alpha=0.4)
     plt.tight_layout()
-    plt.savefig(output_path)
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
     # logger.info(f"Saved {metric} plot to {output_path}")
     plt.close()
 
@@ -349,8 +376,15 @@ def save_tables(
 @click.option(
     "--aggregation",
     type=click.Choice(["last", "average", "schedule"]),
-    default="average",
+    default="last",
     help="Aggregation method for scalar metrics (avg=weighted expanded, schedule=simple mean, last=final value).",
+)
+@click.option("--job-ids", default=tuple(), multiple=True, help="Job ids to filter by.")
+@click.option(
+    "--filter-intensities",
+    is_flag=True,
+    default=False,
+    help="Filter total intensities to range [1e6, 1e9].",
 )
 def main(
     runs_dir: Optional[Path],
@@ -359,6 +393,8 @@ def main(
     dataset: Optional[str],
     sparse: Optional[bool],
     aggregation: str,
+    job_ids: tuple[str],
+    filter_intensities: bool,
 ):
     """Plot scaling laws for all metrics."""
 
@@ -379,13 +415,26 @@ def main(
         # But load_runs does aggregation.
         logger.info("Loading runs...")
         # Note: load_runs returns 'clean' dataframes (1 row per image)
-        runs_dict = load_runs(runs_dir, dataset, None, sparse)
+        runs_dict = load_runs(
+            runs_dir, dataset, None, sparse, tuple(int(j) for j in job_ids)
+        )
         if runs_dict:
             df = pd.concat(runs_dict.values(), ignore_index=True)
 
     if df.empty:
         logger.warning("No data found.")
         return
+
+    if filter_intensities:
+        logger.info("Filtering intensities to range [1e6, 1e9]...")
+        # Ensure total_intensity is numeric
+        if "total_intensity" in df.columns:
+            df = df[
+                (df["total_intensity"] >= 1e6 - 1e-1)
+                & (df["total_intensity"] <= 1e9 + 1e-1)
+            ]
+        else:
+            logger.warning("Column 'total_intensity' not found, skipping filter.")
 
     # Process metrics
     # Extract final step for scaling plots
@@ -434,33 +483,121 @@ def main(
             # plot_correlations uses `correlation_...` filenames.
             # I will use `scaling_{m}.png`.
             plot_path = target_dir / f"scaling_{m}_{aggregation}.pdf"
-            plot_scaling_metric(stats, m, plot_path, title_suffix=f"({ds}, {suffix})")
+            plot_scaling_metric(stats, m, plot_path)
 
-    # --- 2. Global Plots ---
-    logger.info("Generating Global Plots...")
+    # --- 2. Global Plots (3 Columns: Lamino, Composite, Lung) ---
+    logger.info("Generating Global Plots (Shared Layout)...")
 
     global_dir = output_dir / "global" / "scaling"
     global_dir.mkdir(parents=True, exist_ok=True)
 
+    datasets_order = ["lamino", "composite", "lung"]
+
+    # We want one plot file per metric
     for m in metrics_to_plot:
+        # Check if metric exists in any dataset
         if m not in metric_df.columns:
             continue
 
-        stats = (
-            metric_df.groupby(["model", "intensity"])[m]
-            .agg(mean="mean", std="std", count="count")
-            .reset_index()
-        )
-        stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+        fig, axes = plt.subplots(1, 3, figsize=(6.75, 2.5), constrained_layout=True)
+        # axes is (3,)
 
-        plot_path = global_dir / f"global_scaling_{m}_{aggregation}.pdf"
-        plot_scaling_metric(stats, m, plot_path, title_suffix="(Global)")
+        # Consistent Models for Legend
+        available_models = set(metric_df["model"].unique())
+        models = [mod for mod in MODEL_ORDER if mod in available_models]
+        for mod in sorted(list(available_models)):
+            if mod not in models:
+                models.append(mod)
+
+        # linestyles = ["-", "--", "-.", ":"]
+
+        # Loop Columns (Datasets)
+        for col_idx, ds_name in enumerate(datasets_order):
+            ax = axes[col_idx]
+
+            ds_df = metric_df[
+                (metric_df["dataset"] == ds_name) & (metric_df["sparse"] == True)
+            ]
+            if ds_df.empty:
+                ds_df = metric_df[(metric_df["dataset"] == ds_name)]
+
+            if ds_df.empty:
+                ax.set_visible(False)
+                continue
+
+            # Aggregate stats
+            stats = (
+                ds_df.groupby(["model", "intensity"])[m]
+                .agg(mean="mean", std="std", count="count")
+                .reset_index()
+            )
+            stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+
+            for i, model in enumerate(models):
+                sub = stats[stats["model"] == model].sort_values("intensity")
+                if sub.empty:
+                    continue
+
+                # ls = linestyles[i % len(linestyles)]
+                style = get_style(model)
+                color = style["color"]
+                label = style["label"]
+
+                # Plot Mean
+                ax.plot(
+                    sub["intensity"],
+                    sub["mean"],
+                    label=label,
+                    marker="x",
+                    # linestyle=ls,
+                    color=color,
+                    alpha=0.9,
+                    markersize=4,
+                )
+
+                # Plot SEM Band
+                sem = sub["sem"].fillna(0)
+                ax.fill_between(
+                    sub["intensity"],
+                    sub["mean"] - sem,
+                    sub["mean"] + sem,
+                    color=color,
+                    alpha=0.2,
+                )
+
+            ax.set_xscale("log")
+            ax.set_xlabel("Total Intensity")
+            ax.set_title(f"{ds_name.title()} Dataset")
+            ax.grid(True, which="both", linestyle="--", alpha=0.3)
+
+            # Pretty Y-Label
+            pretty_name = m.upper()
+            if m == "psnr":
+                pretty_name = "PSNR (dB)"
+            if m == "rate":
+                pretty_name = "Crossover Rate"
+            if m == "nll":
+                pretty_name = "NLL"
+            if m == "nll_sum":
+                pretty_name = "NLL Sum"
+
+            if m == "nll_sum":
+                ax.set_yscale("log")
+
+            if col_idx == 0:
+                ax.set_ylabel(pretty_name)
+                ax.legend(fontsize=8)
+
+        # Save
+        out_path = global_dir / f"shared_{m}_{aggregation}.pdf"
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        # logger.info(f"Saved {out_path}")
+        plt.close(fig)
 
     # --- 3. CSV Tables ---
     logger.info("Generating CSV Tables...")
 
     # Per Dataset Tables
-    # Iterate unique datasets in metric_df
     unique_datasets = metric_df["dataset"].unique()
     for ds in unique_datasets:
         ds_dir = output_dir / ds
@@ -468,7 +605,8 @@ def main(
         ds_df = metric_df[metric_df["dataset"] == ds]
         save_tables(ds_df, ds_dir, ds, aggregation)
 
-    # Global Table
+    # Global Table (Aggregate across all datasets?)
+    # Or just save the full dump
     global_tables_dir = output_dir / "global"
     global_tables_dir.mkdir(parents=True, exist_ok=True)
     save_tables(metric_df, global_tables_dir, "global", aggregation)
