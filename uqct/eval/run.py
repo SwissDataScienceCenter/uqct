@@ -363,6 +363,11 @@ def evaluate_and_save(
             "Dense setting not fully supported for NLL calculation yet."
         )
 
+    mean_psnr_last = np.array(metric2lists["PSNR"])[..., -1].mean()
+    print(f"{mean_psnr_last=}")
+    exit()
+    for l in metric2lists["PSNR"]:
+        print(l[-1])
     metrics = Metrics(
         psnr=metric2lists["PSNR"],
         ssim=metric2lists["SS"],

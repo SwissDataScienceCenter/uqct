@@ -10,15 +10,15 @@ max_angle = 180
 
 
 [eval.mle]
-lr = 1e-2
+lr = 1e-1
 patience = 50
-max_steps = 20000
-tv_weight = -1.0
+max_steps = 100
+tv_weight = 0.0
 
 [eval.map]
-lr = 1e-2
+lr = 1e-1
 patience = 50
-max_steps = 20000
+max_steps = 100
 tv_weight = -1.0
 
 [eval.unet]
@@ -29,3 +29,8 @@ gradient_steps = 20
 guidance_lr = 1e-2
 replicates = 16
 cond = true
+
+[eval-sparse.bootstrapping]
+methods = ["fbp", "unet"]
+n_bootstraps = 10
+intensities = [1e6, 1e7, 1e8, 1e9]

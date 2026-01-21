@@ -1,14 +1,12 @@
+import math
 import os
 import re
 from pathlib import Path
 from typing import List, Optional
 
-from uqct.logging import get_logger
-import math
-
-
 import pandas as pd
 
+from uqct.logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -147,7 +145,11 @@ def get_hardware_specific_engine_path(dataset: str) -> Path:
 
 
 def load_runs(
-    runs_dir: Path, dataset: str, intensity: float, sparse: bool
+    runs_dir: Path,
+    dataset: str,
+    intensity: float,
+    sparse: bool,
+    jobids: tuple[int, ...],
 ) -> dict[str, pd.DataFrame]:
     """
     Scans the runs directory and returns the most recent run for each model
@@ -210,8 +212,9 @@ def load_runs(
             # actually pd.read_parquet is okayish for small files)
             # We need to ensure it's the right run configuration
             df = pd.read_parquet(file_path)
-            if df.empty:
-                logger.debug(f"Skipping {file_path.name}: empty dataframe")
+            job_id = int(df["slurm_job_id"][0])  # type: ignore
+            if df.empty or job_id not in jobids:
+                logger.debug(f"Skipping {file_path.name}")
                 continue
 
             row = df.iloc[0]
