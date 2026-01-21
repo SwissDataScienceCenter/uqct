@@ -28,6 +28,7 @@ seeds = list(range(10))
 gt_ranges_10_batch = [(x * 10, x * 10 + 10) for x in range(1, 11)]
 gt_ranges_20_batch = [(10 + x * 20, x * 20 + 30) for x in range(0, 5)]
 datasets = ["lamino", "composite", "lung"]
+valid_jobids = [54717753, 54757527]
 
 
 def get_data(
@@ -41,9 +42,9 @@ def get_data(
             for seed in seeds:
                 prefix = f"results/runs/{predictor}:{dataset}:{total_intensity}:True:{gt_range[0]}-{gt_range[1]}:{seed}"
                 matches = [x for x in files if x.startswith(prefix)]
-                assert len(matches) == 1, (
-                    f"Not exactly one match for {total_intensity=}, {gt_range=}, {seed=}, {prefix=}: {matches=}"
-                )
+                assert (
+                    len(matches) == 1
+                ), f"Not exactly one match for {total_intensity=}, {gt_range=}, {seed=}, {prefix=}: {matches=}"
                 psnr = np.array([x for x in pd.read_parquet(matches[0])["psnr"]])
                 toti2psnr[total_intensity].append(psnr)
     out = np.array(list(toti2psnr.values()))[..., -1]
@@ -59,6 +60,13 @@ def get_stats(dataset: str) -> dict[str, dict[str, float]]:
     data_mle = get_data("mle", dataset, gt_ranges_20_batch)
     data_unet = get_data("unet", dataset, [(10, 110)])
     data_unet_ensemble = get_data("unet_ensemble", dataset, [(10, 110)])
+    assert (
+        data_diffusion.shape
+        == data_fbp.shape
+        == data_mle.shape
+        == data_unet.shape
+        == data_unet_ensemble.shape
+    ), f"Shape mismatch for {dataset=}: {data_diffusion.shape=}, {data_fbp.shape=}, {data_mle.shape=}, {data_unet.shape=}, {data_unet_ensemble.shape=}"
 
     stats = {
         predictor: {

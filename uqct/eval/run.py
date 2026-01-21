@@ -67,6 +67,7 @@ class Metrics:
     l1: list[list[float]]
     nll_pred: list[list[float]]
     nll_gt: list[list[float]]
+    nll_pred_mix: list[list[float]] | None = None
 
 
 @dataclass
@@ -316,27 +317,35 @@ def evaluate_and_save(
         # Ensure preds has shape (N, T, R, H, W) for NLL calculation
         # If it came in as 4D, we already handled it above for metrics, but check again for safety/consistency
         if preds.ndim == 4:
-            preds_nll = einops.rearrange(preds, "n t w h -> n t 1 w h")
+            preds_nll_mix = einops.rearrange(preds, "n t w h -> n t 1 w h")
         else:
-            preds_nll = preds
+            preds_nll_mix = preds
 
-        preds_nll = preds_nll.float()
+        preds_nll_mix = preds_nll_mix.float()
 
         # Ensure prediction time dimension matches schedule length strict
         # User requested to not repeat across dimension to make it work.
-        assert preds_nll.shape[1] == len(schedule), (
-            f"Prediction time dimension {preds_nll.shape[1]} must match "
+        assert preds_nll_mix.shape[1] == len(schedule), (
+            f"Prediction time dimension {preds_nll_mix.shape[1]} must match "
             f"schedule length {len(schedule)}."
         )
 
-        preds_nll = preds_nll.contiguous()
+        preds_nll_mix = preds_nll_mix.contiguous()
 
         # nll_mixture_angle_schedule expects (..., s, n_preds, H, W)
         # Our preds_nll is (N, s, R, H, W).
         # We pass it directly. R corresponds to n_preds.
 
+        nlls_pred_mix = nll_mixture_angle_schedule(
+            preds_nll_mix,
+            experiment.counts,
+            experiment.intensities,
+            experiment.angles,
+            schedule,
+            reduce=False,
+        )
         nlls_pred = nll_mixture_angle_schedule(
-            preds_nll,
+            preds_nll_mix.mean(-3, keepdim=True),
             experiment.counts,
             experiment.intensities,
             experiment.angles,
@@ -368,6 +377,7 @@ def evaluate_and_save(
         rmse=metric2lists["RMSE"],
         l1=metric2lists["L1"],
         nll_pred=nlls_pred.tolist(),
+        nll_pred_mix=nlls_pred_mix.tolist(),
         nll_gt=nlls_gt.tolist(),
     )
 
