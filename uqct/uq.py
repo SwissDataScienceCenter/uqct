@@ -1,7 +1,7 @@
-from uqct.ct import circular_mask
-
 import torch
 from typing import Dict
+
+from uqct.ct import circular_mask
 
 
 def mean_std(samples, bdim=0):
