@@ -56,3 +56,4 @@ fi
 # Run evaluation
 # python -m uqct.eval.cli run --job-id "${JOB_ID}" --sparse
 python -m uqct.eval.cli run --job-id "${JOB_ID}" --sparse --duplicate
+echo "JOB ${JOB_ID} FINISHED"
