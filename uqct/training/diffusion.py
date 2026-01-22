@@ -229,8 +229,9 @@ def main(**kwargs):
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
 
-    on_cluster = Path("/cluster").exists()
-    root_dir = Path("/cluster/scratch/mgaetzner/uqct") if on_cluster else Path(".")
+    root_dir = Path(os.getenv("UQCT_ROOT_DIR", "."))
+    if not root_dir.exists():
+        root_dir = Path(".")
     run_dir = (
         root_dir
         / "runs"
@@ -272,7 +273,7 @@ def main(**kwargs):
             up_block_types=up_block_types,
         )
     unet = unet.to(device)  # type: ignore
-    if not on_cluster:
+    if not Path("/cluster").exists():
         if isinstance(unet, UNet2DModel):
             unet.enable_gradient_checkpointing()
         else:

@@ -47,9 +47,6 @@ def get_checkpoint_dir() -> Path:
         if ckpt_path.is_dir():
             return ckpt_path
 
-    cluster_ckpt = Path("/cluster/scratch/mgaetzner/uqct/checkpoints/")
-    if cluster_ckpt.exists():
-        return cluster_ckpt
     ckpt_dir = Path("/mydata/chip/shared/checkpoints/uqct/")
     if ckpt_dir.exists():
         return ckpt_dir
@@ -61,8 +58,6 @@ def get_results_dir() -> Path:
     env_results = os.environ.get("UQCT_RESULTS_DIR")
     if env_results:
         results_dir = Path(env_results).expanduser()
-    elif Path("/cluster/").exists():
-        results_dir = Path("/cluster/scratch/mgaetzner/uqct/results/")
     elif Path("/mydata/").exists():
         results_dir = Path("/mydata/chip/shared/results/uqct/")
     else:
@@ -80,7 +75,6 @@ def get_cache_dir() -> Path:
     candidates.extend(
         [
             Path("/mydata/chip/shared/data/caches/"),
-            Path("/cluster/scratch/mgaetzner/caches/"),
         ]
     )
     git_root = _git_root(Path(__file__).resolve().parent)

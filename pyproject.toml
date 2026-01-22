@@ -11,7 +11,6 @@ dependencies = [
   "jupyterlab==4.4.1",
   "lovely-tensors==0.1.18",
   "matplotlib==3.10.1",
-  "wandb==0.19.10",
   "nibabel==5.3.2",
   "onnxruntime-gpu~=1.23.0",
   "pandas==2.2.3",
@@ -32,7 +31,6 @@ dependencies = [
 name = "uqct"
 version = "0.0.1"
 description = "Uncertainty Quantification for Computed Tomography"
-authors = [{ name = "Matteo Gätzner" }, { name = "Johannes Kirschner" }]
 requires-python = ">=3.11, <3.12"
 
 [tool.setuptools]

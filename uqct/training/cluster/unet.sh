@@ -1,31 +1,27 @@
 #!/bin/bash
 #SBATCH --job-name=unet-training
-#SBATCH --output=/cluster/scratch/mgaetzner/logs/%x_%A_%a.out
-#SBATCH --error=/cluster/scratch/mgaetzner/logs/%x_%A_%a.err
 #SBATCH --cpus-per-task=12
 #SBATCH --mem-per-cpu=4G
 #SBATCH --gpus=1
 #SBATCH --gres=gpumem:20g
 #SBATCH --time=96:00:00
 
-module eth_proxy load
-
 set -euo pipefail
 set -x
 
 # Locate python and project root
-PYTHONBIN=/cluster/home/mgaetzner/micromamba/bin/python3
-GITROOT=/cluster/home/mgaetzner/uq-xray-ct
+GITROOT=${HOME}/uq-xray-ct
 export PYTHONPATH="${GITROOT}"
 
 cd "${GITROOT}"
+source ".venv/bin/activate"
 
 # Experiment settings
 DATASET="lung"
 SEED=7
 
 # Run
-"${PYTHONBIN}" "${GITROOT}/uqct/training/unet.py" \
+python -m uqct.training.unet \
 	--dataset "${DATASET}" \
 	--epochs 500 \
 	--batch-size 64 \
