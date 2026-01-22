@@ -1,7 +1,7 @@
 import math
 import os
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
 import click
 import einops
@@ -13,7 +13,7 @@ import torch
 from uqct.ct import Experiment, nll
 from uqct.eval.run import setup_experiment
 from uqct.metrics import get_metrics
-from uqct.models.diffusion import Diffusion, denorm_image
+from uqct.models.diffusion import Diffusion
 from uqct.logging import get_logger
 from uqct.uq import (
     error_correlation,
@@ -187,6 +187,7 @@ def evaluate_and_log_results(
     total_intensity: float,
     run_id: str,
     original_preds: torch.Tensor | None = None,
+    output_prefix: str | None = None,
 ) -> None:
     """
     Computes metrics, logs them, and generates plots for the run.
@@ -306,7 +307,12 @@ def evaluate_and_log_results(
     logger.info("\n" + metrics_df.T.to_string(header=False))
 
     # Save to CSV
-    csv_path = output_dir / f"{dataset}_{total_intensity}_{run_id}_metrics.csv"
+    if output_prefix:
+        csv_name = f"{output_prefix}_metrics.csv"
+    else:
+        csv_name = f"{dataset}_{total_intensity}_{run_id}_metrics.csv"
+
+    csv_path = output_dir / csv_name
     metrics_df.to_csv(csv_path, index=False)
     logger.info(f"Saved metrics to {csv_path}")
 
@@ -440,7 +446,11 @@ def evaluate_and_log_results(
             ax_rep.set_title(f"Ours: Rep {r}")
             ax_rep.axis("off")
 
-        plot_name = f"{dataset}_{total_intensity}_{run_id}_sample_{i}.png"
+        if output_prefix:
+            plot_name = f"{output_prefix}_sample_{i}.png"
+        else:
+            plot_name = f"{dataset}_{total_intensity}_{run_id}_sample_{i}.png"
+
         save_path = output_dir / plot_name
         plt.suptitle(
             f"Sample {i} | PSNR: {metrics['PSNR'][i].item():.2f} | Cov: {cov_g[i].item():.2f}"
@@ -472,6 +482,12 @@ def evaluate_and_log_results(
 )
 @click.option("--anneal-lr", is_flag=True, default=False)
 @click.option("--verbose", is_flag=True, default=False)
+@click.option(
+    "--output-prefix",
+    type=str,
+    default=None,
+    help="Prefix for output filenames (e.g. 'boundary_diffusion:...').",
+)
 def main(
     parquet_path_str: str,
     time_step: int | None,
@@ -480,6 +496,7 @@ def main(
     idx_range: tuple[int, int] | None,
     verbose: bool,
     anneal_lr: bool,
+    output_prefix: str | None,
 ) -> None:
     """
     Run diffusion with boundary sampling using difference maximization.
@@ -552,10 +569,10 @@ def main(
 
     diffusion = Diffusion(
         dataset=dataset,
-        num_steps=100,  # Standard?
+        num_steps=100,
         gradient_steps=50,
         lr=1e-2,
-        cond=True,  # Conditional diffusion? Usually yes for CT.
+        cond=True,
         verbose=verbose,
         anneal_lr=anneal_lr,
     )
@@ -620,7 +637,14 @@ def main(
     run_id = config_row.get("run_id", "unknown")
     # Include range in filename if subset
     range_str = f"_{start_idx}-{end_idx}" if idx_range is not None else ""
-    fname = f"{dataset}_{total_intensity}_{run_id}{range_str}_boundary.h5"
+
+    if output_prefix:
+        # If output prefix is provided, use it directly (append .h5)
+        # We assume the prefix handles unique identification
+        fname = f"{output_prefix}.h5"
+    else:
+        fname = f"{dataset}_{total_intensity}_{run_id}{range_str}_boundary.h5"
+
     out_path = output_dir / fname
 
     std_dev = sampled_images.std(dim=2)  # (N, S, 1, H, W) assuming dim 2 is replicates
@@ -649,6 +673,7 @@ def main(
         total_intensity=total_intensity,
         run_id=f"{run_id}{range_str}",
         original_preds=original_preds,
+        output_prefix=output_prefix,
     )
 
 

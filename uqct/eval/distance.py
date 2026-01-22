@@ -142,7 +142,6 @@ def find_prediction_files(
     # format: {model}:{dataset}:{total_intensity}:{sparse}:{start}-{end}:{seed}:{timestamp}.h5
     pattern = f"{model}:{dataset}:{total_intensity}:{sparse}:*:{seed}:*.h5"
     candidates = list(runs_dir.glob(pattern))
-    breakpoint()
 
     req_start, req_end = image_range
 
