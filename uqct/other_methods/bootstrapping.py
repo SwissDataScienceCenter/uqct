@@ -3,6 +3,7 @@ from scipy import stats
 
 from uqct.ct import Experiment, sinogram_from_counts, fbp, circular_mask
 from uqct.eval.run import run_evaluation
+from uqct.models.unet import FBPUNet
 
 
 def get_bootstrap_predictor(
@@ -63,34 +64,25 @@ def get_bootstrap_predictor(
                     counts_b = counts_batch[..., idxs, :]
                     intensities_b = intensities_batch[..., idxs, :]
 
-                    sino_b = sinogram_from_counts(counts_b, intensities_b).clip(0)
-                    fbp_recon = fbp(sino_b, angles_b).clip(0, 1)
-
                     if method == "unet" and model is not None:
-                        with torch.no_grad():
-                            # Unet input expectation: (N, 1, H, W)
-                            if fbp_recon.ndim == 3:
-                                inp = fbp_recon.unsqueeze(1)
-                            else:
-                                inp = fbp_recon
-
-                            # Total intensity slice
-                            tot = experiment.total_intensity[i:end_i]
-                            if tot.ndim == 1:
-                                tot = tot.unsqueeze(1)
-
-                            # Create class labels (Model likely expects them if sparse)
-                            # Assuming label 0 is correct default for this task where dataset is fixed
-                            class_labels = torch.zeros(
-                                len(inp), dtype=torch.long, device=inp.device
-                            )
-
-                            # FBPUNet._predict_from_tensors(fbp_lr, total_intensity, class_labels, ...)
-                            pred = model._predict_from_tensors(
-                                inp, tot, class_labels, out_device=inp.device
-                            )
-                            batch_preds_t.append(pred.squeeze(1))  # Back to (N, H, W)
+                        # Construct temporary experiment for this bootstrap sample
+                        exp_b = Experiment(
+                            counts=counts_b,
+                            intensities=intensities_b,
+                            angles=angles_b,
+                            sparse=True,
+                        )
+                        # Predict using all angles (last step)
+                        # We need to pass a schedule to get a prediction at the specific number of angles
+                        schedule = torch.tensor([len(angles_b)], device=counts_b.device)
+                        # pred shape: (Batch, 1, 1, H, W)
+                        pred = model.predict(
+                            exp_b, schedule=schedule, out_device=counts_b.device
+                        )
+                        batch_preds_t.append(pred.squeeze(1).squeeze(1))
                     else:
+                        sino_b = sinogram_from_counts(counts_b, intensities_b).clip(0)
+                        fbp_recon = fbp(sino_b, angles_b).clip(0, 1)
                         batch_preds_t.append(fbp_recon)
 
                 # Stack bootstrap samples for this batch -> (Batch, B, H, W)
@@ -150,7 +142,7 @@ def run_bootstrapping(
         model_name=f"bootstrapping_{method}",
         predictor_fn=predictor_fn,
         n_angles=n_angles,
-        schedule_start=200,
+        schedule_start=199,
         schedule_type="linear",
         schedule_length=1,
         max_angle=max_angle,

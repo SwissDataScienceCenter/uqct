@@ -32,6 +32,6 @@ cond = true
 
 [eval-sparse.bootstrapping]
 methods = ["fbp", "unet"]
-n_bootstraps = 10
+n_bootstraps = 100
 intensities = [1e6, 1e7, 1e8, 1e9]
 seed_range = [0, 1]

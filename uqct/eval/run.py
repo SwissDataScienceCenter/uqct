@@ -325,7 +325,7 @@ def evaluate_and_save(
     metric2lists = dict(metric2lists)
 
     # NLL calculation
-    if experiment.sparse:
+    if experiment.sparse and "bootstrap" not in model_name:
         assert schedule is not None, "Expecting schedule to not be None."
 
         # Ensure preds has shape (N, T, R, H, W) for NLL calculation
@@ -391,6 +391,12 @@ def evaluate_and_save(
             schedule,
             reduce=False,
         )
+    elif "bootstrap" in model_name:
+        nlls_pred = torch.zeros((n_gt, len(preds)))
+        nlls_pred_mix = torch.zeros((n_gt, len(preds)))
+        nlls_pred_last = torch.zeros((n_gt, len(preds)))
+        nlls_pred_last_mix = torch.zeros((n_gt, len(preds)))
+        nlls_gt = torch.zeros((n_gt, len(preds)))
     else:
         # Placeholder for dense setting or raise NotImplementedError as before
         raise NotImplementedError(
