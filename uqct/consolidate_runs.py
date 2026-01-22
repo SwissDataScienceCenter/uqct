@@ -160,7 +160,7 @@ def main(
     # Let's save it
     output_file.parent.mkdir(parents=True, exist_ok=True)
     final_df.to_parquet(output_file)
-    breakpoint()
+
     logger.info(f"Saved {len(final_df)} rows to {output_file}")
 
 

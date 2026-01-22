@@ -41,6 +41,7 @@ class Diffusion:
         cond: bool = False,
         onnx: bool = False,
         verbose: bool = False,
+        anneal_lr: bool = True,
     ):
         assert (
             not onnx or cond
@@ -51,6 +52,7 @@ class Diffusion:
             torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         )
         self.cond = cond
+        self.anneal_lr = anneal_lr
 
         # U-Net
         self.batch_size = batch_size
@@ -293,7 +295,7 @@ class Diffusion:
                 pred_original_sample,
                 guidance_loss_fn,
                 gradient_steps=self.gradient_steps,
-                lr=self.lr * (timestep / 1000),
+                lr=self.lr * (timestep / 1000) if self.anneal_lr else self.lr,
                 verbose=False,
             )
 
