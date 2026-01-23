@@ -120,6 +120,10 @@ def simultaneous_ci(
     return lo, hi
 
 
+def twod_to_threed(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    return tuple(t.unsqueeze(0) if t.ndim == 2 else t for t in tensors)
+
+
 def coverage(
     ci_lo: torch.Tensor,
     ci_hi: torch.Tensor,
@@ -129,6 +133,7 @@ def coverage(
     """
     Empirical pointwise coverage fraction, optionally within a circular mask.
     """
+    ci_lo, ci_hi, target = twod_to_threed(ci_lo, ci_hi, target)
     if circle_mask:
         mask = circular_mask(target.shape[-1], device=target.device)
         covered = ((target >= ci_lo) & (target <= ci_hi)).float() * mask

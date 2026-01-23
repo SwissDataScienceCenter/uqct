@@ -191,7 +191,13 @@ def find_files(
     # Relax pattern if needed, but this matches user provided example
     pattern = f"results/runs/{search_model}:{dataset}:{intensity}:True:*.parquet"
     files = glob(pattern)
-    # print(f"DEBUG: Pattern: {pattern}, Found: {len(files)}")
+
+    # If is_bootstrapping and we find nothing, maybe we need to look for chunks.
+    # Actually, the pattern above matches ALL ranges.
+    # The issue is usually we pick *one* file.
+    # But if we have chunks, we will have multiple files (different ranges) with different timestamps potentially.
+    # We need to group them or select a consistent set.
+    # For now, let's just return all valid files and let calculate_metrics handle them.
 
     valid_files = []
     for f in files:
@@ -299,6 +305,7 @@ def calculate_metrics(
         # Bootstrapping / Ensemble
         if method == "unet_ensemble":
             boot_files = find_files(dataset, intensity, method, is_bootstrapping=False)
+            is_bootstrapping = False
         else:
             boot_files = find_files(
                 dataset,
@@ -307,56 +314,139 @@ def calculate_metrics(
                 is_bootstrapping=True,
                 n_bootstraps=n_bootstraps,
             )
+            is_bootstrapping = True
 
         if not boot_files:
             return {}
 
-        boot_file = boot_files[0]
-        # Standard run for GT reference? Or just use indices from boot file.
-        # Boot file has indices.
+        # New Logic: If bootstrapping, we might have multiple chunks (10-20, 20-30, etc.)
+        # If we have a full file (10-110), use that.
+        # Otherwise, try to aggregate chunks.
 
-        try:
-            df_boot = pd.read_parquet(boot_file)
-            start = int(df_boot["image_start_index"].iloc[0])
-            end = int(df_boot["image_end_index"].iloc[0])
+        files_to_process = []
 
-            preds_boot_np = load_h5_data(boot_file)
-            preds_boot = torch.tensor(preds_boot_np).cuda()
+        # Check for full range first (simplistic check: assuming 10-110 is the target full range, but it might vary)
+        # Actually, let's just process all found files, but filter out duplicates (same range, older timestamp).
+        # find_files sorts by timestamp (newest first).
 
-            # Format to (N, S, H, W)
-            # Ensemble: (N, Steps, Members, H, W) -> (N, Members, H, W)
-            # Boot: (N, 1, Samples, H, W) -> (N, Samples, H, W)
+        processed_ranges = set()
 
-            if method == "unet_ensemble":
-                if preds_boot.ndim == 5:
-                    preds_boot = preds_boot[:, -1, ...]
-            else:
-                if preds_boot.ndim == 5:
-                    preds_boot = preds_boot[:, 0, ...]
+        for f in boot_files:
+            try:
+                # Parse Range from filename
+                # Model:Dataset:Intensity:Sparse:Range:Seed:Timestamp.parquet
+                # bootstrapping_fbp:lung:1000000.0:True:10-20:0:timestamp.parquet
 
-            # Load GT
-            gt = get_ground_truth(dataset, (start, end))
+                parts = Path(f).name.split(":")
+                # We need to be careful with splitting if timestamp has colons, but usually it doesn't in the filename part before extension?
+                # Actually timestamp format in `run.py` uses `datetime.now()` which str() has colons.
+                # But let's assume the order is fixed.
+                # Range is at index 4 (0-indexed) if split by ':' works somewhat cleanly.
+                # Let's search for range pattern.
+                range_part = None
+                for p in parts:
+                    if "-" in p and p.replace("-", "").isdigit():
+                        range_part = p
+                        break
 
-            if gt.shape[-2:] != preds_boot.shape[-2:]:
-                gt = F.interpolate(
-                    gt.unsqueeze(1), size=preds_boot.shape[-2:], mode="bilinear"
-                ).squeeze(1)
+                if not range_part:
+                    continue
 
-            n = min(len(gt), len(preds_boot))
-            gt = gt[:n]
-            preds_boot = preds_boot[:n]
+                start, end = map(int, range_part.split("-"))
+                r_tuple = (start, end)
 
-            chunk_metrics = compute_stats_from_samples(preds_boot, gt)
+                # If we already processed this range (or a superset/subset logic?), skip?
+                # Simplistic: If exact range already seen, skip (since files are sorted by time, we see newest first).
+                if r_tuple in processed_ranges:
+                    continue
 
-            for k, v in chunk_metrics.items():
-                all_metrics[k].extend(v)
+                # Also, if we have "10-110" and "10-20", do we process both?
+                # Ideally we want a non-overlapping set covering the max area.
+                # Implementing a greedy coverage?
+                # For now: Just process valid non-overlapping chunks if possible, or just all unique newest ranges and let user/stats handle it?
+                # Actually, `compute_stats_from_samples` returns lists. We extend `all_metrics`.
+                # If we process "10-110" AND "10-20", we double count 10-20 metrics.
+                # Simple heuristic: If we find a large range (e.g. > 50 images), prefer that and ignore smaller chunks?
+                # OR: If we are in chunked mode (bootstrapping), we prefer consistent chunks?
 
-        except Exception as e:
-            print(f"Error processing {dataset} {method}: {e}")
-            return {}
+                # Let's just collect all unique ranges, then perform a check to avoid overlap?
+                # Overlap check:
+                is_overlap = False
+                for pr in processed_ranges:
+                    # Check overlap: max(start1, start2) < min(end1, end2)
+                    if max(start, pr[0]) < min(end, pr[1]):
+                        is_overlap = True
+                        break
+
+                if is_overlap and not is_bootstrapping:
+                    # For ensembles, we usually just want one file per seed? Or allow duplicates?
+                    # Existing logic took `boot_files[0]`.
+                    # Let's keep `continue`.
+                    continue
+                elif is_overlap and is_bootstrapping:
+                    # For bootstrapping, if we have 10-110 and 10-20, they overlap.
+                    # We should prefer one. Since we sort by timestamp, the newest one wins.
+                    # If I ran 10-110 yesterday, and 10-20 today, I probably want 10-20.
+                    # So we process 10-20 and then skip 10-110 later?
+                    # Yes, `continue` works if we encounter the overlapping one later.
+                    continue
+
+                processed_ranges.add(r_tuple)
+                files_to_process.append(f)
+
+            except Exception:
+                continue
+
+        if not files_to_process:
+            # Fallback to old behavior if something fails
+            files_to_process = [boot_files[0]]
+
+        for boot_file in files_to_process:
+            try:
+                df_boot = pd.read_parquet(boot_file)
+                # Ensure metadata matches (sanity check)
+
+                start = int(df_boot["image_start_index"].iloc[0])
+                end = int(df_boot["image_end_index"].iloc[0])
+
+                preds_boot_np = load_h5_data(boot_file)
+                preds_boot = torch.tensor(preds_boot_np).cuda()
+
+                # Format to (N, S, H, W)
+                # Ensemble: (N, Steps, Members, H, W) -> (N, Members, H, W)
+                # Boot: (N, 1, Samples, H, W) -> (N, Samples, H, W)
+
+                if method == "unet_ensemble":
+                    if preds_boot.ndim == 5:
+                        preds_boot = preds_boot[:, -1, ...]
+                else:
+                    if preds_boot.ndim == 5:
+                        preds_boot = preds_boot[:, 0, ...]
+
+                # Load GT
+                gt = get_ground_truth(dataset, (start, end))
+
+                if gt.shape[-2:] != preds_boot.shape[-2:]:
+                    gt = F.interpolate(
+                        gt.unsqueeze(1), size=preds_boot.shape[-2:], mode="bilinear"
+                    ).squeeze(1)
+
+                n = min(len(gt), len(preds_boot))
+                gt = gt[:n]
+                preds_boot = preds_boot[:n]
+
+                chunk_metrics = compute_stats_from_samples(preds_boot, gt)
+
+                for k, v in chunk_metrics.items():
+                    all_metrics[k].extend(v)
+
+            except Exception as e:
+                print(f"Error processing {dataset} {method} file {boot_file}: {e}")
+                continue
 
     # Average
     if not all_metrics:
+        # print("No metrics computed.")
         return {}
 
     return {k: float(np.nanmean(v)) for k, v in all_metrics.items()}
