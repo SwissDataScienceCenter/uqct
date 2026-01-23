@@ -18,7 +18,6 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
 from uqct.datasets.utils import get_dataset
-from uqct.debugging import plot_img
 from uqct.training.unet import N_ANGLES, norm_intensities, sample_fbp_sparse
 
 

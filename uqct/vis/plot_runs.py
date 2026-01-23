@@ -261,7 +261,6 @@ def process_single_group(args):
     d, i, s, setting_df, output_dir, log_scale, show_progress = args
 
     # Re-import check for safety if spawned
-    import matplotlib.pyplot as plt
     from uqct.logging import get_logger
 
     logger = get_logger(__name__)
@@ -365,7 +364,7 @@ def main(
     if dataset == "ALL":
         dataset = None
 
-    logger.info(f"Configuration:")
+    logger.info("Configuration:")
     logger.info(f"  Runs Dir:  {runs_dir}")
     logger.info(f"  Output Dir:{output_dir}")
     logger.info(f"  Dataset:   {dataset if dataset else 'ALL'}")

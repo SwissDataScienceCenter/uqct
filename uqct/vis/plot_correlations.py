@@ -2,12 +2,8 @@ import click
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 from pathlib import Path
-from typing import Optional, List, Dict
-from scipy.stats import spearmanr
 import os
-import time
 from concurrent.futures import ProcessPoolExecutor
 from uqct.logging import get_logger
 
@@ -40,10 +36,11 @@ def plot_metric_vs_nll(
 
     # Re-import locally for safety in processes (optional but safe)
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
 
     try:
         import matplotlib.cm as cm
-    except:
+    except Exception:
         pass
 
     config = metrics_config.get(metric_key, {"label": metric_key, "direction": ""})
@@ -140,7 +137,7 @@ def plot_metric_vs_nll(
                         linewidth=2,
                         label=label_str,
                     )
-            except Exception as e:
+            except Exception:
                 pass
 
             # Raw Points - Colored by Model
@@ -188,12 +185,12 @@ def plot_metric_vs_nll(
         )
 
         plt.xlabel(label_text)
-        plt.ylabel(f"NLL")
+        plt.ylabel("NLL")
         plt.yscale("log")
         plt.grid(True, linestyle="--", alpha=0.7, which="both")
         plt.tight_layout()
 
-        out_path = target_dir / f"summary.pdf"
+        out_path = target_dir / "summary.pdf"
         plt.savefig(out_path, dpi=300, bbox_inches="tight")
         plt.close()
 
@@ -249,7 +246,7 @@ def plot_metric_vs_nll(
                             linewidth=2,
                             label=f"Regression (r={corr:.2f})",
                         )
-                except Exception as e:
+                except Exception:
                     pass
 
             # Combined Binned Mean
@@ -429,7 +426,7 @@ def main(consolidated_file: Path, output_dir: Path, fast: bool, parallel: bool):
                     }
                 )
 
-        except Exception as e:
+        except Exception:
             # logger.warning(f"Skipping row: {e}")
             continue
 
@@ -525,7 +522,7 @@ def main(consolidated_file: Path, output_dir: Path, fast: bool, parallel: bool):
                     f.result()  # Wait for each task to complete and check for exceptions
                     # logger.info(f"Completed task {i+1}/{len(tasks)}")
                 except Exception as e:
-                    logger.error(f"Error processing task {i+1}: {e}")
+                    logger.error(f"Error processing task {i + 1}: {e}")
     else:
         logger.info("Running plot generation sequentially.")
         for i, t in enumerate(tasks):
@@ -533,7 +530,7 @@ def main(consolidated_file: Path, output_dir: Path, fast: bool, parallel: bool):
                 plot_metric_vs_nll(*t)
                 # logger.info(f"Completed task {i+1}/{len(tasks)}")
             except Exception as e:
-                logger.error(f"Error processing task {i+1}: {e}")
+                logger.error(f"Error processing task {i + 1}: {e}")
 
     # --- 4. Summary Table ---
     logger.info("--- Model Performance Summary (Averaged across intensities) ---")

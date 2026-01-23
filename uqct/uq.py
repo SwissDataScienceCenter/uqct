@@ -1,5 +1,4 @@
 import torch
-from typing import Dict
 
 from uqct.ct import circular_mask
 

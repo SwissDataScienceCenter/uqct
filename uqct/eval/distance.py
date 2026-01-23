@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-import einops
 import math
 import click
 import h5py
@@ -15,7 +14,7 @@ import torch
 from torch import optim
 from tqdm.auto import tqdm
 
-from uqct.ct import Experiment, circular_mask, nll
+from uqct.ct import Experiment, circular_mask
 from uqct.eval.nll_constraints import (
     compute_nll_trajectory,
     compute_constraint_violation,

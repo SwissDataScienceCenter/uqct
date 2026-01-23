@@ -8,56 +8,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from uqct.training.unet import N_ANGLES
 from uqct.utils import get_results_dir, load_runs
 from uqct.logging import get_logger
-from uqct.vis.style import MODEL_ORDER, get_style
+from uqct.vis.style import MODEL_ORDER, get_style, MODEL_NAMES
 from uqct.eval.run import get_default_angle_schedule
 
 plt.rcParams.update(
     {
-        "text.usetex": True,  # Use LaTeX fonts
-        "font.family": "serif",  # Matches Latex default
-        "font.serif": ["Times"],  # Times New Roman usually matches body
-        "font.size": 9,  # ICML caption size is usually 9pt
-        "axes.labelsize": 9,
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
-        "legend.fontsize": 8,
-        "figure.titlesize": 10,
+        "text.latex.preamble": r"\usepackage{amsmath}",
     }
 )
-
-# plt.rcParams.update(
-#     {
-#         "text.usetex": True,  # Keep LaTeX for proper math rendering
-#         "font.family": "sans-serif",  # Switch to sans-serif
-#         "font.sans-serif": ["Helvetica"],  # Helvetica is the standard print sans
-#         "font.size": 10,  # Match ICML 10pt body
-#         "axes.labelsize": 10,
-#         "axes.titlesize": 10,
-#         "legend.fontsize": 8,  # 8pt or 9pt for legend
-#         "xtick.labelsize": 8,  # 8pt for ticks
-#         "ytick.labelsize": 8,
-#         "figure.figsize": (6.75, 2.5),  # Full width
-#     }
-# )
-
 
 logger = get_logger(__name__)
 
 # Constants
 DELTA = 0.05
 LOG_INV_DELTA = math.log(1 / DELTA)
-
-TABLE_MODEL_ORDER = ["fbp", "mle", "map", "unet", "diffusion"]
-MODEL_LABELS = {
-    "fbp": "FBP",
-    "mle": "MLE",
-    "map": "MAP",
-    "unet": "U-Net",
-    "diffusion": "Diff.",
-}
 
 
 def process_metrics(
@@ -67,123 +33,116 @@ def process_metrics(
     processed_records = []
 
     # Columns to extract (final step)
-    scalar_metrics = ["psnr", "ssim", "l1", "rmse", "nll_pred"]
+    scalar_metrics = ["psnr", "ssim", "l1", "rmse"]
 
     logger.info(f"Processing {len(df)} rows for metrics scaling...")
 
     for _, row in tqdm(df.iterrows(), total=len(df)):
-        try:
-            # 1. Crossover Rate
-            nll_pred = row.get("nll_pred")
-            nll_gt = row.get("nll_gt")
+        # 1. Crossover Rate
+        nll_pred = row.get("nll_pred")
+        nll_gt = row.get("nll_gt")
 
-            rate = np.nan
-            if isinstance(nll_pred, (list, np.ndarray)) and isinstance(
-                nll_gt, (list, np.ndarray)
-            ):
-                if len(nll_pred) > 0:
-                    nll_p = np.array(nll_pred)
-                    nll_g = np.array(nll_gt)
-                    p_cum = np.cumsum(nll_p)
-                    g_cum = np.cumsum(nll_g)
+        rate = np.nan
+        if isinstance(nll_pred, (list, np.ndarray)) and isinstance(
+            nll_gt, (list, np.ndarray)
+        ):
+            if len(nll_pred) > 0:
+                nll_p = np.array(nll_pred)
+                nll_g = np.array(nll_gt)
+                p_cum = np.cumsum(nll_p)
+                g_cum = np.cumsum(nll_g)
 
-                    has_crossover = np.any(g_cum > p_cum + LOG_INV_DELTA)
-                    rate = 1.0 if has_crossover else 0.0
+                has_crossover = np.any(g_cum > p_cum + LOG_INV_DELTA)
+                rate = 1.0 if has_crossover else 0.0
 
-            # 2. Scalar Metrics (Average over trajectory)
-            # Scalar Metrics Logic
+        # 2. Scalar Metrics (Average over trajectory)
+        # Scalar Metrics Logic
 
-            # Helper to compute scalar from trajectory
-            def compute_scalar(val, mode, row_data):
-                if not (isinstance(val, (list, np.ndarray)) and len(val) > 0):
-                    return float(val) if isinstance(val, (int, float)) else np.nan
+        # Helper to compute scalar from trajectory
+        def compute_scalar(val, mode, row_data):
+            if not (isinstance(val, (list, np.ndarray)) and len(val) > 0):
+                return float(val) if isinstance(val, (int, float)) else np.nan
 
-                if mode == "last":
-                    return float(val[-1])
+            if mode == "last":
+                return float(val[-1])
 
-                if mode == "schedule":
-                    # Simple mean over predictions as is
-                    return float(np.mean(val))
+            if mode == "schedule":
+                # Simple mean over predictions as is
+                return float(np.mean(val))
 
-                if mode == "average":
-                    # Expanded weighted mean using schedule
-                    # Check for angle_schedule column
-                    angle_schedule = None
-                    val_sch = row_data.get("angle_schedule")
-                    if isinstance(val_sch, (list, np.ndarray)) and len(val_sch) > 0:
-                        angle_schedule = list(val_sch)
-                    elif "angle_schedule" not in row_data:
-                        angle_schedule = get_default_angle_schedule()
+            if mode == "average":
+                # Expanded weighted mean using schedule
+                # Check for angle_schedule column
+                angle_schedule = None
+                val_sch = row_data.get("angle_schedule")
+                if isinstance(val_sch, (list, np.ndarray)) and len(val_sch) > 0:
+                    angle_schedule = list(val_sch)
+                elif "angle_schedule" not in row_data:
+                    angle_schedule = get_default_angle_schedule()
 
-                    if angle_schedule:
-                        n_angles = 200  # Constant
-                        intervals = []
-                        for i in range(len(angle_schedule)):
-                            start = angle_schedule[i]
-                            if i < len(angle_schedule) - 1:
-                                end = angle_schedule[i + 1]
-                            else:
-                                end = n_angles
-                            intervals.append(max(0, int(end - start)))
+                if angle_schedule:
+                    n_angles = 200  # Constant
+                    intervals = []
+                    for i in range(len(angle_schedule)):
+                        start = angle_schedule[i]
+                        if i < len(angle_schedule) - 1:
+                            end = angle_schedule[i + 1]
+                        else:
+                            end = n_angles
+                        intervals.append(max(0, int(end - start)))
 
-                        if len(val) == len(intervals):
-                            expanded = []
-                            for v_idx, v in enumerate(val):
-                                expanded.extend([v] * intervals[v_idx])
-                            if expanded:
-                                return float(np.mean(expanded))
+                    if len(val) == len(intervals):
+                        expanded = []
+                        for v_idx, v in enumerate(val):
+                            expanded.extend([v] * intervals[v_idx])
+                        if expanded:
+                            return float(np.mean(expanded))
 
-                    # Fallback if schedule missing or mismatch
-                    return float(np.mean(val))
+                # Fallback if schedule missing or mismatch
+                return float(np.mean(val))
 
-                return np.nan
+            return np.nan
 
-            metrics_vals = {}
-            for m in scalar_metrics:
-                val = row.get(m)
+        metrics_vals = {}
+        for m in scalar_metrics:
+            val = row.get(m)
+            metrics_vals[m] = compute_scalar(val, metric_aggregation, row)
 
-                if m == "nll_pred":
-                    # Always last for nll_pred metric logic (scalar extraction)
-                    if isinstance(val, (list, np.ndarray)) and len(val) > 0:
-                        metrics_vals[m] = float(val[-1])
-                    elif isinstance(val, (int, float)):
-                        metrics_vals[m] = float(val)
-                    else:
-                        metrics_vals[m] = np.nan
-                else:
-                    metrics_vals[m] = compute_scalar(val, metric_aggregation, row)
+        def compute_nll_sum(seq_nlls):
+            p_arr = np.array(seq_nlls)
+            valid_mask = np.isfinite(p_arr)
+            return float(p_arr[valid_mask].mean() * valid_mask.sum())
 
-            # Compute NLL Sum: Sum of valid NLL values over trajectory
-            # Formula: nll_pred[valid_mask].mean() * sum(valid_mask)
-            val_pred = row.get("nll_pred")
+        nll_sum = compute_nll_sum(row.get("nll_pred"))
+        nll_sum_mix = compute_nll_sum(row.get("nll_pred_mix"))
 
-            nll_sum = np.nan
-            if isinstance(val_pred, (list, np.ndarray)) and len(val_pred) > 0:
-                p_arr = np.array(val_pred)
-                valid_mask = np.isfinite(p_arr)
-                if np.any(valid_mask):
-                    nll_sum = float(p_arr[valid_mask].mean() * valid_mask.sum())
-            elif isinstance(val_pred, (int, float)):
-                nll_sum = float(val_pred)
+        record = {
+            "dataset": row["dataset"],
+            "model": row["model"],
+            "intensity": float(row["total_intensity"]),
+            "sparse": bool(row["sparse"]),
+            "rate": rate,
+            "nll_sum": nll_sum,
+            "nll_sum_mix": nll_sum_mix,
+            "mix_mean_ratio": nll_sum_mix / nll_sum,
+            **metrics_vals,
+        }
 
-            record = {
-                "dataset": row["dataset"],
-                "model": row["model"],
-                "intensity": float(row["total_intensity"]),
-                "sparse": bool(row["sparse"]),
-                "rate": rate,
-                "nll_sum": nll_sum,
-                **metrics_vals,
-            }
-            # Rename nll_pred to nll (raw)
-            record["nll"] = record.pop("nll_pred", np.nan)
+        record["nll_pred_last"] = row.get("nll_pred_last")
+        record["nll_pred_last_mix"] = row.get("nll_pred_last_mix")
+        record["nll_gt_sum"] = row.get("nll_gt").sum()
 
-            processed_records.append(record)
+        # 4. gt_nll_confcoef_diff: sum(nll_gt) - sum(nll_pred) + log(1/delta)
+        record["gt_nll_confcoef_diff"] = (
+            record["nll_gt_sum"] - record["nll_sum"] + LOG_INV_DELTA
+        )
+        record["gt_nll_confcoef_diff_mix"] = (
+            record["nll_gt_sum"] - record["nll_sum_mix"] + LOG_INV_DELTA
+        )
+        processed_records.append(record)
 
-        except Exception:
-            continue
-
-    return pd.DataFrame(processed_records)
+    df = pd.DataFrame(processed_records)
+    return df
 
 
 def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
@@ -191,7 +150,6 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     if stats_df.empty:
         return
 
-    # plt.figure(figsize=(8, 6))
     available_models = set(stats_df["model"].unique())
     models = [m for m in MODEL_ORDER if m in available_models]  # Enforce order
 
@@ -246,7 +204,19 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     if metric == "nll":
         pretty_name = "NLL"
     if metric == "nll_sum":
-        pretty_name = "NLL Sum"
+        pretty_name = "Seq. NLL"
+    if metric == "nll_sum_mix":
+        pretty_name = "Seq. NLL (Mix.)"
+    if metric == "mix_mean_ratio":
+        pretty_name = "Seq. NLL Mix-Mean Ratio"
+    if metric == "nll_pred_last":
+        pretty_name = "NLL Last Prediction"
+    if metric == "nll_pred_last_mix":
+        pretty_name = "NLL Last Prediction (Mix.)"
+    if metric == "nll_gt_sum":
+        pretty_name = "NLL"
+    if metric in ["gt_nll_confcoef_diff", "gt_nll_confcoef_diff_mix"]:
+        pretty_name = r"$L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast) - \beta_{t_\mathrm{final}}(\delta)$"
 
     if metric == "nll_sum":
         plt.yscale("log")
@@ -255,10 +225,9 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
 
     # Legend Inside
     plt.legend(loc="best")
-    plt.grid(True, which="both", ls="-", alpha=0.4)
+    plt.grid(True, which="major", ls="-", alpha=0.4)
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
-    # logger.info(f"Saved {metric} plot to {output_path}")
     plt.close()
 
 
@@ -281,17 +250,17 @@ def save_tables(
     table_df = agg_df.groupby(["model", "intensity", "sparse"]).mean().reset_index()
 
     # Filter Models
-    table_df = table_df[table_df["model"].isin(TABLE_MODEL_ORDER)]
+    table_df = table_df[table_df["model"].isin(MODEL_ORDER)]
 
     # Sort models by custom order
     table_df["model_cat"] = pd.Categorical(
-        table_df["model"], categories=TABLE_MODEL_ORDER, ordered=True
+        table_df["model"], categories=MODEL_ORDER, ordered=True
     )
     table_df = table_df.sort_values(["intensity", "sparse", "model_cat"])
 
     # Map model names to display names
     # Note: Use a lambda to avoid type errors if map expects specific types
-    table_df["Model"] = table_df["model"].apply(lambda x: MODEL_LABELS.get(x, x))
+    table_df["Model"] = table_df["model"].apply(lambda x: MODEL_NAMES.get(x, x))
 
     # Map Sparse to "Sparse Setting" / "Dense Setting"
     table_df["Setting"] = table_df["sparse"].apply(
@@ -305,7 +274,7 @@ def save_tables(
         )
 
         # Sort columns manually
-        sorted_models = [MODEL_LABELS[m] for m in TABLE_MODEL_ORDER]
+        sorted_models = [MODEL_NAMES[m] for m in MODEL_ORDER]
         desired_cols = []
         for setting in ["Sparse Setting", "Dense Setting"]:
             for model in sorted_models:
@@ -452,7 +421,23 @@ def main(
 
     # Metrics to plot
     # Replaced 'nll' with 'nll_sum'
-    metrics_to_plot = ["rate", "psnr", "ssim", "l1", "rmse", "nll_sum"]
+    metrics_to_plot = [
+        "rate",
+        "psnr",
+        "ssim",
+        "l1",
+        "rmse",
+        "nll_sum",
+        "mix_mean_ratio",
+        "nll_sum_mix",
+        "nll_pred_last",
+        "nll_pred_last_mix",
+        "nll_gt_sum",
+        "gt_nll_confcoef_diff",
+        "gt_nll_confcoef_diff_mix",
+    ]
+
+    range_suffix = "1e6_1e9" if filter_intensities else "1e4_1e9"
 
     # --- 1. Per-Dataset Plots ---
     groups = metric_df.groupby(["dataset", "sparse"])
@@ -478,11 +463,20 @@ def main(
             )
             stats["sem"] = stats["std"] / np.sqrt(stats["count"])
 
-            # Filename: scaling_{m}.png (Folder name has dataset info)
-            # Or keep full name? "respect directory structure".
-            # plot_correlations uses `correlation_...` filenames.
-            # I will use `scaling_{m}.png`.
-            plot_path = target_dir / f"scaling_{m}_{aggregation}.pdf"
+            # Filename: sparse_{m}_{aggregation}_{range_suffix}.pdf
+            # If metric is already specific (like nll_pred_last), drop aggregation suffix if it matches or is irrelevant
+            metric_agg_suffix = f"_{aggregation}"
+            if m in [
+                "nll_sum",
+                "nll_pred_last",
+                "nll_pred_last_mix",
+                "nll_gt_sum",
+                "gt_nll_confcoef_diff",
+                "gt_nll_confcoef_diff_mix",
+            ]:
+                metric_agg_suffix = ""
+
+            plot_path = target_dir / f"sparse_{m}{metric_agg_suffix}_{range_suffix}.pdf"
             plot_scaling_metric(stats, m, plot_path)
 
     # --- 2. Global Plots (3 Columns: Lamino, Composite, Lung) ---
@@ -515,9 +509,7 @@ def main(
         for col_idx, ds_name in enumerate(datasets_order):
             ax = axes[col_idx]
 
-            ds_df = metric_df[
-                (metric_df["dataset"] == ds_name) & (metric_df["sparse"] == True)
-            ]
+            ds_df = metric_df[(metric_df["dataset"] == ds_name) & (metric_df["sparse"])]
             if ds_df.empty:
                 ds_df = metric_df[(metric_df["dataset"] == ds_name)]
 
@@ -549,7 +541,6 @@ def main(
                     sub["mean"],
                     label=label,
                     marker="x",
-                    # linestyle=ls,
                     color=color,
                     alpha=0.9,
                     markersize=4,
@@ -568,7 +559,7 @@ def main(
             ax.set_xscale("log")
             ax.set_xlabel("Total Intensity")
             ax.set_title(f"{ds_name.title()} Dataset")
-            ax.grid(True, which="both", linestyle="--", alpha=0.3)
+            ax.grid(True, which="major", linestyle="--", alpha=0.3)
 
             # Pretty Y-Label
             pretty_name = m.upper()
@@ -579,7 +570,19 @@ def main(
             if m == "nll":
                 pretty_name = "NLL"
             if m == "nll_sum":
-                pretty_name = "NLL Sum"
+                pretty_name = "Seq. NLL"
+            if m == "mix_mean_ratio":
+                pretty_name = "Seq. NLL Mix-Mean Ratio"
+            if m == "nll_sum_mix":
+                pretty_name = "Seq. NLL (Mix.)"
+            if m == "nll_pred_last":
+                pretty_name = "NLL Last Prediction"
+            if m == "nll_pred_last_mix":
+                pretty_name = "NLL Last Prediction (Mix.)"
+            if m == "nll_gt_sum":
+                pretty_name = "NLL"
+            if m in ["gt_nll_confcoef_diff", "gt_nll_confcoef_diff_mix"]:
+                pretty_name = r"$L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast) - \beta_{t_\mathrm{final}}(\delta)$"
 
             if m == "nll_sum":
                 ax.set_yscale("log")
@@ -589,7 +592,21 @@ def main(
                 ax.legend(fontsize=8)
 
         # Save
-        out_path = global_dir / f"shared_{m}_{aggregation}.pdf"
+        metric_agg_suffix = f"_{aggregation}"
+        if m in [
+            "nll_sum",
+            "nll_pred_last",
+            "nll_pred_last_mix",
+            "nll_gt_sum",
+            "gt_nll_confcoef_diff",
+            "gt_nll_confcoef_diff_mix",
+            "mix_mean_ratio",
+        ]:
+            metric_agg_suffix = ""
+
+        out_path = (
+            global_dir / f"sparse_shared_{m}{metric_agg_suffix}_{range_suffix}.pdf"
+        )
         plt.savefig(out_path, dpi=300, bbox_inches="tight")
         # logger.info(f"Saved {out_path}")
         plt.close(fig)

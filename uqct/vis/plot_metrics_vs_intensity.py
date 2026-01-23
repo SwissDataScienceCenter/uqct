@@ -76,7 +76,9 @@ def get_stats(dataset: str) -> dict[str, dict[str, float]]:
         == data_mle.shape
         == data_unet.shape
         == data_unet_ensemble.shape
-    ), f"Shape mismatch for {dataset=}: {data_diffusion.shape=}, {data_fbp.shape=}, {data_mle.shape=}, {data_unet.shape=}, {data_unet_ensemble.shape=}"
+    ), (
+        f"Shape mismatch for {dataset=}: {data_diffusion.shape=}, {data_fbp.shape=}, {data_mle.shape=}, {data_unet.shape=}, {data_unet_ensemble.shape=}"
+    )
 
     stats = {
         predictor: {

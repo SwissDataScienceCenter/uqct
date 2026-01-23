@@ -94,7 +94,7 @@ if __name__ == "__main__":
     datasets = ("lamino", "lung")
     for ds_name in datasets:
         print(f"Dataset: {ds_name}")
-        print(f"Finding min and max pixel values in training and test set...")
+        print("Finding min and max pixel values in training and test set...")
 
         train_set, test_set = get_dataset(ds_name)
         train_min = min(x.min().item() for x in train_set)

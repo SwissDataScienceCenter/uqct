@@ -452,9 +452,6 @@ def calculate_metrics(
     return {k: float(np.nanmean(v)) for k, v in all_metrics.items()}
 
 
-import click
-
-
 @click.command()
 @click.option(
     "--n-bootstraps", type=int, default=None, help="Filter by number of bootstraps"
@@ -540,7 +537,7 @@ def main(n_bootstraps):
         if not has_data:
             continue
 
-        fig, axes = plt.subplots(1, 3, figsize=(10, 3.5), constrained_layout=True)
+        fig, axes = plt.subplots(1, 3, figsize=(6.75, 2.5), constrained_layout=True)
         # axes is (3,) array
 
         for col_idx, dataset in enumerate(DATASETS):
@@ -567,10 +564,16 @@ def main(n_bootstraps):
 
                 sort_idx = np.argsort(ints)
 
+                model_label = MODEL_NAMES.get(method, method)
+                if model_label in ("FBP", "U-Net"):
+                    label = f"{model_label} Bootstr."
+                else:
+                    label = f"{model_label}"
+
                 ax.plot(
                     ints[sort_idx],
                     vals[sort_idx],
-                    label=MODEL_NAMES.get(method, method),
+                    label=label,
                     color=get_model_colors().get(method, "black"),
                     marker="x",
                 )

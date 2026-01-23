@@ -79,9 +79,9 @@ def nll(
     Returns:
         torch.Tensor: (..., n_angles, side_length)
     """
-    assert (
-        images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1
-    ), f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
+    assert images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1, (
+        f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
+    )
     intensities = intensities.clip(1e-9)
     if radon_fn is not None:
         sino = radon_fn(images, angles)
@@ -453,9 +453,9 @@ def get_astra_geometry_from_images(
     angles: torch.Tensor, images: torch.Tensor
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     assert images.ndim == 3, "images must be 3D (n_slices, H, W)"
-    assert (
-        images.shape[-1] == images.shape[-2]
-    ), f"images must be square (H, W), got images.shape={images.shape}"
+    assert images.shape[-1] == images.shape[-2], (
+        f"images must be square (H, W), got images.shape={images.shape}"
+    )
     n_slices, im_size = images.shape[0], images.shape[-2]
     return get_astra_geometry_3d(angles, im_size, n_slices)
 
@@ -465,9 +465,9 @@ def get_astra_geometry_from_sinogram(
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     assert sino.ndim == 3, "sinogram must be 3D (n_angles, n_det_y, n_det_x)"
     n_det_rows, n_angles, n_det_cols = sino.shape
-    assert (
-        n_angles == angles.shape[0]
-    ), f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sino.shape}"
+    assert n_angles == angles.shape[0], (
+        f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sino.shape}"
+    )
     return get_astra_geometry_3d(angles, n_det_cols, n_det_rows)
 
 

@@ -179,7 +179,7 @@ def load_runs(
     # Store all candidate files
     candidates = []
 
-    files = list(runs_dir.glob("*.parquet"))
+    files = sorted(list(runs_dir.glob("*.parquet")))
     logger.info(f"Found {len(files)} files in {runs_dir}")
 
     # Iterate over all parquet files
@@ -209,7 +209,7 @@ def load_runs(
             # We need to ensure it's the right run configuration
             df = pd.read_parquet(file_path)
             job_id = int(df["slurm_job_id"][0])  # type: ignore
-            if df.empty or job_id not in job_ids:
+            if df.empty or (job_ids and job_id not in job_ids):
                 logger.debug(f"Skipping {file_path.name}")
                 continue
 
@@ -253,18 +253,21 @@ def load_runs(
                 logger.warning(f"Could not determine image range for {file_path}")
                 continue
 
+            # Extract seed if available (default to 0 for models without seed)
+            row_seed = int(row.get("seed", 0))
+
             candidates.append(
                 {
                     "file": file_path,
                     "timestamp": timestamp,
                     "data": df,
-                    "config": (row_ds, row_mod, row_int, row_sp),
+                    "config": (row_ds, row_mod, row_int, row_sp, row_seed),
                     "start": start,
                 }
             )
             # logger.debug("Appended candidate")
 
-        except Exception as e:
+        except Exception:
             # logger.error(f"Error processing {file_path}: {e}")
             continue
 
@@ -308,6 +311,5 @@ def load_runs(
         full_df = pd.DataFrame(rows)
 
         aggregated_runs[cfg] = full_df
-        # logger.info(f"Aggregated {cfg}: {len(full_df)} images")
 
     return aggregated_runs

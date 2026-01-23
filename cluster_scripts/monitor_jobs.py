@@ -6,7 +6,6 @@ import re
 import subprocess
 import time
 from collections import defaultdict
-from typing import IO, Any
 
 # ANSI colors
 RED = "\033[91m"
@@ -260,16 +259,16 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
     output.append("Summary:")
     output.append(f"  Total:   {total_indices}")
     output.append(
-        f"  {GREEN}Success: {n_success}{RESET} ({n_success/total_indices*100:.1f}%)"
+        f"  {GREEN}Success: {n_success}{RESET} ({n_success / total_indices * 100:.1f}%)"
     )
     output.append(
-        f"  {RED}Failed:  {n_failed}{RESET} ({n_failed/total_indices*100:.1f}%)"
+        f"  {RED}Failed:  {n_failed}{RESET} ({n_failed / total_indices * 100:.1f}%)"
     )
     output.append(
-        f"  {CYAN}Running: {n_running}{RESET} ({n_running/total_indices*100:.1f}%)"
+        f"  {CYAN}Running: {n_running}{RESET} ({n_running / total_indices * 100:.1f}%)"
     )
     output.append(
-        f"  {YELLOW}Pending: {n_pending}{RESET} ({n_pending/total_indices*100:.1f}%)"
+        f"  {YELLOW}Pending: {n_pending}{RESET} ({n_pending / total_indices * 100:.1f}%)"
     )
 
     output.append("-" * 40)
@@ -285,7 +284,7 @@ def print_summary(stats, finished_timestamps, total_indices, job_id, clear=False
             if throughput > 0:
                 n_remaining = n_running + n_pending
                 eta_seconds = n_remaining / throughput
-                output.append(f"  Estimated Rate: {throughput*60:.2f} jobs/min")
+                output.append(f"  Estimated Rate: {throughput * 60:.2f} jobs/min")
                 output.append(f"  Estimated Remaining Time: {format_time(eta_seconds)}")
             else:
                 output.append("  Estimated Remaining Time: Unknown (Throughput 0)")
@@ -521,7 +520,7 @@ def main():
                 ]
 
                 cmd_str = " ".join(cmd)
-                print(f"\nResubmitting failed jobs...")
+                print("\nResubmitting failed jobs...")
                 print(f"Command: {cmd_str}")
 
                 if args.dry_run:

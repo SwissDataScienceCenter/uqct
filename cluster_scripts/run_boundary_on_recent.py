@@ -124,7 +124,7 @@ def filter_by_slurm_id(runs: list[RunInfo], allowed_ids: list[str]) -> list[RunI
 
             if found_id and found_id in allowed_ids:
                 kept.append(r)
-        except Exception as e:
+        except Exception:
             # print(f"Error checking SLURM ID for {r.path}: {e}")
             pass
     return kept

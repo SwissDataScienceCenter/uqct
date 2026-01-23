@@ -1,5 +1,4 @@
 import torch
-from scipy import stats
 
 from uqct.ct import Experiment, sinogram_from_counts, fbp, circular_mask
 from uqct.eval.run import run_evaluation
@@ -10,7 +9,6 @@ def get_bootstrap_predictor(
     n_bootstraps: int,
     method: str = "fbp",  # "fbp" or "unet"
 ):
-
     # We return a closure-creator so we can inject the model instance later if needed
     def get_predictor_with_model(model=None):
         def predictor_fn(

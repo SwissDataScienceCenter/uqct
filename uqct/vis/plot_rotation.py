@@ -11,7 +11,6 @@ from tqdm import tqdm
 from typing import Optional, List, Dict
 import scipy.ndimage as ndimage
 import torch.nn.functional as F
-import time
 from functools import lru_cache
 
 import uqct
@@ -23,14 +22,14 @@ from uqct.vis.style import MODEL_ORDER, get_style
 # Patch get_dataset to speed up repeated calls in setup_experiment
 uqct.eval.run.get_dataset = lru_cache(maxsize=None)(get_dataset)
 
-# Plotting style
-plt.style.use(
-    "seaborn-v0_8-whitegrid"
-    if "seaborn-v0_8-whitegrid" in plt.style.available
-    else "ggplot"
-)
-plt.rcParams["figure.figsize"] = (10, 6)
-plt.rcParams["font.size"] = 12
+# # Plotting style
+# plt.style.use(
+#     "seaborn-v0_8-whitegrid"
+#     if "seaborn-v0_8-whitegrid" in plt.style.available
+#     else "ggplot"
+# )
+# plt.rcParams["figure.figsize"] = (10, 6)
+# plt.rcParams["font.size"] = 12
 
 
 DELTA = 0.05
@@ -106,7 +105,7 @@ def compute_rotated_nll(
     total_items = cat_images.shape[0]
 
     # Batch Size
-    batch_size = 256
+    batch_size = 128
 
     all_nlls = []
 
@@ -151,57 +150,28 @@ def compute_rotated_nll(
     return results
 
 
-@click.command()
-@click.option(
-    "--consolidated-file",
-    type=click.Path(path_type=Path, exists=True),
-    required=True,
-    help="Path to consolidated parquet file.",
-)
-@click.option(
-    "--output-dir",
-    type=click.Path(path_type=Path),
-    default=Path("./plots"),
-    help="Directory to save plots.",
-)
-@click.option(
-    "--limit", default=None, type=int, help="Limit number of groups processing (debug)."
-)
-@click.option(
-    "--device",
-    default="cuda" if torch.cuda.is_available() else "cpu",
-    help="Device to use.",
-)
-def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional[int]):
-    """Analyze exclusion rate of rotated GT images."""
+DATASETS = ["lung", "composite", "lamino"]
 
-    # Load settings
-    try:
-        with open("uqct/settings.toml", "rb") as f:
-            settings_data = tomllib.load(f)
-        sparse_settings = settings_data.get("eval-sparse", {})
-        default_schedule_len = sparse_settings.get("schedule_length", 32)  # Default 32
-        click.echo(f"Loaded schedule_length={default_schedule_len} from settings.toml")
-    except Exception as e:
-        default_schedule_len = 32
-        click.echo(
-            f"Could not load settings.toml ({e}), defaulting to {default_schedule_len}"
-        )
 
+def generate_data(
+    consolidated_file: Path,
+    output_file: Path,
+    device: str,
+    limit: Optional[int],
+    schedule_length: int = 32,
+):
+    """Generates rotation exclusion data and saves to Parquet."""
     click.echo(f"Loading data from {consolidated_file}...")
     df = pd.read_parquet(consolidated_file)
 
     # Filter for valid entries (need nll_pred)
-    df = df[df["nll_pred"].notna()]
+    df = df[df["nll_pred"].notna() & df["total_intensity"].isin([1e6, 1e7, 1e8, 1e9])]
 
     # Define Angles
     # Log-linearly spaced between 0.1 and 90, plus 0.0 for GT check
     log_angles = np.logspace(np.log(0.1), np.log(90), 10, base=np.e)
     angles_deg = np.concatenate(([0.0], log_angles))
     click.echo(f"Angles: {angles_deg}")
-
-    # Output
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     results_records = []
 
@@ -220,9 +190,6 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
         return
 
     groups = list(df.groupby(group_cols))
-
-    click.echo(f"Processing {len(groups)} experiment groups...")
-
     count_groups = 0
     for group_keys, group_df in tqdm(groups, total=len(groups)):
         if limit is not None and count_groups >= limit:
@@ -237,13 +204,14 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
         seed = keys["seed"]
 
         start_idx = keys.get("image_start_index")
+        if start_idx is not None:
+            start_idx = int(start_idx)
         end_idx = keys.get("image_end_index")
+        if end_idx is not None:
+            end_idx = int(end_idx)
 
-        schedule_length = default_schedule_len
-
-        gt = None
-        experiment = None
-        schedule = None
+        if start_idx is None or end_idx is None:
+            continue
 
         gt, experiment, schedule = setup_experiment(
             dataset=dataset,
@@ -265,11 +233,9 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
         rot_nlls_map = compute_rotated_nll(gt, angles_deg, experiment, schedule)
 
         # Now Check Exclusion for each Model
-        # Iterate over unique models in this group
         for model, model_df in group_df.groupby("model"):
             n_images = min(len(model_df), len(gt))
 
-            # We iterate images by index to match GT
             for i in range(n_images):
                 img_row = model_df.iloc[i]
 
@@ -284,10 +250,9 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
                 L_pred = len(pred_cum)
 
                 for angle in angles_deg:
-                    # Get Rotated NLL for Image i
                     rot_traj = np.array(rot_nlls_map[angle][i])
 
-                    # Align lengths (Slice from END to match prediction horizon)
+                    # Align lengths
                     L_rot = len(rot_traj)
                     if L_rot > L_pred:
                         rot_traj = rot_traj[-L_pred:]
@@ -296,11 +261,8 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
 
                     rot_cum = np.cumsum(rot_traj)
 
-                    # Direct comparison
                     if len(rot_cum) != len(thresh_cum):
-                        click.echo(
-                            f"Warning: Length Mismatch Model {model}: Rot {len(rot_cum)} vs Thresh {len(thresh_cum)}"
-                        )
+                        # Warning handled?
                         continue
 
                     is_excluded = np.any(rot_cum > thresh_cum)
@@ -313,183 +275,168 @@ def main(consolidated_file: Path, output_dir: Path, device: str, limit: Optional
                             "model": model,
                             "angle": angle,
                             "seed": seed,
-                            "image_idx": i + start_idx,
+                            "image_idx": i + (start_idx if start_idx else 0),
                             "excluded": is_excluded,
                         }
                     )
 
-        # Memory Cleanup
         del gt, experiment, schedule
         torch.cuda.empty_cache()
 
-    # Analysis & Plotting
     res_df = pd.DataFrame(results_records)
     if res_df.empty:
         click.echo("No results generated.")
         return
 
-    res_df.to_csv(output_dir / "rotation_exclusion_raw.csv", index=False)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    res_df.to_parquet(output_file, index=False)
+    click.echo(f"Saved results to {output_file}")
 
-    # Aggregate Exclusion Rate (Include sparse)
+
+def plot_data(input_file: Path):
+    """Plots exclusion rate from Parquet data."""
+    if not input_file.exists():
+        click.echo(f"Input file {input_file} does not exist.")
+        return
+
+    df = pd.read_parquet(input_file)
+
+    # Aggregate Exclusion Rate
     agg = (
-        res_df.groupby(["dataset", "intensity", "sparse", "model", "angle"])["excluded"]
+        df.groupby(["dataset", "intensity", "sparse", "model", "angle"])["excluded"]
         .mean()
         .reset_index()
     )
     agg.rename(columns={"excluded": "exclusion_rate"}, inplace=True)
-    agg.to_csv(output_dir / "rotation_exclusion_summary.csv", index=False)
 
-    click.echo(f"Models found in summary: {agg['model'].unique()}")
+    # Save Summary
+    output_dir = Path("./plots/rotation")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    agg.to_parquet(output_dir / "rotation_exclusion_summary.parquet", index=False)
 
-    # Plotting
-    plot_groups = agg.groupby(["dataset", "intensity", "sparse"])
+    # Group by Intensity and Sparse for Figures
+    grouped_settings = agg.groupby(["intensity", "sparse"])
 
-    for (d, inten, sp), p_df in plot_groups:
-        plt.figure(figsize=(8, 6))
-
-        available_models = set(p_df["model"].unique())
-        models = [m for m in MODEL_ORDER if m in available_models]  # Enforce order
-        # Add any extra models
-        for m in sorted(available_models):
-            if m not in models:
-                models.append(m)
-
-        for m in models:
-            sub = p_df[p_df["model"] == m].sort_values("angle")
-            style = get_style(m)
-            plt.plot(
-                sub["angle"],
-                sub["exclusion_rate"],
-                label=style["label"],
-                color=style["color"],
-                marker="o",
-                alpha=0.8,
-            )
-
-        plt.xscale("linear")
-        plt.xlabel("Rotation Angle (Degrees)")
-        plt.ylabel("Exclusion Rate")
-
-        # Pretty Intensity
-        inten_str = f"{inten:.0e}".replace("+0", "").replace("+", "")
-
-        plt.legend()
-        plt.ylim(-0.05, 1.05)
-
-        # Directory structure: root/{dataset}/{intensity}_{sparse}/exclusion_rate.png
-        # Hierarchical per user request
-        target_dir = output_dir / d / f"{inten_str}_{'sparse' if sp else 'dense'}"
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        plt.savefig(target_dir / "exclusion_rate.pdf")
-        plt.close()
-
-    # --- GLOBAL OVERVIEW PLOTS ---
-
-    # Average across datasets per intensity (keeping sparse/dense aggregated or separate?)
-    # Current behavior was aggregating everything. Let's keep it but separate purely by intensity for now.
-
-    global_agg = (
-        agg.groupby(["intensity", "model", "angle"])["exclusion_rate"]
-        .mean()
-        .reset_index()
-    )
-
-    intensities = sorted(global_agg["intensity"].unique())
-    if len(intensities) > 0:
-        # Global Directory
-        global_dir = output_dir / "global"
-        global_dir.mkdir(parents=True, exist_ok=True)
-
-        # 6 Plots (One per Intensity) + Stacked
-        fig_stack, axes_stack = plt.subplots(
-            len(intensities), 1, figsize=(10, 4 * len(intensities)), sharex=True
+    for (intensity, sparse), group_df in grouped_settings:
+        fig, axes = plt.subplots(
+            1, 3, figsize=(6.75, 2.5), constrained_layout=True, sharey=True
         )
-        if len(intensities) == 1:
-            # Ensure iterable if 1
-            axes_stack = np.array([axes_stack])
 
-        for idx, inten in enumerate(intensities):
-            p_df = global_agg[global_agg["intensity"] == inten]
+        for col_idx, dataset in enumerate(DATASETS):
+            ax = axes[col_idx]
 
-            # Individual Plot
-            plt.figure(figsize=(8, 6))
-            available_models = set(p_df["model"].unique())
+            d_df = group_df[group_df["dataset"] == dataset]
+
+            if d_df.empty:
+                ax.set_visible(False)
+                continue
+
+            # Models
+            available_models = set(d_df["model"].unique())
             models = [m for m in MODEL_ORDER if m in available_models]
-            # Add any extra models
             for m in sorted(available_models):
                 if m not in models:
                     models.append(m)
 
             for m in models:
-                sub = p_df[p_df["model"] == m].sort_values("angle")
+                sub = d_df[d_df["model"] == m].sort_values("angle")
                 style = get_style(m)
 
-                # Individual Plot
-                plt.plot(
+                ax.plot(
                     sub["angle"],
                     sub["exclusion_rate"],
                     label=style["label"],
                     color=style["color"],
-                    marker="o",
+                    marker="x",
                     alpha=0.8,
                 )
 
-                # Add to Stacked
-                axes_stack[idx].plot(
-                    sub["angle"],
-                    sub["exclusion_rate"],
-                    label=style["label"],
-                    color=style["color"],
-                    marker="o",
-                    alpha=0.8,
-                )
+            ax.set_xscale("log")
+            ax.set_xlabel("Rotation Angle (Deg)")
+            ax.set_title(f"{dataset.title()} Dataset")
+            ax.grid(True, which="both", linestyle="--", alpha=0.3)
+            ax.set_ylim(-0.05, 1.05)
 
-            plt.xscale("linear")
-            plt.xlabel("Rotation Angle (Degrees)")
-            plt.ylabel("Exclusion Rate")
+            if col_idx == 0:
+                ax.set_ylabel("Exclusion Rate")
+                ax.legend(fontsize=8)
 
-            # Pretty Intensity
-            inten_str = f"{inten:.0e}".replace("+0", "").replace("+", "")
+        # Directory: plots/rotation/{intensity}_{sparse}/
+        inten_str = f"{intensity:.0e}".replace("+0", "").replace("+", "")
+        mode_str = "sparse" if sparse else "dense"
 
-            plt.legend()
-            plt.ylim(-0.05, 1.05)
+        out_path = output_dir / f"{mode_str}_rotation_exclusion_{inten_str}.pdf"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Global Directory: global/rotation/{intensity}/exclusion_rate.pdf
-            global_target_dir = output_dir / "global" / "rotation" / inten_str
-            global_target_dir.mkdir(parents=True, exist_ok=True)
+        plt.savefig(out_path)
+        plt.close(fig)
+        click.echo(f"Saved plot to {out_path}")
 
-            plt.savefig(global_target_dir / "exclusion_rate.pdf")
-            plt.close()
+    click.echo("Plotting done.")
 
-            # Stacked styling
 
-            axes_stack[idx].set_ylim(-0.05, 1.05)
-            axes_stack[idx].set_ylabel("Exclusion Rate")
-            axes_stack[idx].grid(True)
-            axes_stack[idx].legend(
-                loc="center left", bbox_to_anchor=(1, 0.5), fontsize="small"
-            )
+@click.command()
+@click.option(
+    "--consolidated-file",
+    type=click.Path(path_type=Path),
+    help="Path to consolidated parquet file (for input data).",
+)
+@click.option(
+    "--data-file",
+    type=click.Path(path_type=Path),
+    default=Path("./rotation_results.parquet"),
+    help="Path to intermediate rotation results parquet file.",
+)
+@click.option(
+    "--generate/--no-generate",
+    default=True,
+    help="Whether to run data generation.",
+)
+@click.option(
+    "--plot/--no-plot",
+    default=True,
+    help="Whether to run plotting.",
+)
+@click.option(
+    "--limit", default=None, type=int, help="Limit number of groups processing (debug)."
+)
+@click.option(
+    "--device",
+    default="cuda" if torch.cuda.is_available() else "cpu",
+    help="Device to use.",
+)
+def main(
+    consolidated_file: Optional[Path],
+    data_file: Path,
+    generate: bool,
+    plot: bool,
+    limit: Optional[int],
+    device: str,
+):
+    """Analyze exclusion rate of rotated GT images."""
 
-            # Save Stacked (do it outside loop or accumulate?)
-            # The figure is created outside.
+    # Load settings for schedule_length if needed
+    schedule_length = 32
+    try:
+        with open("uqct/settings.toml", "rb") as f:
+            settings_data = tomllib.load(f)
+        sparse_settings = settings_data.get("eval-sparse", {})
+        schedule_length = sparse_settings.get("schedule_length", 32)
+    except Exception:
+        pass
 
-        # Save Stacked Figure
-        global_root = output_dir / "global" / "rotation"
-        global_root.mkdir(parents=True, exist_ok=True)
-        fig_stack.tight_layout()
-        fig_stack.savefig(global_root / "exclusion_stacked.pdf")
-        plt.close(fig_stack)
+    if generate:
+        if not consolidated_file:
+            click.echo("Error: --consolidated-file required for generation.")
+            return
+        if not consolidated_file.exists():
+            click.echo(f"Error: {consolidated_file} does not exist.")
+            return
 
-        # Finalize Stacked
-        axes_stack[-1].set_xlabel("Rotation Angle (Degrees)")
-        axes_stack[-1].set_xscale("log")
+        generate_data(consolidated_file, data_file, device, limit, schedule_length)
 
-        plt.tight_layout()
-        fig_stack.savefig(global_dir / "exclusion_global_stacked.pdf")
-        plt.close(fig_stack)
-
-    click.echo("Done.")
+    if plot:
+        plot_data(data_file)
 
 
 if __name__ == "__main__":

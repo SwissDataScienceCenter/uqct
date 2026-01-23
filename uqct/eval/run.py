@@ -265,7 +265,6 @@ def setup_experiment(
     counts = sample_observations(gt, intensities, angles)
     intensities_lr = intensities * 2
     experiment = Experiment(counts, intensities_lr, angles, sparse)
-    print(f"Experiment: {experiment}")
     return gt, experiment, schedule
 
 

@@ -29,9 +29,10 @@ logger = get_logger(__name__)
 )
 @click.option(
     "--jobid",
-    default=[54717753, 54757527],
+    # default=[54717753, 54757527],
+    default=None,
     multiple=True,
-    help="Total intensity.",
+    help="Run IDs to include. If empty, all runs are included.",
 )
 @click.option("--sparse/--no-sparse", default=None, help="Sparse setting flag.")
 def main(
@@ -69,7 +70,7 @@ def main(
     # 1. Group keys by (dataset, intensity, sparse)
     groups = {}
     for key, df in aggregated_runs.items():
-        ds, mod, inten, sp = key
+        ds, mod, inten, sp, seed = key
         group_key = (ds, inten, sp)
         if group_key not in groups:
             groups[group_key] = []
