@@ -1,5 +1,5 @@
-import os
 import re
+import shlex
 import subprocess
 import sys
 from collections import defaultdict
@@ -164,11 +164,11 @@ def main(
         print(f"Found {len(all_runs)} total parquet files.")
 
     # Filter
-    # method=diffusion, seed=0, 1e4 <= intensity <= 1e9
+    # method=diffusion, seed=0, 1e6 <= intensity <= 1e9
     filtered_runs = [
         r
         for r in all_runs
-        if r.method == "diffusion" and r.seed == 0 and 1e4 <= r.intensity <= 1e9
+        if r.method == "diffusion" and r.seed == 0 and 1e6 <= r.intensity <= 1e9
     ]
 
     if dry_run:
@@ -216,31 +216,83 @@ def main(
         # Use uv run -m uqct.eval.diffusion_boundary
         # Quote the path to handle spaces in filenames
         cmd = (
-            f"uv run -m uqct.eval.diffusion_boundary '{r.path.absolute()}' "
-            f"--output-prefix '{output_prefix}'"
+            f"uv run -m uqct.eval.diffusion_boundary {shlex.quote(str(r.path.absolute()))} "
+            f"--output-prefix {shlex.quote(output_prefix)}"
         )
         commands.append(cmd)
+
+    # Create a unique ID for this batch
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    commands_file = results_dir / f"commands_boundary_{timestamp}.txt"
 
     if local:
         for cmd in commands:
             print(f"Running: {cmd}")
             subprocess.run(cmd, shell=True, check=True)
-    elif submit:
-        for cmd in commands:
-            # Basic sbatch wrap
-            slurm_cmd = (
-                f"sbatch --time=04:00:00 --cpus-per-task=4 --mem-per-cpu=8G --gres=gpumem:16g "
-                f"--wrap='{cmd}'"
-            )
-            print(f"Submitting: {slurm_cmd}")
-            # dry-run prints? logic above says submit flag runs it.
-            subprocess.run(slurm_cmd, shell=True, check=True)
+        return
 
+    # Write commands to file
+    if submit or dry_run:
+        with open(commands_file, "w") as f:
+            for cmd in commands:
+                f.write(cmd + "\n")
+        print(f"Written {len(commands)} commands to {commands_file}")
+
+    if submit:
+        # Create SLURM script
+        log_dir = Path("/cluster/scratch/mgaetzner/logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        job_name = "boundary_eval"
+        num_jobs = len(commands)
+        # SLURM array is 1-indexed usually, but we can use 1-N and sed -n 'Np'
+        array_range = f"1-{num_jobs}"
+
+        slurm_script = f"""#!/bin/bash
+#SBATCH --job-name={job_name}
+#SBATCH --output={log_dir}/%x_%A_%a.out
+#SBATCH --error={log_dir}/%x_%A_%a.err
+#SBATCH --time=04:00:00
+#SBATCH --cpus-per-task=4
+#SBATCH --mem-per-cpu=8G
+#SBATCH --gpus=1
+#SBATCH --gres=gpumem:16g
+#SBATCH --exclude=eu-g4-015,eu-g6-039,eu-g6-063
+#SBATCH --array={array_range}
+
+set -euo pipefail
+
+PROJECT_ROOT="${{HOME}}/uq-xray-ct"
+cd "${{PROJECT_ROOT}}"
+export PYTHONPATH="${{PROJECT_ROOT}}"
+source "${{PROJECT_ROOT}}/.venv/bin/activate"
+
+# Extract command from the file
+CMD=$(sed -n "${{SLURM_ARRAY_TASK_ID}}p" "{commands_file}")
+echo "Running: $CMD"
+eval "$CMD"
+"""
+
+        # Write temporary submission script or pipe to sbatch
+        # Using pipe is cleaner to avoid extra files, but we already have the commands file.
+        # Let's write the sbath script too for inspectability.
+        sbatch_file = results_dir / f"submit_boundary_{timestamp}.sh"
+        with open(sbatch_file, "w") as f:
+            f.write(slurm_script)
+
+        print(f"Submitting job array {array_range} via {sbatch_file}")
+        subprocess.run(f"sbatch {sbatch_file}", shell=True, check=True)
+
+    elif dry_run:
+        print("Dry run: Commands file generated.")
+        print(f"Would submit array 1-{len(commands)} reading from {commands_file}")
     else:
-        # Just list them
+        # Just list commands if neither local, submit, nor dry-run (default behavior from before?)
+        # The original code just printed them.
         for cmd in commands:
             print(cmd)
 
 
 if __name__ == "__main__":
     main()
+

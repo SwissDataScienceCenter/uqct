@@ -151,7 +151,7 @@ class JobMonitor:
             try:
                 with open(out_file, "r") as f:
                     out_chunk = f.read()
-                finished_str = f"JOB {index} FINISHED"
+                finished_str = f"FINISHED"
                 if finished_str in out_chunk:
                     return "Success", None, timestamp
             except Exception as _:

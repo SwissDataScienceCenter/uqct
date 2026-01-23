@@ -55,5 +55,5 @@ fi
 
 # Run evaluation
 # python -m uqct.eval.cli run --job-id "${JOB_ID}" --sparse
-python -m uqct.eval.cli run --job-id "${JOB_ID}" --sparse --duplicate
+python -m uqct.eval.cli run --job-id "${JOB_ID}" --sparse --duplicate --recompute-metrics
 echo "JOB ${JOB_ID} FINISHED"
