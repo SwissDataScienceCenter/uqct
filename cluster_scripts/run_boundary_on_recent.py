@@ -137,6 +137,12 @@ def filter_by_slurm_id(runs: list[RunInfo], allowed_ids: list[str]) -> list[RunI
     default=Path("results/runs"),
     help="Directory containing run results.",
 )
+@click.option(
+    "--log-dir",
+    type=click.Path(path_type=Path),
+    default=Path("logs/"),
+    help="Directory containing logs.",
+)
 @click.option("--local", is_flag=True, help="Run commands locally instead of printing.")
 @click.option("--submit", is_flag=True, help="Submit jobs to SLURM.")
 @click.option("--limit", type=int, default=None, help="Limit number of runs.")
@@ -240,7 +246,7 @@ def main(
 
     if submit:
         # Create SLURM script
-        log_dir = Path("/cluster/scratch/mgaetzner/logs")
+        log_dir = Path(os.getenv("UQCT_LOG_DIR", "logs"))
         log_dir.mkdir(parents=True, exist_ok=True)
 
         job_name = "boundary_eval"

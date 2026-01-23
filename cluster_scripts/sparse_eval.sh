@@ -1,20 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=uqct-sparse-eval
 #SBATCH --array=0-2016
-#SBATCH --output=/cluster/scratch/mgaetzner/logs/%x_%A_%a.out
-#SBATCH --error=/cluster/scratch/mgaetzner/logs/%x_%A_%a.err
 #SBATCH --cpus-per-task=4
 #SBATCH --mem-per-cpu=8G
 #SBATCH --gpus=1
 #SBATCH --gres=gpumem:16g
 #SBATCH --time=24:00:00
-
-# Needed that before but seems to work without again
-# #SBATCH --account=ls_math
-# #SBATCH --partition=gpu
-#
-# Full run:
-# #SBATCH --array=0-2934
 
 # Usage: sbatch cluster_scripts/sparse_eval.sh
 

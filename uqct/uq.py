@@ -25,6 +25,21 @@ def gaussian_ci(
     return lo, hi
 
 
+def gaussian_conservative_ci(
+    samples: torch.Tensor, delta: float = 0.05, bdim=0, n_pixels: int = 128 * 128
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Gaussian (mean ± z·std) confidence interval.
+    """
+    z = torch.distributions.Normal(0, 1).icdf(torch.tensor(1 - delta / 2 / n_pixels))
+    mean, std = mean_std(samples, bdim=bdim)
+
+    lo = mean - z * std
+    hi = mean + z * std
+
+    return lo, hi
+
+
 def percentile_ci(
     samples: torch.Tensor, alpha: float = 0.05, bdim=0
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -105,6 +120,10 @@ def simultaneous_ci(
     return lo, hi
 
 
+def twod_to_threed(*tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    return tuple(t.unsqueeze(0) if t.ndim == 2 else t for t in tensors)
+
+
 def coverage(
     ci_lo: torch.Tensor,
     ci_hi: torch.Tensor,
@@ -114,12 +133,31 @@ def coverage(
     """
     Empirical pointwise coverage fraction, optionally within a circular mask.
     """
+    ci_lo, ci_hi, target = twod_to_threed(ci_lo, ci_hi, target)
     if circle_mask:
         mask = circular_mask(target.shape[-1], device=target.device)
         covered = ((target >= ci_lo) & (target <= ci_hi)).float() * mask
         return covered.sum(dim=(-1, -2, -3)) / mask.sum()
     else:
         return ((target >= ci_lo) & (target <= ci_hi)).float().mean(dim=(-1, -2, -3))
+
+
+def simultaneous_coverage(
+    ci_lo: torch.Tensor,
+    ci_hi: torch.Tensor,
+    target: torch.Tensor,
+    circle_mask: bool = True,
+) -> bool:
+    """
+    Returns True if all (masked) pixels are covered by the interval.
+    """
+    if circle_mask:
+        mask = circular_mask(target.shape[-1], device=target.device)
+        covered = ((target >= ci_lo) & (target <= ci_hi)) | (~mask.bool())
+        return covered.all().item()
+    else:
+        covered = (target >= ci_lo) & (target <= ci_hi)
+        return covered.all().item()
 
 
 def error_correlation(

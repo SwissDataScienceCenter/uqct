@@ -1,11 +1,27 @@
 import matplotlib.pyplot as plt
 
+plt.rcParams.update(
+    {
+        "text.usetex": True,  # Use LaTeX fonts
+        "font.family": "serif",  # Matches Latex default
+        "font.serif": ["Times"],  # Times New Roman usually matches body
+        "font.size": 9,  # ICML caption size is usually 9pt
+        "axes.labelsize": 9,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
+        "legend.fontsize": 8,
+        "figure.titlesize": 10,
+    }
+)
+
+
 # Standard Model Order
-MODEL_ORDER = ["fbp", "mle", "unet", "unet_ensemble", "diffusion"]
+MODEL_ORDER = ["fbp", "mle", "unet", "unet_ensemble", "diffusion", "boundary"]
 
 # Display Names
 MODEL_NAMES = {
     "diffusion": "Diffusion",
+    "boundary": "Boundary",
     "fbp": "FBP",
     "mle": "MLE",
     "unet": "U-Net",

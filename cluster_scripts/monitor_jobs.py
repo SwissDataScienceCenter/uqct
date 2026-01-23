@@ -29,7 +29,7 @@ def parse_args():
     parser.add_argument(
         "--log-dir",
         type=str,
-        default="/cluster/scratch/mgaetzner/logs",
+        default="",
         help="Directory containing log files",
     )
 
@@ -185,7 +185,9 @@ class JobMonitor:
                         in line
                     ):
                         continue
-                    if re.search(r"(Aborted|Error|Traceback|Exception)", line, re.IGNORECASE):
+                    if re.search(
+                        r"(Aborted|Error|Traceback|Exception)", line, re.IGNORECASE
+                    ):
                         error_msg = line.strip()
                         return "Failed", error_msg, timestamp
             except Exception:

@@ -268,8 +268,9 @@ def main(**kwargs):
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
 
-    on_cluster = Path("/cluster").exists()
-    root_dir = Path("/cluster/scratch/mgaetzner/uqct") if on_cluster else Path(".")
+    root_dir = Path(os.getenv("UQCT_ROOT_DIR", "."))
+    if not root_dir.exists():
+        root_dir = Path(".")
     sparse_or_dense = "sparse" if kwargs["sparse"] else "dense"
     run_dir = (
         root_dir
@@ -283,10 +284,10 @@ def main(**kwargs):
     # Create U-Net
     unet = build_unet(kwargs["sparse"], kwargs["dropout"])
     unet = unet.to(device)  # type: ignore
-    # try:
-    #     unet: UNet2DModel = torch.compile(unet)  # type: ignore
-    # except Exception:
-    #     print("Failed to compile U-Net")
+    try:
+        unet: UNet2DModel = torch.compile(unet)  # type: ignore
+    except Exception:
+        print("Failed to compile U-Net")
 
     # Split train set into training and validation subset
     dataset_size = len(train_set)

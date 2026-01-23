@@ -1,5 +1,4 @@
 import math
-import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -556,7 +555,7 @@ def main(
     if time_step is None:
         time_step = max_relative_idx
         logger.info(
-            f"Not specified time-step. Defaulting to lkkast relative index: {time_step}"
+            f"Not specified time-step. Defaulting to last relative index: {time_step}"
         )
     else:
         if time_step > max_relative_idx:

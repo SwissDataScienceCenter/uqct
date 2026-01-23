@@ -114,6 +114,10 @@ def build_bootstrapping_grid(settings: dict[str, Any]) -> list[dict[str, Any]]:
     intensities = settings["total_intensity_values"]
     full_image_range = tuple(settings["image_range"])
 
+    # Chunk into batches of 10
+    start, end = full_image_range
+    chunks_10 = [(i, min(i + 10, end)) for i in range(start, end, 10)]
+
     bs_cfg = settings.get("bootstrapping", {})
     methods = bs_cfg.get("methods", ["fbp"])
     if "intensities" in bs_cfg:
@@ -122,20 +126,21 @@ def build_bootstrapping_grid(settings: dict[str, Any]) -> list[dict[str, Any]]:
     seeds = list(range(seed_range[0], seed_range[1]))
 
     grid = []
-    # Order: Dataset -> Intensity -> Seeds -> Method
+    # Order: Dataset -> Intensity -> Seeds -> Method -> Image Ranges
     for d in datasets:
         for i_lvl in intensities:
             for s in seeds:
                 for m in methods:
-                    grid.append(
-                        {
-                            "method": m,
-                            "dataset": d,
-                            "intensity": i_lvl,
-                            "seed": s,
-                            "image_range": full_image_range,
-                        }
-                    )
+                    for r in chunks_10:
+                        grid.append(
+                            {
+                                "method": m,
+                                "dataset": d,
+                                "intensity": i_lvl,
+                                "seed": s,
+                                "image_range": r,
+                            }
+                        )
     return grid
 
 
@@ -588,7 +593,7 @@ def bootstrapping(job_id: int | None, sparse: bool):
         sys.exit(1)
 
     bs_cfg = settings["bootstrapping"]
-    n_bootstraps = bs_cfg.get("n_bootstraps", 10)
+    n_bootstraps = bs_cfg.get("n_bootstraps", 1000)
 
     # Build Grid
     grid = build_bootstrapping_grid(settings)

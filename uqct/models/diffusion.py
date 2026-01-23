@@ -291,6 +291,7 @@ class Diffusion:
 
         if guidance_loss_fn is not None:
             assert self.lr is not None, "Learning rate uninitialized"
+            plot_img(*(pred_original_sample[:, 0, 0] * 0.5 + 0.5), name="before")
             pred_original_sample = guide(
                 pred_original_sample,
                 guidance_loss_fn,
@@ -298,6 +299,7 @@ class Diffusion:
                 lr=self.lr * (timestep / 1000) if self.anneal_lr else self.lr,
                 verbose=False,
             )
+            plot_img(*(pred_original_sample[:, 0, 0] * 0.5 + 0.5), name="after")
 
         # 4. Compute coefficients for pred_original_sample x_0 and current sample x_t
         # See formula (7) from https://arxiv.org/pdf/2006.11239.pdf
