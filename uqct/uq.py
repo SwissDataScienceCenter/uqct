@@ -26,6 +26,23 @@ def gaussian_ci(
 
     return lo, hi
 
+def gaussian_conservative_ci(
+    samples: torch.Tensor,
+    delta: float = 0.05,
+    bdim = 0,
+    n_pixels: int = 128 * 128
+) -> Dict[str, torch.Tensor]:
+    """
+    Gaussian (mean ± z·std) confidence interval.
+    """
+    z = torch.distributions.Normal(0, 1).icdf(torch.tensor(1 - delta / 2 / n_pixels))
+    mean, std = mean_std(samples, bdim=bdim)
+
+    lo = mean - z * std
+    hi = mean + z * std
+
+    return lo, hi
+
 
 def percentile_ci(
     samples: torch.Tensor,
@@ -95,21 +112,22 @@ def simultaneous_ci(
     samples: torch.Tensor,
     delta: float = 0.05,
     eps: float = 1e-8,
-    bdim = 0
 ) -> Dict[str, torch.Tensor]:
     """
+    Samples = [bdim, ... , H, W]
     Simultaneous (global) confidence band using max-T bootstrap.
     Provides ~95% coverage over all pixels jointly.
     """
+    bdim = 0
     mean, std = mean_std(samples, bdim=bdim)
 
     t = (samples - mean.unsqueeze(bdim)) / (std.unsqueeze(bdim) + eps)
 
     # flatten spatial dims only
-    t_flat = t.flatten(start_dim=bdim + 1)
+    t_flat = t.flatten(start_dim=-2)
     max_t = torch.max(torch.abs(t_flat), dim=-1).values
 
-    t_star = torch.quantile(max_t, 1 - delta)
+    t_star = torch.quantile(max_t, 1 - delta, dim=bdim).unsqueeze(-1).unsqueeze(-1)
 
     lo = mean - t_star * std
     hi = mean + t_star * std
@@ -132,6 +150,24 @@ def coverage(
         return covered.sum(dim=(-1, -2, -3)) / mask.sum()
     else:
         return ((target >= ci_lo) & (target <= ci_hi)).float().mean(dim=(-1, -2, -3))
+
+
+def simultaneous_coverage(
+    ci_lo: torch.Tensor,
+    ci_hi: torch.Tensor,
+    target: torch.Tensor,
+    circle_mask: bool = True,
+) -> bool:
+    """
+    Returns True if all (masked) pixels are covered by the interval.
+    """
+    if circle_mask:
+        mask = circular_mask(target.shape[-1], device=target.device)
+        covered = ((target >= ci_lo) & (target <= ci_hi)) | (~mask.bool())
+        return covered.all(dim=(-1, -2, -3))
+    else:
+        covered = (target >= ci_lo) & (target <= ci_hi)
+        return covered.all(dim=(-1, -2, -3))
 
 def error_correlation(
     ci_width: torch.Tensor,
@@ -199,3 +235,102 @@ def error_r2(
     ss_tot = ((error_flat - error_flat.mean(dim=-1, keepdim=True)) ** 2).sum(dim=-1)
     r2 = 1 - ss_res / (ss_tot + 1e-8)
     return r2
+
+
+
+def sparsification_error(
+    uncertainty: torch.Tensor,
+    error: torch.Tensor,
+    circle_mask: bool = True,
+) -> torch.Tensor:
+    """
+    Computes the Area Under the Sparsification Error curve (AUSE).
+    Measures how well uncertainty predicts high-error regions.
+    The AUSE is the difference between the area under the sparsification curve
+    sorted by uncertainty (Model) and the area under the curve sorted by error (Oracle).
+    Lower is better. AUSE=0 means perfect ranking.
+
+    Args:
+        uncertainty (torch.Tensor): (..., H, W) Uncertainty map (e.g., ci_width or std).
+        error (torch.Tensor): (..., H, W) Absolute error map.
+        circle_mask (bool): If True, applies circular mask.
+        n_bins (int): Number of bins for the sparsification curve.
+
+    Returns:
+        torch.Tensor: AUSE values for each image in the batch. Output shape: (...,)
+    """
+    if circle_mask:
+        mask = circular_mask(error.shape[-1], device=error.device)
+        uncertainty = uncertainty * mask
+        error = error * mask
+
+        # Flatten and keep only valid pixels
+        batch_dims = error.shape[:-2]
+        error_flat = error.reshape(*batch_dims, -1)
+        unc_flat = uncertainty.reshape(*batch_dims, -1)
+
+        # Note: If we just mask with * mask, the outside become 0.
+        # 0 uncertainty might be interpreted as high confidence.
+        # But 0 error is good.
+        # We need to filter indices where mask is 1.
+        # Assuming simple batch processing where mask is same for all is tricky if vectorizing.
+        # However, usually we compute mean over batch.
+
+        # To strictly compute sparsification on valid pixels only:
+        valid_indices = mask.flatten().nonzero().squeeze()
+        if valid_indices.numel() > 0:
+            error_flat = error_flat.index_select(-1, valid_indices)
+            unc_flat = unc_flat.index_select(-1, valid_indices)
+        else:
+            # Should not happen in CT
+            return torch.zeros(batch_dims, device=error.device)
+
+    else:
+        # Flatten spatial dims
+        batch_dims = error.shape[:-2]
+        error_flat = error.reshape(*batch_dims, -1)
+        unc_flat = uncertainty.reshape(*batch_dims, -1)
+
+    # Number of valid pixels
+    n_pixels = error_flat.shape[-1]
+
+    # Vectorized sorting
+
+    # 1. Sort by Uncertainty (Model) Ascending
+    #    (Removing high uncertainty first = keeping low uncertainty pixels)
+    #    So curve x-axis is "fraction removed".
+    #    At x=0 (0 removed), we have all pixels. Mean error is global mean.
+    #    At x=0.99 (99% removed), we have top 1% uncertain pixels removed (or keep 1% most certain).
+    #    Wait, usually sparsification plots Error vs Fraction Removed.
+    #    Order: Remove highest uncertainty first.
+    #    So we define "remaining" set as those with lowest uncertainty.
+    #    So we sort by uncertainty ascending.
+    #    Remaining k% = first k% of sorted array.
+
+    _, unc_indices = torch.sort(unc_flat, dim=-1, descending=False)
+
+    # 2. Sort by Error (Oracle) Ascending
+    #    Oracle removes highest error first.
+    #    Remaining k% = first k% of sorted array (lowest error).
+
+    _, err_indices = torch.sort(error_flat, dim=-1, descending=False)
+
+    # Reorder error
+    error_by_unc = torch.gather(error_flat, -1, unc_indices)
+    error_by_err = torch.gather(error_flat, -1, err_indices)
+
+    # Compute cumulative sums -> cumulative means of remaining pixels
+    # cumsum[i] is sum of elements 0..i
+    cum_error_model = torch.cumsum(error_by_unc, dim=-1)
+    cum_error_oracle = torch.cumsum(error_by_err, dim=-1)
+
+    counts = torch.arange(1, n_pixels + 1, device=error.device, dtype=torch.float32)
+
+    mean_error_model = cum_error_model / counts
+    mean_error_oracle = cum_error_oracle / counts
+
+    # AUSE = Mean absolute difference between curves
+    diff = (mean_error_model - mean_error_oracle).abs()
+    ause = diff.mean(dim=-1)
+
+    return ause
