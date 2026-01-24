@@ -87,9 +87,11 @@ for dataset in "${datasets[@]}"; do
     for model in "${models[@]}"; do
         # Set batch_size depending on model if batch_size is -1
         if [[ "$batch_size" -eq -1 ]]; then
-            if [[ "$model" == "cond_diffusion" || "$model" == "diffusion" ]]; then
+            if [[ "$model" == "cond_diffusion" ||  "$model" == "beta_cond_diffusion" ||  "$model" == "diverse_cond_diffusion" ||  "$model" == "diffusion" ]]; then
             model_batch_size=12  # 0.2 A100
             # model_batch_size=  # 0.5 A100
+            elif [[ "$model" == "gt" ]]; then
+            model_batch_size=20  # 0.2 A100
             else
             model_batch_size=100 # 0.2 A100
             # model_batch_size=300 # 0.5 A100
