@@ -617,10 +617,9 @@ if __name__ == "__main__":
     mixing_models = ["diffusion", "cond_diffusion", "unet_ensemble", "fbp_bootstrap", "unet_bootstrap", "beta_cond_diffusion", "diverse_cond_diffusion"]
 
  
-    angles_rotation_deg = torch.tensor([0.0] + np.logspace(np.log(0.1), np.log(90), 5, base=np.e).tolist())
+    angles_rotation_deg = torch.tensor([0.0] + np.logspace(np.log(0.1), np.log(90), 10, base=np.e).tolist())
 
-
-     # List of argument names to include as metadata
+    # List of argument names to include as metadata
     excluded_keys = ['existing']
 
     # Collect selected parameters
@@ -812,7 +811,8 @@ if __name__ == "__main__":
     
     # Prepare to collect batched results
     res = collections.defaultdict(list)
-
+    res_samples = collections.defaultdict(list)
+    
     t0 = time.time()
     for indices, seed, images, data in tqdm(obs_dataloader):
         images = images.to(device)
@@ -823,9 +823,15 @@ if __name__ == "__main__":
         # Images (Batch, Step, 1, H, W)
         # Sampled Predictions (Sample, Batch, Step, 1, H, W) or (Batch, Step, 1, H, W) for non-mixing models
         if args.model == "gt":
+            # prediction is ground truth image across steps
+            pred = images_lr.clone().unsqueeze(1).expand(-1, schedule.shape[0], -1, -1, -1).contiguous()
+
+            # samples are rotated versions of ground truth
             images_rotated = torch.stack([rotate_images(images, rot_deg.item()) for rot_deg in angles_rotation_deg], dim=0)
             images_rotated = interpolate(images_rotated, size=(128, 128), mode="area")
-            pred = images_rotated.unsqueeze(2).expand(-1, -1, schedule.shape[0], -1, -1, -1).contiguous()
+            samples = images_rotated.unsqueeze(2).expand(-1, -1, schedule.shape[0], -1, -1, -1).contiguous()
+            num_samples = len(angles_rotation_deg)
+            sample_coords = angles_rotation_deg
         else:
             data_cumsum = data.cumsum(dim=1)
             schedule_cumsum = schedule.unsqueeze(0).cumsum(dim=1)
@@ -854,54 +860,78 @@ if __name__ == "__main__":
                     pred = [recon(data_cumsum[:, i], schedule_cumsum[:, i], angles) for i in range(data.shape[1])]
             pred = torch.stack(pred, dim=-4)
 
+        with torch.no_grad():
+            if args.model in mixing_models:
+                _seq_nll_mix = nll_mixture(
+                    pred[:, :, :-1].contiguous(), data[:, 1:], schedule[1:], angles
+                ).squeeze(-1)
+                mean_pred = pred.mean(dim=0)  
+                abs_error = torch.abs(mean_pred - images_lr.unsqueeze(1))
 
-        if args.model in mixing_models:
-            _seq_nll_mix = nll_mixture(
-                pred[:, :, :-1].contiguous(), data[:, 1:], schedule[1:], angles
-            ).squeeze(-1)
-            mean_pred = pred.mean(dim=0)  
-            abs_error = torch.abs(mean_pred - images_lr.unsqueeze(1))
+                res['seq_nll_mix'].append(_seq_nll_mix.detach().cpu())
+                res['beta_mix'].append(_seq_nll_mix.cumsum(dim=1).detach().cpu())
 
-            res['seq_nll_mix'].append(_seq_nll_mix.detach().cpu())
+                for _delta in args.delta:
+                    for ci_fun, ci_name in [(percentile_ci, 'percentile'), (gaussian_ci, 'gaussian'), (basic_ci, 'basic'), (gaussian_conservative_ci, 'gaussian_conservative_ci'), (simultaneous_ci, 'simultaneous_ci')]:
+                        lo, hi = ci_fun(pred, _delta)
 
-            for _delta in args.delta:
-                for ci_fun, ci_name in [(percentile_ci, 'percentile'), (gaussian_ci, 'gaussian'), (basic_ci, 'basic'), (gaussian_conservative_ci, 'gaussian_conservative_ci'), (simultaneous_ci, 'simultaneous_ci')]:
-                    lo, hi = ci_fun(pred, _delta)
-
-                    _coverage = coverage(lo, hi, images_lr.unsqueeze(1)).squeeze(-1)
-                    _simultaneous_coverage = simultaneous_coverage(lo, hi, images_lr.unsqueeze(1)).squeeze(-1)
-                    _error_correlation = error_correlation(hi - lo, abs_error).squeeze(-1)
-                    _error_r2 = error_r2(hi - lo, abs_error).squeeze(-1)
-                    _width = (hi - lo).mean(dim=(-1, -2, -3))
-                    _ause = sparsification_error(hi - lo, abs_error).squeeze(-1)
-                    
-                    res[f'uq_width_{ci_name}_{_delta}'].append(_width.detach().cpu())
-                    res[f'uq_coverage_{ci_name}_{_delta}'].append(_coverage.detach().cpu())
-                    res[f'uq_simultaneous_coverage_{ci_name}_{_delta}'].append(_simultaneous_coverage.detach().cpu())
-                    res[f'uq_error_correlation_{ci_name}_{_delta}'].append(_error_correlation.detach().cpu())
-                    res[f'uq_error_r2_{ci_name}_{_delta}'].append(_error_r2.detach().cpu())
-                    res[f'uq_ause_{ci_name}_{_delta}'].append(_ause.detach().cpu())
+                        _coverage = coverage(lo, hi, images_lr.unsqueeze(1)).squeeze(-1)
+                        _simultaneous_coverage = simultaneous_coverage(lo, hi, images_lr.unsqueeze(1)).squeeze(-1)
+                        _error_correlation = error_correlation(hi - lo, abs_error).squeeze(-1)
+                        _error_r2 = error_r2(hi - lo, abs_error).squeeze(-1)
+                        _width = (hi - lo).mean(dim=(-1, -2, -3))
+                        _ause = sparsification_error(hi - lo, abs_error).squeeze(-1)
+                        
+                        res[f'uq_width_{ci_name}_{_delta}'].append(_width.detach().cpu())
+                        res[f'uq_coverage_{ci_name}_{_delta}'].append(_coverage.detach().cpu())
+                        res[f'uq_simultaneous_coverage_{ci_name}_{_delta}'].append(_simultaneous_coverage.detach().cpu())
+                        res[f'uq_error_correlation_{ci_name}_{_delta}'].append(_error_correlation.detach().cpu())
+                        res[f'uq_error_r2_{ci_name}_{_delta}'].append(_error_r2.detach().cpu())
+                        res[f'uq_ause_{ci_name}_{_delta}'].append(_ause.detach().cpu())
 
 
-            # all subsequent metrics use point prediction
-            pred = mean_pred 
-        elif model_name == 'gt':
-            indices = indices.unsqueeze(0).expand(len(angles_rotation_deg), -1).reshape(-1)
-            seed = seed.unsqueeze(0).expand(len(angles_rotation_deg), -1).reshape(-1)
-            pred = pred.reshape(-1, *pred.shape[2:])
-            images_lr = images_lr.unsqueeze(0).expand(len(angles_rotation_deg), -1, -1, -1, -1).reshape(-1, *images_lr.shape[1:])
-            data = data.unsqueeze(0).expand(len(angles_rotation_deg), -1, -1, -1, -1, -1).reshape(-1, *data.shape[1:],)
-            res['rotation'].append(angles_rotation_deg[:, None].expand(-1, len(images)).reshape(-1))
-
+                # all subsequent metrics use point prediction
+                samples = pred
+                pred = mean_pred
+                num_samples = args.num_samples
+                sample_coords = torch.arange(num_samples)
             
-        # compute metrics
-        res['rmse'].append(rmse(pred, images_lr.unsqueeze(1), circle_mask=True).squeeze(-1).detach().cpu())
-        res['psnr'].append(psnr(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
-        res['ssim'].append(ssim(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
-        res['seq_nll'].append(nll(pred[:, :-1].contiguous(), data[:, 1:], schedule[1:], angles).sum((-1,-2)).squeeze(-1).detach().cpu())
-        res['nll'].append(nll(pred.unsqueeze(2), data.unsqueeze(1), schedule, angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu())
-        res['seed'].append(torch.as_tensor(seed).view(-1).cpu())
-        res['index'].append(torch.as_tensor(indices).view(-1).cpu())
+
+            # compute metrics for point prediction
+            res['rmse'].append(rmse(pred, images_lr.unsqueeze(1), circle_mask=True).squeeze(-1).detach().cpu())
+            res['psnr'].append(psnr(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
+            res['ssim'].append(ssim(pred, images_lr.unsqueeze(1), circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
+            res['seq_nll'].append(nll(pred[:, :-1].contiguous(), data[:, 1:], schedule[1:], angles).sum((-1,-2, -3)).detach().cpu())
+            res['beta'].append(nll(pred[:, :-1].contiguous(), data[:, 1:], schedule[1:], angles).sum((-1,-2, -3)).cumsum(dim=1).detach().cpu())
+            res['nll'].append(nll(pred.unsqueeze(2), data.unsqueeze(1), schedule, angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu())
+            res['seed'].append(torch.as_tensor(seed).view(-1).cpu())
+            res['index'].append(torch.as_tensor(indices).view(-1).cpu())
+            # nll starting at step 1
+            nll_1 = nll(pred[:, 1:].unsqueeze(2), data[:, 1:].unsqueeze(1), schedule[1:], angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu()
+            res['nll_1'].append(nll_1)
+            
+            # compute per sample metrics
+            if model_name in ['gt', 'cond_diffusion']:
+                sample_indices = indices.unsqueeze(0).expand(num_samples, -1).reshape(-1)
+                sample_seed = seed.unsqueeze(0).expand(num_samples, -1).reshape(-1)
+                samples = samples.reshape(-1, *samples.shape[2:])
+                sample_images_lr = images_lr.unsqueeze(0).expand(num_samples, -1, -1, -1, -1).reshape(-1, *images_lr.shape[1:]).unsqueeze(1)
+                sample_data = data.unsqueeze(0).expand(num_samples, -1, -1, -1, -1, -1).reshape(-1, *data.shape[1:],)
+
+                # metrics for all samples
+                res_samples['rmse'].append(rmse(samples, sample_images_lr, circle_mask=True).squeeze(-1).detach().cpu())
+                res_samples['psnr'].append(psnr(samples, sample_images_lr, circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
+                res_samples['ssim'].append(ssim(samples, sample_images_lr, circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
+                res_samples['nll'].append(nll(samples.unsqueeze(2), sample_data.unsqueeze(1), schedule, angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu())
+                res_samples['seq_nll'].append(nll(samples[:, :-1].contiguous(), sample_data[:, 1:], schedule[1:], angles).sum((-1,-2, -3)).detach().cpu())
+                res_samples['beta'].append(nll(samples[:, :-1].contiguous(), sample_data[:, 1:], schedule[1:], angles).sum((-1,-2, -3)).cumsum(dim=1).detach().cpu())
+                res_samples['seed'].append(torch.as_tensor(sample_seed).view(-1).cpu())
+                res_samples['index'].append(torch.as_tensor(sample_indices).view(-1).cpu())
+                res_samples['sample_coords'].append(sample_coords[:, None].expand(-1, len(images)).reshape(-1))
+
+                #nll starting at step 1
+                nll_1 = nll(samples[:, 1:].unsqueeze(2), sample_data[:, 1:].unsqueeze(1), schedule[1:], angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu()
+                res_samples['nll_1'].append(nll_1)
     
     total_time = time.time() - t0
     experiment_params['total_time_sec'] = total_time
@@ -912,46 +942,31 @@ if __name__ == "__main__":
     # Insert NaN values in front to match shape (N_samples, N_steps)
     N_samples, N_steps = res['psnr'].shape
     res['seq_nll'] = torch.cat([torch.full((N_samples, 1), 0.), res['seq_nll']], dim=1)
+    res['beta'] = torch.cat([torch.full((N_samples, 1), 0.), res['beta']], dim=1)
+    res['nll_1'] = torch.cat([torch.full((N_samples, 1), 0.), res['nll_1']], dim=1)
 
     if 'seq_nll_mix' in res:
         # seq_nll_mix_tensor = torch.cat(res['seq_nll_mix'], dim=0)  # expected (N_samples, N_steps-1)
-        res['seq_nll_mix'] = torch.cat(
-            [torch.full((N_samples, 1), 0., dtype=res['seq_nll_mix'].dtype), res['seq_nll_mix']],
-            dim=1,
-        )
-    data_vars = { k : (["sample", "step"], v.numpy()) for k, v in res.items() if k in ['psnr', 'rmse', 'ssim', 'nll', 'seq_nll', 'seq_nll_mix'] or k.startswith('uq_') }
+        res['seq_nll_mix'] = torch.cat([torch.full((N_samples, 1), 0.), res['seq_nll_mix']], dim=1)
+        res['beta_mix'] = torch.cat([torch.full((N_samples, 1), 0.), res['beta_mix']], dim=1)
 
-    if model_name == 'gt':
-        # First build a sample/step dataset, then reshape to (dataset, index, seed, step, model)
-        ds = xr.Dataset(
-            data_vars=data_vars,
-            coords={
-                "sample": np.arange(N_samples),
-                "step": np.arange(N_steps),
-                "index": ("sample", res["index"].numpy()),
-                "rotation": ("sample", res["rotation"].numpy()),
-                "seed": ("sample", res["seed"].numpy()),
-            },
-        )
-        # Turn (sample) into a MultiIndex of (index, seed) and unstack -> dims (index, seed, step)
-        ds = ds.set_index(sample=("index", "rotation", "seed")).unstack("sample")
-        ds = ds.expand_dims(dataset=[args.dataset], model=[model_name])
-        ds = ds.transpose("dataset", "index", "rotation", "seed", "step", "model")
-    else:
-        # First build a sample/step dataset, then reshape to (dataset, index, seed, step, model)
-        ds = xr.Dataset(
-            data_vars=data_vars,
-            coords={
-                "sample": np.arange(N_samples),
-                "step": np.arange(N_steps),
-                "index": ("sample", res["index"].numpy()),
-                "seed": ("sample", res["seed"].numpy()),
-            },
-        )
-        # Turn (sample) into a MultiIndex of (index, seed) and unstack -> dims (index, seed, step)
-        ds = ds.set_index(sample=("index", "seed")).unstack("sample")
-        ds = ds.expand_dims(dataset=[args.dataset], model=[model_name])
-        ds = ds.transpose("dataset", "index", "seed", "step", "model")
+    data_vars = { k : (["sample", "step"], v.numpy()) for k, v in res.items() if k in ['psnr', 'rmse', 'ssim', 'nll', 'nll_1', 'seq_nll', 'seq_nll_mix', 'beta', 'beta_mix'] or k.startswith('uq_') }
+
+
+    # First build a sample/step dataset, then reshape to (dataset, index, seed, step, model)
+    ds = xr.Dataset(
+        data_vars=data_vars,
+        coords={
+            "sample": np.arange(N_samples),
+            "step": np.arange(N_steps),
+            "index": ("sample", res["index"].numpy()),
+            "seed": ("sample", res["seed"].numpy()),
+        },
+    )
+    # Turn (sample) into a MultiIndex of (index, seed) and unstack -> dims (index, seed, step)
+    ds = ds.set_index(sample=("index", "seed")).unstack("sample")
+    ds = ds.expand_dims(dataset=[args.dataset], model=[model_name])
+    ds = ds.transpose("dataset", "index", "seed", "step", "model")
 
 
     # Add schedule intensity as value, indexed by step
@@ -959,6 +974,46 @@ if __name__ == "__main__":
 
     # Attach to xarray Dataset
     ds.attrs.update({k : str(v) for k, v in experiment_params.items()})
+    ds.attrs['samples'] = False
 
     ds.to_netcdf(output_file)
     print(f"Results written to {output_file}")
+
+
+    if model_name in ['gt', 'cond_diffusion']:
+        for k in res_samples:
+            res_samples[k] = torch.cat(res_samples[k], dim=0)
+
+        # Insert NaN values in front to match shape (N_samples, N_steps)
+        N_samples, N_steps = res_samples['psnr'].shape
+        res_samples['seq_nll'] = torch.cat([torch.full((N_samples, 1), 0.), res_samples['seq_nll']], dim=1)
+        res_samples['beta'] = torch.cat([torch.full((N_samples, 1), 0.), res_samples['beta']], dim=1)
+        res_samples['nll_1'] = torch.cat([torch.full((N_samples, 1), 0.), res_samples['nll_1']], dim=1)
+        data_vars = { k : (["sample", "step"], v.numpy()) for k, v in res_samples.items() if k in ['psnr', 'rmse', 'ssim', 'nll', 'nll_1','seq_nll']}
+        # First build a sample/step dataset, then reshape to (dataset, index, seed, step, model)
+        ds = xr.Dataset(
+            data_vars=data_vars,
+            coords={
+                "sample": np.arange(N_samples),
+                "step": np.arange(N_steps),
+                "index": ("sample", res_samples["index"].numpy()),
+                "sample_coords": ("sample", res_samples["sample_coords"].numpy()),
+                "seed": ("sample", res_samples["seed"].numpy()),
+            },
+        )
+        # Turn (sample) into a MultiIndex of (index, seed) and unstack -> dims (index, seed, step)
+        ds = ds.set_index(sample=("index", "sample_coords", "seed")).unstack("sample")
+        ds = ds.expand_dims(dataset=[args.dataset], model=[model_name])
+        ds = ds.transpose("dataset", "index", "sample_coords", "seed", "step", "model")
+
+        ds = ds.rename({'sample_coords': 'rotation' if model_name == 'gt' else 'sample'})
+        # Add schedule intensity as value, indexed by step
+        ds["intensity"] = ("step", total_intensities.cpu().numpy())
+
+        # Attach to xarray Dataset
+        ds.attrs.update({k : str(v) for k, v in experiment_params.items()})
+        ds.attrs['experiment_id'] = ds.attrs['experiment_id'] + "_samples"
+        ds.attrs['samples'] = True
+
+        ds.to_netcdf(output_file[:-3] + "_samples.nc")
+        print(f"Results written to {output_file[:-3] + '_samples.nc'}")
