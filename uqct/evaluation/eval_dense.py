@@ -210,7 +210,7 @@ class UNetRecon:
             exposure_norm = exposure_norm.unsqueeze(0)
 
         exposure_norm = exposure_norm.expand(batch_dims).reshape(-1)
-
+        
         y = self.unet(x_in.unsqueeze(1), timestep=exposure_norm, return_dict=False)[0]
         y = ((y + 1.0) / 2.0).clamp(0.0, 1.0)  # (B,128,128)
 
@@ -815,6 +815,9 @@ if __name__ == "__main__":
     
     t0 = time.time()
     for indices, seed, images, data in tqdm(obs_dataloader):
+        # free up memory
+        torch.cuda.empty_cache()
+
         images = images.to(device)
         images_lr = F.interpolate(images, size=(128, 128), mode="area")
         data = data.to(device)
@@ -854,23 +857,26 @@ if __name__ == "__main__":
                     schedule_steps = schedule.unsqueeze(0)
 
                     beta_delta = beta + torch.log(1/torch.tensor(0.05))
-                    pred = [recon(data_cumsum[:, i], schedule_cumsum[:, i], angles, beta=beta_delta[:, i], data_steps=data_steps[:, :i+1], schedule_steps=schedule_steps[:, :i+1]) for i in range(data.shape[1])]
+                    pred = [recon(data_cumsum[:, i], schedule_cumsum[:, i], angles, beta=beta_delta[:, i], data_steps=data_steps[:, :i+1], schedule_steps=schedule_steps[:, :i+1]).detach() for i in range(data.shape[1])]
 
                 else:
-                    pred = [recon(data_cumsum[:, i], schedule_cumsum[:, i], angles) for i in range(data.shape[1])]
+                    pred = [recon(data_cumsum[:, i], schedule_cumsum[:, i], angles).detach() for i in range(data.shape[1])]
             pred = torch.stack(pred, dim=-4)
+        # free up memory
+        torch.cuda.empty_cache()
 
         with torch.no_grad():
             if args.model in mixing_models:
-                _seq_nll_mix = nll_mixture(
-                    pred[:, :, :-1].contiguous(), data[:, 1:], schedule[1:], angles
-                ).squeeze(-1)
+                if args.model in ["diffusion", "cond_diffusion", "unet_ensemble"] or args.num_bootstrap_samples <= 20:
+                    _seq_nll_mix = nll_mixture(
+                        pred[:, :, :-1].contiguous(), data[:, 1:], schedule[1:], angles
+                    ).squeeze(-1)
+
+                    res['seq_nll_mix'].append(_seq_nll_mix.detach().cpu())
+                    res['beta_mix'].append(_seq_nll_mix.cumsum(dim=1).detach().cpu())
+
                 mean_pred = pred.mean(dim=0)  
                 abs_error = torch.abs(mean_pred - images_lr.unsqueeze(1))
-
-                res['seq_nll_mix'].append(_seq_nll_mix.detach().cpu())
-                res['beta_mix'].append(_seq_nll_mix.cumsum(dim=1).detach().cpu())
-
                 for _delta in args.delta:
                     for ci_fun, ci_name in [(percentile_ci, 'percentile'), (gaussian_ci, 'gaussian'), (basic_ci, 'basic'), (gaussian_conservative_ci, 'gaussian_conservative_ci'), (simultaneous_ci, 'simultaneous_ci')]:
                         lo, hi = ci_fun(pred, _delta)
@@ -888,7 +894,6 @@ if __name__ == "__main__":
                         res[f'uq_error_correlation_{ci_name}_{_delta}'].append(_error_correlation.detach().cpu())
                         res[f'uq_error_r2_{ci_name}_{_delta}'].append(_error_r2.detach().cpu())
                         res[f'uq_ause_{ci_name}_{_delta}'].append(_ause.detach().cpu())
-
 
                 # all subsequent metrics use point prediction
                 samples = pred
@@ -911,7 +916,7 @@ if __name__ == "__main__":
             res['nll_1'].append(nll_1)
             
             # compute per sample metrics
-            if model_name in ['gt', 'cond_diffusion']:
+            if model_name in ['gt', 'cond_diffusion', 'diffusion']:
                 sample_indices = indices.unsqueeze(0).expand(num_samples, -1).reshape(-1)
                 sample_seed = seed.unsqueeze(0).expand(num_samples, -1).reshape(-1)
                 samples = samples.reshape(-1, *samples.shape[2:])
@@ -922,15 +927,32 @@ if __name__ == "__main__":
                 res_samples['rmse'].append(rmse(samples, sample_images_lr, circle_mask=True).squeeze(-1).detach().cpu())
                 res_samples['psnr'].append(psnr(samples, sample_images_lr, circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
                 res_samples['ssim'].append(ssim(samples, sample_images_lr, circle_mask=True, data_range=1.0).squeeze(-1).detach().cpu())
-                res_samples['nll'].append(nll(samples.unsqueeze(2), sample_data.unsqueeze(1), schedule, angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu())
                 res_samples['seq_nll'].append(nll(samples[:, :-1].contiguous(), sample_data[:, 1:], schedule[1:], angles).sum((-1,-2, -3)).detach().cpu())
                 res_samples['beta'].append(nll(samples[:, :-1].contiguous(), sample_data[:, 1:], schedule[1:], angles).sum((-1,-2, -3)).cumsum(dim=1).detach().cpu())
                 res_samples['seed'].append(torch.as_tensor(sample_seed).view(-1).cpu())
                 res_samples['index'].append(torch.as_tensor(sample_indices).view(-1).cpu())
                 res_samples['sample_coords'].append(sample_coords[:, None].expand(-1, len(images)).reshape(-1))
 
-                #nll starting at step 1
-                nll_1 = nll(samples[:, 1:].unsqueeze(2), sample_data[:, 1:].unsqueeze(1), schedule[1:], angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu()
+                # memory intensive
+                # _nll = nll(samples.unsqueeze(2), sample_data.unsqueeze(1), schedule, angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu()
+
+   
+
+                _nll = torch.cat([
+                    nll(samples[:, step, None, None].contiguous(), sample_data[:, None, :step+1], schedule[:step+1], angles).sum((-1,-2, -3)).sum(dim=2)
+                    for step in range(0, schedule.shape[0])
+                ], dim=1).detach().cpu()
+        
+                res_samples['nll'].append(_nll)
+                #nll starting at step 1, memory intensive
+                # nll_1 = nll(samples[:, 1:].unsqueeze(2), sample_data[:, 1:].unsqueeze(1), schedule[1:], angles).sum((-1,-2, -3)).cumsum(dim=2).diagonal(dim1=1, dim2=2).detach().cpu()
+
+
+                nll_1 = torch.cat([
+                    nll(samples[:, step, None, None].contiguous(), sample_data[:, None, 1:step+1], schedule[1:step+1], angles).sum((-1,-2, -3)).sum(dim=2)
+                    for step in range(1, schedule.shape[0])
+                ], dim=1).detach().cpu()
+
                 res_samples['nll_1'].append(nll_1)
     
     total_time = time.time() - t0
@@ -980,7 +1002,7 @@ if __name__ == "__main__":
     print(f"Results written to {output_file}")
 
 
-    if model_name in ['gt', 'cond_diffusion']:
+    if model_name in ['gt', 'cond_diffusion', 'diffusion']:
         for k in res_samples:
             res_samples[k] = torch.cat(res_samples[k], dim=0)
 
