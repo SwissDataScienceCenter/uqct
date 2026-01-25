@@ -1,6 +1,7 @@
 from collections import defaultdict
 from glob import glob
 from pathlib import Path
+from uqct.debugging import plot_img
 
 import json
 import click
@@ -10,6 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from torchvision.transforms.functional import gaussian_blur
 
 from uqct.uq import (
     basic_ci,
@@ -27,7 +29,7 @@ from uqct.vis.style import MODEL_NAMES, get_model_colors
 # Configuration matching the user's setup
 TOTAL_INTENSITIES = [1e6, 1e7, 1e8, 1e9]
 DATASETS = ["lung", "composite", "lamino"]
-METHODS = ["fbp", "unet", "unet_ensemble", "boundary"]
+METHODS = ["distance_maximization", "fbp", "unet", "unet_ensemble", "boundary"]
 
 
 def load_h5_data(file_path: str, key: str = "preds") -> np.ndarray:
@@ -161,11 +163,12 @@ def find_files(
         # existing files have .0 suffix for floats.
         pattern = f"{search_dir}/boundary_diffusion:{dataset}:{intensity}*:*.h5"
         files = glob(pattern)
-
-        # Filter out _metrics.csv files if glob matched them (it shouldn't with .h5)
-        valid_files = [f for f in files if "metrics" not in f]
-
-        return sorted(valid_files)
+        return sorted(files)
+    elif model == "distance_maximization":
+        search_dir = "results/uncertainty_distance"
+        pattern = f"{search_dir}/diffusion:{dataset}:{intensity}:*.h5"
+        files = glob(pattern)
+        return sorted(files)
 
     # Standard / Bootstrapping
     # Construct glob pattern
@@ -270,7 +273,7 @@ def calculate_metrics(
                 # Resize if needed
                 if gt.shape[-2:] != samples.shape[-2:]:
                     gt = F.interpolate(
-                        gt.unsqueeze(1), size=samples.shape[-2:], mode="bilinear"
+                        gt.unsqueeze(1), size=samples.shape[-2:], mode="area"
                     ).squeeze(1)
 
                 n = min(len(gt), len(samples))
@@ -285,12 +288,32 @@ def calculate_metrics(
 
             except Exception as e:
                 print(f"Error processing {b_file}: {e}")
+    elif method == "distance_maximization":
+        files = find_files(dataset, intensity, method, is_bootstrapping=False)
+        for file in files:
+            start, end = list(map(int, file.split(":")[4].split("-")))
 
+            gt = get_ground_truth(dataset, (start, end))
+            gt_lr = F.interpolate(
+                gt.unsqueeze(1), size=gt.shape[-1] // 2, mode="area"
+            ).squeeze(1)
+
+            samples_all = torch.from_numpy(load_h5_data(file, key="maximizers")).to(
+                gt_lr.device
+            )
+            lb, ub = samples_all.min(1).values, samples_all.max(1).values
+            in_ci = (lb <= gt_lr) & (gt_lr <= ub)
+            sim_cov = in_ci.all((-2, -1)).float().mean()
+            ind_cov = in_ci.float().mean()
+            width = (ub - lb).mean()
+
+            all_metrics["distance_maximization_sim_cov"].append(sim_cov.cpu().item())
+            all_metrics["distance_maximization_ind_cov"].append(ind_cov.cpu().item())
+            all_metrics["distance_maximization_width"].append(width.cpu().item())
     else:
         # Bootstrapping / Ensemble
         if method == "unet_ensemble":
             boot_files = find_files(dataset, intensity, method, is_bootstrapping=False)
-            is_bootstrapping = False
         else:
             boot_files = find_files(
                 dataset,
@@ -299,7 +322,6 @@ def calculate_metrics(
                 is_bootstrapping=True,
                 n_bootstraps=n_bootstraps,
             )
-            is_bootstrapping = True
 
         if not boot_files:
             return {}
@@ -318,16 +340,7 @@ def calculate_metrics(
 
         for f in boot_files:
             try:
-                # Parse Range from filename
-                # Model:Dataset:Intensity:Sparse:Range:Seed:Timestamp.parquet
-                # bootstrapping_fbp:lung:1000000.0:True:10-20:0:timestamp.parquet
-
                 parts = Path(f).name.split(":")
-                # We need to be careful with splitting if timestamp has colons, but usually it doesn't in the filename part before extension?
-                # Actually timestamp format in `run.py` uses `datetime.now()` which str() has colons.
-                # But let's assume the order is fixed.
-                # Range is at index 4 (0-indexed) if split by ':' works somewhat cleanly.
-                # Let's search for range pattern.
                 range_part = None
                 for p in parts:
                     if "-" in p and p.replace("-", "").isdigit():
@@ -339,41 +352,15 @@ def calculate_metrics(
 
                 start, end = map(int, range_part.split("-"))
                 r_tuple = (start, end)
-
-                # If we already processed this range (or a superset/subset logic?), skip?
-                # Simplistic: If exact range already seen, skip (since files are sorted by time, we see newest first).
                 if r_tuple in processed_ranges:
                     continue
-
-                # Also, if we have "10-110" and "10-20", do we process both?
-                # Ideally we want a non-overlapping set covering the max area.
-                # Implementing a greedy coverage?
-                # For now: Just process valid non-overlapping chunks if possible, or just all unique newest ranges and let user/stats handle it?
-                # Actually, `compute_stats_from_samples` returns lists. We extend `all_metrics`.
-                # If we process "10-110" AND "10-20", we double count 10-20 metrics.
-                # Simple heuristic: If we find a large range (e.g. > 50 images), prefer that and ignore smaller chunks?
-                # OR: If we are in chunked mode (bootstrapping), we prefer consistent chunks?
-
-                # Let's just collect all unique ranges, then perform a check to avoid overlap?
-                # Overlap check:
                 is_overlap = False
                 for pr in processed_ranges:
-                    # Check overlap: max(start1, start2) < min(end1, end2)
                     if max(start, pr[0]) < min(end, pr[1]):
                         is_overlap = True
                         break
 
-                if is_overlap and not is_bootstrapping:
-                    # For ensembles, we usually just want one file per seed? Or allow duplicates?
-                    # Existing logic took `boot_files[0]`.
-                    # Let's keep `continue`.
-                    continue
-                elif is_overlap and is_bootstrapping:
-                    # For bootstrapping, if we have 10-110 and 10-20, they overlap.
-                    # We should prefer one. Since we sort by timestamp, the newest one wins.
-                    # If I ran 10-110 yesterday, and 10-20 today, I probably want 10-20.
-                    # So we process 10-20 and then skip 10-110 later?
-                    # Yes, `continue` works if we encounter the overlapping one later.
+                if is_overlap:
                     continue
 
                 processed_ranges.add(r_tuple)
@@ -413,7 +400,7 @@ def calculate_metrics(
 
                 if gt.shape[-2:] != preds_boot.shape[-2:]:
                     gt = F.interpolate(
-                        gt.unsqueeze(1), size=preds_boot.shape[-2:], mode="bilinear"
+                        gt.unsqueeze(1), size=preds_boot.shape[-2:], mode="area"
                     ).squeeze(1)
 
                 n = min(len(gt), len(preds_boot))
@@ -544,7 +531,16 @@ def main(n_bootstraps):
 
                 # Sort by intensity
                 ints = np.array(data["intensity"])
-                vals = np.array(data[metric_key])
+
+                if method == "distance_maximization":
+                    if "sim_cov" in metric_key:
+                        vals = np.array(data["distance_maximization_sim_cov"])
+                    elif "ind_cov" in metric_key:
+                        vals = np.array(data["distance_maximization_ind_cov"])
+                    elif "width" in metric_key:
+                        vals = np.array(data["distance_maximization_width"])
+                else:
+                    vals = np.array(data[metric_key])
 
                 if len(ints) != len(vals):
                     print(
@@ -555,6 +551,7 @@ def main(n_bootstraps):
                 sort_idx = np.argsort(ints)
 
                 model_label = MODEL_NAMES.get(method, method)
+
                 if model_label in ("FBP", "U-Net"):
                     label = f"{model_label} Bootstr."
                 else:
@@ -586,7 +583,7 @@ def main(n_bootstraps):
             # Y-label only on first plot
             if col_idx == 0:
                 ax.set_ylabel(titles.get(metric_key, metric_key))
-                ax.legend()
+                ax.legend(loc="best")
 
         # Save
         out_path = out_dir / f"sparse_{metric_key}.pdf"
