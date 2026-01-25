@@ -164,8 +164,10 @@ def generate_data(
     click.echo(f"Loading data from {consolidated_file}...")
     df = pd.read_parquet(consolidated_file)
 
-    # Filter for valid entries (need nll_pred)
-    df = df[df["nll_pred"].notna() & df["total_intensity"].isin([1e6, 1e7, 1e8, 1e9])]
+    # Filter for valid entries (need nll_pred_mix)
+    df = df[
+        df["nll_pred_mix"].notna() & df["total_intensity"].isin([1e6, 1e7, 1e8, 1e9])
+    ]
 
     # Define Angles
     # Log-linearly spaced between 0.1 and 90, plus 0.0 for GT check
@@ -239,7 +241,7 @@ def generate_data(
             for i in range(n_images):
                 img_row = model_df.iloc[i]
 
-                nll_pred_list = img_row["nll_pred"]
+                nll_pred_list = img_row["nll_pred_mix"]
                 if not isinstance(nll_pred_list, (list, np.ndarray)):
                     continue
 
@@ -344,7 +346,7 @@ def plot_data(input_file: Path):
 
                 ax.plot(
                     sub["angle"],
-                    sub["exclusion_rate"],
+                    100 * sub["exclusion_rate"],
                     label=style["label"],
                     color=style["color"],
                     marker="x",
@@ -355,10 +357,9 @@ def plot_data(input_file: Path):
             ax.set_xlabel("Rotation Angle (Deg)")
             ax.set_title(f"{dataset.title()} Dataset")
             ax.grid(True, which="both", linestyle="--", alpha=0.3)
-            ax.set_ylim(-0.05, 1.05)
 
             if col_idx == 0:
-                ax.set_ylabel("Exclusion Rate")
+                ax.set_ylabel(r"Exclusion Rate (\%)")
                 ax.legend(fontsize=8)
 
         # Directory: plots/rotation/{intensity}_{sparse}/

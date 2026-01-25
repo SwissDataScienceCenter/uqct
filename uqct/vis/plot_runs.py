@@ -78,6 +78,7 @@ def process_and_plot(
             nll_pred = row["nll_pred"]
             nll_gt = row["nll_gt"]
             psnr_traj = row["psnr"]
+            schedule = row["angle_schedule"]
 
             if isinstance(nll_pred, np.ndarray):
                 nll_pred = nll_pred.tolist()
@@ -94,7 +95,7 @@ def process_and_plot(
             nll_pred_cum = np.cumsum(nll_pred)
             nll_gt_cum = np.cumsum(nll_gt)
 
-            steps = range(len(nll_pred))
+            steps = range(1, len(nll_pred_cum) + 1)
 
             # Crossover check
             # Exists some t for which NLL_t(gt) > NLL_t(pred) + log(1/delta)
@@ -150,7 +151,7 @@ def process_and_plot(
                 color="tab:red",
             )
 
-            plt.xlabel("Time step $t$")
+            plt.xlabel("Time Step $t$")
             plt.ylabel("NLL and confidence coefficient")
             plt.legend()
 
@@ -171,8 +172,8 @@ def process_and_plot(
             )
             plt.axhline(0, color="black", linestyle="--", linewidth=1)
 
-            plt.xlabel("Step")
-            plt.ylabel("Log density difference")
+            plt.xlabel("Time Step $t$")
+            plt.ylabel("Log Density Difference")
             plt.legend()
 
             diff_plot_path = model_dir / f"img_{idx:03d}_logp_diff.pdf"
@@ -216,7 +217,7 @@ def process_and_plot(
                 label="GT Image in CS",
             )
 
-            plt.xlabel("Time step $t$")
+            plt.xlabel("Time Step $t$")
             plt.ylabel(r"$\beta_t(\delta) - L_t(\theta^\ast)$")
             plt.legend()
 
@@ -406,7 +407,7 @@ def main(
 
         if parallel:
             logger.info("Processing in parallel...")
-            with concurrent.futures.ProcessPoolExecutor() as executor:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
                 results = list(executor.map(process_single_group, tasks))
         else:
             logger.info("Processing sequentially...")

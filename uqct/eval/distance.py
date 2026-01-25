@@ -12,16 +12,17 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import optim
+import torch.nn.functional as F
 from tqdm.auto import tqdm
 
-from uqct.ct import Experiment, circular_mask
+from uqct.ct import Experiment, circular_mask, nll
 from uqct.eval.nll_constraints import (
     compute_nll_trajectory,
     compute_constraint_violation,
 )
 from uqct.eval.run import setup_experiment, CTSettings
 from uqct.logging import get_logger
-from uqct.utils import get_results_dir
+from uqct.utils import get_results_dir, load_runs
 
 logger = get_logger(__name__)
 
@@ -58,8 +59,6 @@ class DistanceRun:
                 "model": self.model,
                 "seed": self.seed,
                 "uncertainty_mean": self.uncertainty_mean,
-                "projection_steps_avg": self.projection_steps_avg,
-                "optimization_steps_avg": self.optimization_steps_avg,
                 "initial_lr": self.initial_lr,
                 "run_id": self.run_id,
                 "timestamp": self.timestamp,
@@ -68,13 +67,7 @@ class DistanceRun:
         )
 
         if self.mean_pixel_uncertainty is not None:
-            # Serialize as bytes to store a blob in parquet
-            # We assume float32 input, so we can just dump bytes.
-            # Consuming code needs to know the shape (S, H, W) or reshape it.
-            # Shape is fixed by dataset usually, but let's just dump raw bytes.
             data["mean_pixel_uncertainty"] = self.mean_pixel_uncertainty.tobytes()
-            # Store shape metadata if needed, but for now we assume standard size or
-            # user knows. For safety, let's store shape
             data["mean_pixel_uncertainty_shape"] = list(
                 self.mean_pixel_uncertainty.shape
             )
@@ -99,23 +92,18 @@ class DistanceRun:
 
         df.to_parquet(fp_parquet, index=False)
 
-        # Quantize to uint8 for space saving
-        # [0, 1] -> [0, 255]
-        u_uint8 = (np.clip(self.uncertainty_images, 0, 1) * 255).astype("uint8")
-        m_uint8 = (np.clip(self.distance_maximizers, 0, 1) * 255).astype("uint8")
-
         with h5py.File(fp_h5, "w") as f:
             f.create_dataset(
                 "uncertainty",
-                data=u_uint8,
-                dtype="uint8",
+                data=self.uncertainty_images,
+                dtype="float32",
                 compression="gzip",
                 compression_opts=4,
             )
             f.create_dataset(
                 "maximizers",
-                data=m_uint8,
-                dtype="uint8",
+                data=self.distance_maximizers,
+                dtype="float32",
                 compression="gzip",
                 compression_opts=4,
             )
@@ -192,7 +180,7 @@ def project_to_confidence_set(
     theta: torch.Tensor,
     experiment: Experiment,
     schedule: torch.Tensor,
-    nll_threshold_cum: torch.Tensor,
+    confcoefs: torch.Tensor,
     mask: torch.Tensor,
     optimizer: optim.Optimizer,
     max_steps: int = 100,
@@ -201,10 +189,10 @@ def project_to_confidence_set(
     Project theta such that cumulative NLL <= nll_threshold_cum.
 
     Args:
-        theta (torch.Tensor): Initial image batch. Shape (N, S, H, W).
+        theta (torch.Tensor): Initial image batch. Shape (N, H, W).
         experiment (Experiment): Experiment object.
         schedule (torch.Tensor): Schedule.
-        nll_threshold_cum (torch.Tensor): Cumulative threshold (N, S).
+        confcoefs (torch.Tensor): Confidence coefficients (N).
         mask (torch.Tensor): Valid pixel mask.
         max_steps (int): Max steps.
         optimizer (optim.Optimizer): Optimizer.
@@ -212,16 +200,6 @@ def project_to_confidence_set(
     Returns:
         tuple[torch.Tensor, int]: Projected theta and number of steps taken.
     """
-    # Initial check
-    with torch.no_grad():
-        nlls_cum, _ = compute_nll_trajectory(theta, experiment, schedule)
-        violation = compute_constraint_violation(nlls_cum, nll_threshold_cum)  # (N,)
-
-    satisfied_mask = violation <= 0  # Tolerance
-
-    if satisfied_mask.all():
-        return theta, 0
-
     theta_proj = optimizer.param_groups[0]["params"][0]
     theta_proj.data.copy_((theta * mask).clip(0, 1))
 
@@ -230,19 +208,20 @@ def project_to_confidence_set(
         for _ in range(max_steps):
             optimizer.zero_grad()
 
-            theta_curr = (theta_proj * mask).clip(0, 1)
+            theta_curr = theta_proj * mask
 
-            nlls_cum, loss = compute_nll_trajectory(
-                theta_curr, experiment, schedule
-            )  # (N, S)
+            nlls = nll(
+                theta_curr,
+                experiment.counts,
+                experiment.intensities,
+                experiment.angles,
+            )[:, schedule[0] :].sum((-2, -1))
 
-            # Violation
-            violation_per_sample = compute_constraint_violation(
-                nlls_cum, nll_threshold_cum
-            )  # (N,)
+            violations = nlls > confcoefs
 
-            if (violation_per_sample <= 0.0).all():
+            if violations.any() == False:
                 break
+            loss = nlls[violations].sum()
 
             loss.backward()
             optimizer.step()
@@ -254,7 +233,7 @@ def project_to_confidence_set(
 
             steps += 1
 
-    return theta_proj.detach(), steps
+    return theta_proj.detach().clip(0, 1) * mask, steps
 
 
 def distance_maximization(
@@ -276,8 +255,8 @@ def distance_maximization(
     Maximizes ||theta - pred||_2 s.t. CumSum(NLL(theta)) <= nll_threshold_cum.
 
     Args:
-        pred (torch.Tensor): Prediction batch (N, S, H, W).
-        confcoef (torch.Tensor): Confidence coefficient (N, S).
+        pred (torch.Tensor): Prediction batch (N, H, W).
+        confcoef (torch.Tensor): Confidence coefficient (N).
     """
 
     device = pred.device
@@ -292,7 +271,7 @@ def distance_maximization(
     if mask is not None:
         theta_opt[..., ~mask] = 0.0
 
-    best_dist = torch.zeros(pred.shape[:2], device=device)
+    best_dist = torch.zeros(pred.shape[0], device=device)
     patience_counter = 0
 
     # Persistent projection state
@@ -322,11 +301,11 @@ def distance_maximization(
         if use_l2_grad:
             diff = theta_opt - pred
             # Normalize gradient to unit length per sample (similar magnitude to sign)
-            # diff shape: (N, S, H, W) -> flatten to (N*S, -1) for norm
-            flat_diff = diff.view(diff.shape[0] * diff.shape[1], -1)
-            norm = flat_diff.norm(p=2, dim=-1, keepdim=True)
+            # diff shape: (N, H, W) -> flatten to (N, -1) for norm
+            flat_diff = diff.view(diff.shape[0], -1)
+            norm = flat_diff.norm(p=2, dim=-1)
             # Avoid division by zero
-            grad = diff / (norm.view(diff.shape[0], diff.shape[1], 1, 1) + 1e-8)
+            grad = diff / (norm[:, None, None] + 1e-8)
         else:
             grad = torch.sign(theta_opt - pred)
         theta_proposed = theta_opt + lr * grad
@@ -354,7 +333,7 @@ def distance_maximization(
 
         # Calculate Distance and Update Best
         with torch.no_grad():
-            d = torch.norm((theta_opt - pred).view(*pred.shape[:2], -1), p=2, dim=-1)
+            d = torch.norm((theta_opt - pred).view(pred.shape[0], -1), p=2, dim=-1)
 
         improved = d > best_dist
 
@@ -384,7 +363,7 @@ def pairwise_distance_maximization(
     schedule: torch.Tensor,
     lr: float = 1e-3,
     lr_reduce_threshold: int = 10,
-    rotations: int = 1,
+    rotations: int = 2,
     patience: int = 5,
     max_steps: int = 10000,
     use_l2_grad: bool = True,
@@ -394,7 +373,7 @@ def pairwise_distance_maximization(
     Recycles distance_maximization by alternating the reference 'pred'.
     """
     device = pred.device
-    N, S, H, _ = pred.shape
+    N, H, _ = pred.shape
 
     # Initialize
     print(f"{pred.shape=}")
@@ -408,7 +387,7 @@ def pairwise_distance_maximization(
         theta1[..., ~mask] = 0.0
         theta2[..., ~mask] = 0.0
 
-    best_dist = torch.zeros((N, S), device=device)
+    best_dist = torch.zeros(N, device=device)
     best_theta1 = theta1.clone()
     best_theta2 = theta2.clone()
 
@@ -436,13 +415,13 @@ def pairwise_distance_maximization(
             lr=lr,
             max_steps=max_steps,
             lr_reduce_threshold=lr_reduce_threshold,
-            patience=patience,
+            patience=patience if rotation > 0 else 1,
             use_l2_grad=use_l2_grad,
             theta_init=theta1,
         )
 
         with torch.no_grad():
-            dist = torch.norm((theta1 - theta2).view(N, S, -1), p=2, dim=-1)
+            dist = torch.norm((theta1 - theta2).view(N, -1), p=2, dim=-1)
             improved = dist > best_dist
 
             if improved.any():
@@ -457,29 +436,19 @@ def check_confidence_set_violation(
     maximizers: torch.Tensor,
     experiment: Experiment,
     schedule: torch.Tensor,
-    thresholds_cum: torch.Tensor,
-    batch_start: int,
-    batch_end: int,
+    confcoefs: torch.Tensor,
 ) -> None:
     """
     Verifies that the maximized images satisfy the cumulative NLL constraints.
     Raises RuntimeError if a violation is detected.
     """
     with torch.no_grad():
-        nlls_cum_check, _ = compute_nll_trajectory(maximizers, experiment, schedule)
-        violation_check = compute_constraint_violation(nlls_cum_check, thresholds_cum)
-        # Use a small tolerance for floating point comparisons
-        if (violation_check > 1e-3).any():
-            max_v = violation_check.max().item()
-            # Find index of max violation
-            worst_idx = violation_check.argmax().item()
-            logger.error(
-                f"Constraint violation detected in batch {batch_start}-{batch_end} "
-                f"at index {worst_idx}. Max violation: {max_v:.6f}"
-            )
-            raise RuntimeError(
-                f"Constraint violation detected after optimization! Max violation: {max_v:.6f}"
-            )
+        nlls = nll(
+            maximizers, experiment.counts, experiment.intensities, experiment.angles
+        )[:, schedule[0] :].sum((-2, -1))
+        violations = nlls > confcoefs
+        if violations.any():
+            raise RuntimeError("Constraint violation detected after optimization!")
 
 
 @click.command()
@@ -502,12 +471,6 @@ def check_confidence_set_violation(
     default=2.0,
     help="Initial learning rate/step size for distance maximization (pixel values)",
 )
-# @click.option(
-#     "--projection-lr",
-#     type=float,
-#     default=1e-2,
-#     help="Learning rate for initial projection",
-# )
 @click.option("--patience", type=int, default=5)
 @click.option("--max-steps", type=int, default=1000)
 @click.option("--last-only", default=False, is_flag=True)
@@ -527,196 +490,62 @@ def main(
     schedule_length = 32
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    pred_files = find_prediction_files(
-        model, dataset, total_intensity, sparse, seed, image_range
+    runs_dir = get_results_dir() / "runs"
+    runs = load_runs(runs_dir, dataset, total_intensity, True, tuple())
+    df = pd.concat(runs.values(), ignore_index=True)
+    df = df[
+        (df["model"] == model)
+        & (df["seed"] == seed)
+        & (df["image_start_index"] == image_range[0])
+        & (df["image_end_index"] == image_range[1])
+    ].reset_index(drop=True)
+    gt_hr, experiment, schedule = setup_experiment(
+        dataset,
+        image_range,
+        total_intensity,
+        sparse,
+        seed,
+        schedule_length,
     )
-
-    # Load and concatenate
-    # preds_list = []
-    dfs_list = []
-    counts_list = []
-    intensities_list = []
-
-    schedule = None
-    experiment_angles = None
-    experiment_sparse = None
-
-    # Keep track of coverage
-    loaded_start = pred_files[0][1][0]
-
-    # logger.info(
-    #     f"Loading predictions from {len(pred_files)} files: {[p.name for p, _ in pred_files]}"
-    # )
-
-    for i, (pred_path, (file_start, file_end)) in enumerate(pred_files):
-        # 1. Load Preds & DF
-        # with h5py.File(pred_path, "r") as f:
-        #     chunk_preds = torch.from_numpy(f["preds"][:])  # type: ignore
-        #     preds_list.append(chunk_preds)
-
-        pq_path = pred_path.with_suffix(".parquet")
-        if not pq_path.exists():
-            raise FileNotFoundError(f"Parquet file {pq_path} not found")
-        dfs_list.append(pd.read_parquet(pq_path))
-
-        # 2. Generate Experiment for this chunk (RNG consistency)
-        _, chunk_exp, chunk_schedule = setup_experiment(
-            dataset,
-            (file_start, file_end),
-            total_intensity,
-            sparse,
-            seed,
-            schedule_length,
-        )
-
-        counts_list.append(chunk_exp.counts)
-        intensities_list.append(chunk_exp.intensities)
-
-        if i == 0:
-            schedule = chunk_schedule
-            experiment_angles = chunk_exp.angles
-            experiment_sparse = chunk_exp.sparse
-
+    gt_lr = F.interpolate(
+        gt_hr.unsqueeze(0), gt_hr.shape[-1] // 2, mode="area"
+    ).squeeze(0)
     assert schedule is not None
-    assert experiment_angles is not None
-    assert experiment_sparse is not None
-
-    # Concatenate
-    # preds = torch.cat(preds_list, dim=0)
-    df = pd.concat(dfs_list, ignore_index=True)
-
-    # Concatenate experiment data
-    # counts: (N_chunk, n_angles, n_det) or (N_chunk, T, ...) -> Dim 0 is N
-    counts_full = torch.cat(counts_list, dim=0)
-    intensities_full = torch.cat(intensities_list, dim=0)
-
-    # Create unified experiment
-    full_experiment = Experiment(
-        counts=counts_full,
-        intensities=intensities_full,
-        angles=experiment_angles,
-        sparse=experiment_sparse,
-    )
-
-    req_start, req_end = image_range
-    rel_start = req_start - loaded_start
-    rel_end = rel_start + (req_end - req_start)
-
-    # if rel_start < 0 or rel_end > preds.shape[0]:
-    #     raise ValueError(
-    #         f"Calculated slice [{rel_start}:{rel_end}] is out of bounds for combined preds shape {preds.shape} (Start {loaded_start}, Req {image_range})"
-    #     )
-
-    # preds = preds[rel_start:rel_end]
-    # Slice DF as well to match preds
-    # Note: df usually has one row per image. concat order matches preds order.
-    df = df.iloc[rel_start:rel_end].reset_index(drop=True)
-
-    # Slice experiment fields and recreate
-    # counts/intensities have N in dim 0
-    exp_counts = full_experiment.counts[rel_start:rel_end]
-    exp_intensities = full_experiment.intensities[rel_start:rel_end]
-
-    experiment = Experiment(
-        counts=exp_counts,
-        intensities=exp_intensities,
-        angles=full_experiment.angles,
-        sparse=full_experiment.sparse,
-    )
-
-    # req_range_str = f"{req_start}-{req_end}"
-
-    # logger.info(f"Sliced predictions to {req_range_str}, new shape: {preds.shape}")
-
-    # if preds.ndim == 4:
-    #     preds = preds.unsqueeze(2)
-
-    # # Using mean prediction across replicates
-    # preds = preds.mean(dim=2).to(device)  # (N, S, H, W)
 
     batch_uncertainties = []
     batch_maximizers = []
 
-    # Process in batches
-    batch_size = 32
-    num_images = experiment.counts.shape[0]
+    batch_nll_preds = df["nll_pred"].tolist()
+    batch_nll_preds = np.array(batch_nll_preds)
 
-    for start_idx in range(0, num_images, batch_size):
-        end_idx = min(start_idx + batch_size, num_images)
+    nll_pred_full = torch.tensor(
+        batch_nll_preds, device=device, dtype=torch.float32
+    )  # (B, S_full)
+    log_inv_delta = math.log(1.0 / 0.05)
+    confcoefs = nll_pred_full.sum(-1) + log_inv_delta
+    B, r = experiment.counts.shape[0], experiment.counts.shape[-1]
 
-        # Slice batch
-        # p_batch = preds[start_idx:end_idx]  # (B, S, H, W)
-        # B = p_batch.shape[0]
+    p_batch = torch.full((B, r, r), 0.5, device=device)
 
-        # Slice experiment for batch
-        # Need to slice dim 0
-        exp_slice = Experiment(
-            counts=experiment.counts[start_idx:end_idx],
-            intensities=experiment.intensities[start_idx:end_idx],
-            angles=experiment.angles,
-            sparse=experiment.sparse,
-        )
+    best_theta_0, best_theta_1 = pairwise_distance_maximization(
+        p_batch,
+        confcoefs,
+        experiment,
+        schedule,
+        lr=lr,
+        patience=patience,
+        max_steps=max_steps,
+    )
+    check_confidence_set_violation(best_theta_0, experiment, schedule, confcoefs)
+    check_confidence_set_violation(best_theta_1, experiment, schedule, confcoefs)
 
-        # Slice DF directly since it is aligned with preds
-        batch_nll_preds = df.iloc[start_idx:end_idx]["nll_pred"].tolist()
-        batch_nll_preds = np.array(batch_nll_preds)
-
-        # Convert to tensor and threshold
-        nll_pred_full = torch.tensor(
-            batch_nll_preds, device=device, dtype=torch.float32
-        )  # (B, S_full)
-        indices = (
-            torch.cat([schedule[1:], torch.tensor([200], device=device)])
-            - schedule[0]
-            - 1
-        )
-        nll_pred_cum = torch.cumsum(nll_pred_full, dim=-1)[..., indices]
-        log_inv_delta = math.log(1.0 / 0.05)
-        confcoef = nll_pred_cum + log_inv_delta
-        B, S, r = (
-            exp_slice.counts.shape[0],
-            len(schedule),
-            exp_slice.counts.shape[-1],
-        )
-
-        if last_only:
-            schedule_slice = schedule[-1].view(1)
-            confcoef_slice = confcoef[:, -1].view(B, 1)
-            p_batch_slice = (
-                torch.full((B, 1, r, r), 0.5, device=device)
-                + torch.rand(B, 1, r, r, device=device) * 0.01
-            )
-        else:
-            schedule_slice = schedule
-            confcoef_slice = confcoef
-            p_batch_slice = (
-                torch.full((B, S, r, r), 0.5, device=device)
-                + torch.rand(B, S, r, r, device=device) * 0.01
-            )
-
-        best_theta_0, best_theta_1 = pairwise_distance_maximization(
-            p_batch_slice,
-            confcoef_slice,
-            exp_slice,
-            schedule_slice,
-            lr=lr,
-            patience=patience,
-            max_steps=max_steps,
-        )
-        check_confidence_set_violation(
-            best_theta_0, exp_slice, schedule_slice, confcoef_slice, start_idx, end_idx
-        )
-        check_confidence_set_violation(
-            best_theta_1, exp_slice, schedule_slice, confcoef_slice, start_idx, end_idx
-        )
-
-        # maximizers_batch: (B, S, H, W)
-        # p_batch: (B, S, H, W)
-        u_p_batch = (best_theta_0 - best_theta_1).abs()
-        batch_uncertainties.append(u_p_batch.cpu().numpy())
-        batch_maximizers.append(
-            np.stack([best_theta_0.cpu().numpy(), best_theta_1.cpu().numpy()], axis=1)
-        )
+    # maximizers_batch: (B, S, H, W)
+    # p_batch: (B, S, H, W)
+    u_p_batch = (best_theta_0 - best_theta_1).abs()
+    batch_uncertainties.append(u_p_batch.cpu().numpy())
+    batch_maximizers.append(
+        np.stack([best_theta_0.cpu().numpy(), best_theta_1.cpu().numpy()], axis=1)
+    )
 
     batch_uncertainties = np.concatenate(batch_uncertainties, axis=0)  # (N, S, H, W)
     batch_uncertainties[
@@ -730,8 +559,8 @@ def main(
         dataset=dataset,
         total_intensity=total_intensity,
         sparse=sparse,
-        image_start_index=req_start,
-        image_end_index=req_end,
+        image_start_index=image_range[0],
+        image_end_index=image_range[1],
         intensity_schedule=None,
         angle_schedule=schedule.tolist(),
     )

@@ -2,6 +2,7 @@ from collections import defaultdict
 from glob import glob
 from pathlib import Path
 
+import json
 import click
 import h5py
 import matplotlib.pyplot as plt
@@ -27,22 +28,6 @@ from uqct.vis.style import MODEL_NAMES, get_model_colors
 TOTAL_INTENSITIES = [1e6, 1e7, 1e8, 1e9]
 DATASETS = ["lung", "composite", "lamino"]
 METHODS = ["fbp", "unet", "unet_ensemble", "boundary"]
-
-# Plotting style
-plt.rcParams.update(
-    {
-        "text.usetex": True,
-        "font.family": "sans-serif",
-        "font.sans-serif": ["Helvetica"],
-        "font.size": 10,
-        "axes.labelsize": 10,
-        "axes.titlesize": 10,
-        "legend.fontsize": 8,
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
-        "figure.figsize": (6.75, 5.0),  # Adjust for 3x3
-    }
-)
 
 
 def load_h5_data(file_path: str, key: str = "preds") -> np.ndarray:
@@ -462,21 +447,26 @@ def main(n_bootstraps):
 
     files_found = False
 
-    for dataset in DATASETS:
-        print(f"Processing {dataset}...")
-        for method in METHODS:
-            for intensity in TOTAL_INTENSITIES:
-                metrics = calculate_metrics(
-                    dataset, intensity, method, n_bootstraps=n_bootstraps
-                )
-                if metrics:
-                    for k, v in metrics.items():
-                        results[dataset][method][k].append(v)
-                    results[dataset][method]["intensity"].append(intensity)
-                    files_found = True
-                else:
-                    # print(f"  Missing data for {dataset} {method} {intensity}")
-                    pass
+    if Path("results/uq_comparison.json").exists():
+        results = json.load(open("results/uq_comparison.json", "r"))
+        files_found = True
+    else:
+        for dataset in DATASETS:
+            print(f"Processing {dataset}...")
+            for method in METHODS:
+                for intensity in TOTAL_INTENSITIES:
+                    metrics = calculate_metrics(
+                        dataset, intensity, method, n_bootstraps=n_bootstraps
+                    )
+                    if metrics:
+                        for k, v in metrics.items():
+                            results[dataset][method][k].append(v)
+                        results[dataset][method]["intensity"].append(intensity)
+                        files_found = True
+                    else:
+                        # print(f"  Missing data for {dataset} {method} {intensity}")
+                        pass
+        json.dump(results, open("results/uq_comparison.json", "w"))
 
     if not files_found:
         print("No valid data found to plot.")
@@ -507,9 +497,9 @@ def main(n_bootstraps):
 
             metric_title = metric.replace("_", " ").title()
             if metric == "sim_cov":
-                metric_title = "Sim. Coverage"
+                metric_title = r"Sim. Coverage (\%)"
             if metric == "ind_cov":
-                metric_title = "Ind. Coverage"
+                metric_title = r"Ind. Coverage (\%)"
 
             titles[key] = f"{method_title} {metric_title}"
 
@@ -570,17 +560,27 @@ def main(n_bootstraps):
                 else:
                     label = f"{model_label}"
 
+                if "_cov" in metric_key.lower():
+                    vals_plot = vals[sort_idx] * 100
+                else:
+                    vals_plot = vals[sort_idx]
+
+                if method == "boundary":
+                    color = get_model_colors().get("diffusion")
+                else:
+                    color = get_model_colors().get(method)
+
                 ax.plot(
                     ints[sort_idx],
-                    vals[sort_idx],
+                    vals_plot,
                     label=label,
-                    color=get_model_colors().get(method, "black"),
+                    color=color,
                     marker="x",
                 )
 
             ax.set_xscale("log")
             ax.set_xlabel("Total Intensity")
-            ax.set_title(dataset.title())
+            ax.set_title(f"{dataset.title()} Dataset")
             ax.grid(True, which="both", linestyle="--", alpha=0.3)
 
             # Y-label only on first plot
@@ -589,7 +589,7 @@ def main(n_bootstraps):
                 ax.legend()
 
         # Save
-        out_path = out_dir / f"{metric_key}.pdf"
+        out_path = out_dir / f"sparse_{metric_key}.pdf"
         plt.savefig(out_path)
         print(f"Saved plot to {out_path}")
         plt.close(fig)

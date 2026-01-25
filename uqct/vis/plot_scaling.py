@@ -12,6 +12,8 @@ from uqct.utils import get_results_dir, load_runs
 from uqct.logging import get_logger
 from uqct.vis.style import MODEL_ORDER, get_style, MODEL_NAMES
 from uqct.eval.run import get_default_angle_schedule
+import matplotlib.colors as mcolors
+from matplotlib.lines import Line2D
 
 plt.rcParams.update(
     {
@@ -121,10 +123,10 @@ def process_metrics(
             "model": row["model"],
             "intensity": float(row["total_intensity"]),
             "sparse": bool(row["sparse"]),
-            "rate": rate,
+            "rate": 100 * rate,
             "nll_sum": nll_sum,
             "nll_sum_mix": nll_sum_mix,
-            "mix_mean_ratio": nll_sum_mix / nll_sum,
+            "mean_mix_perc_diff": 100 * (nll_sum - nll_sum_mix) / nll_sum_mix,
             **metrics_vals,
         }
 
@@ -132,12 +134,21 @@ def process_metrics(
         record["nll_pred_last_mix"] = row.get("nll_pred_last_mix")
         record["nll_gt_sum"] = row.get("nll_gt").sum()
 
-        # 4. gt_nll_confcoef_diff: sum(nll_gt) - sum(nll_pred) + log(1/delta)
         record["gt_nll_confcoef_diff"] = (
             record["nll_gt_sum"] - record["nll_sum"] + LOG_INV_DELTA
         )
         record["gt_nll_confcoef_diff_mix"] = (
             record["nll_gt_sum"] - record["nll_sum_mix"] + LOG_INV_DELTA
+        )
+        record["gt_nll_confcoef_perc_diff"] = (
+            100
+            * (record["nll_gt_sum"] - (record["nll_sum"] + LOG_INV_DELTA))
+            / record["nll_gt_sum"]
+        )
+        record["gt_nll_confcoef_perc_diff_mix"] = (
+            100
+            * (record["nll_gt_sum"] - (record["nll_sum_mix"] + LOG_INV_DELTA))
+            / record["nll_gt_sum"]
         )
         processed_records.append(record)
 
@@ -163,6 +174,11 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     for i, model in enumerate(models):
         sub = stats_df[stats_df["model"] == model].sort_values("intensity")
         if sub.empty:
+            continue
+        if metric == "mean_mix_perc_diff" and model not in (
+            "unet_ensemble",
+            "diffusion",
+        ):
             continue
 
         # ls = linestyles[i % len(linestyles)]
@@ -200,15 +216,15 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     if metric == "psnr":
         pretty_name = "PSNR (dB)"
     if metric == "rate":
-        pretty_name = "Crossover Rate"
+        pretty_name = r"Crossover Rate (\%)"
     if metric == "nll":
         pretty_name = "NLL"
     if metric == "nll_sum":
         pretty_name = "Seq. NLL"
     if metric == "nll_sum_mix":
         pretty_name = "Seq. NLL (Mix.)"
-    if metric == "mix_mean_ratio":
-        pretty_name = "Seq. NLL Mix-Mean Ratio"
+    if metric == "mean_mix_perc_diff":
+        pretty_name = r"Seq. NLL Mean-Mix Diff. (\%)"
     if metric == "nll_pred_last":
         pretty_name = "NLL Last Prediction"
     if metric == "nll_pred_last_mix":
@@ -217,6 +233,9 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
         pretty_name = "NLL"
     if metric in ["gt_nll_confcoef_diff", "gt_nll_confcoef_diff_mix"]:
         pretty_name = r"$L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast) - \beta_{t_\mathrm{final}}(\delta)$"
+    if metric in ["gt_nll_confcoef_perc_diff", "gt_nll_confcoef_perc_diff_mix"]:
+        pretty_name = r"Diff. GT Image NLL and Conf. Coeff. (\%)"
+        plt.ylim(bottom=-200, top=25)
 
     if metric == "nll_sum":
         plt.yscale("log")
@@ -231,12 +250,213 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     plt.close()
 
 
+def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffix: str):
+    """
+    Plots the empirical violation rate vs delta for each total intensity.
+
+    Condition for violation:
+        any_t( sum_0^t(nll_gt) > sum_0^t(nll_pred) + log(1/delta) )
+
+    Let Diff_t = sum_0^t(nll_gt) - sum_0^t(nll_pred).
+    Violation condition: max_t(Diff_t) > log(1/delta)
+
+    We vary delta and compute the fraction of samples that violate this.
+    """
+    logger.info("Generating Violation Rate vs Delta plots...")
+
+    # Pre-compute max_diff for valid rows with list inputs
+    records = []
+
+    # Filter rows that have nll_pred and nll_gt as lists/arrays
+    # We can rely on a quick check or try/except
+    # But to be safe and consistent with process_metrics:
+
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Pre-computing max diffs"):
+        nll_pred = row.get("nll_pred")
+        nll_gt = row.get("nll_gt")
+
+        if isinstance(nll_pred, (list, np.ndarray)) and isinstance(
+            nll_gt, (list, np.ndarray)
+        ):
+            if len(nll_pred) > 0:
+                nll_p = np.array(nll_pred)
+                nll_g = np.array(nll_gt)
+
+                # Check shapes match
+                if nll_p.shape != nll_g.shape:
+                    continue
+
+                diff = np.cumsum(nll_g) - np.cumsum(nll_p)
+                max_diff = np.nanmax(
+                    diff
+                )  # Handle potential NaNs if any, though unlikely with standard data
+
+                records.append(
+                    {
+                        "dataset": row["dataset"],
+                        "model": row["model"],
+                        "sparse": row["sparse"],
+                        "intensity": float(row["total_intensity"]),
+                        "max_diff": max_diff,
+                    }
+                )
+
+    if not records:
+        logger.warning("No valid records found for violation rate plotting.")
+        return
+
+    stats_df = pd.DataFrame(records)
+
+    # Deltas to verify
+    # Log space from 1e-4 to 1.0 (since delta is probability)
+    deltas = np.logspace(-3, 0, 100)
+    log_inv_deltas = np.log(1.0 / deltas)
+
+    # We want ONE plot per MODEL, with 3 subplots (Lamino, Composite, Lung)
+    # Filter for sparse only? The prompt implies "dataset" scaling, usually we care about sparse.
+    # The user didn't explicitly say "sparse only", but previous plots separate sparse/dense.
+    # Let's assume we do this for the sparse case primarily, or we produce two files per model (sparse/dense).
+    # Given the context of "scaling laws", it's usually the sparse setting.
+    # Let's stick to generating for both sparse and dense if data exists, but separate files.
+
+    datasets_order = ["lamino", "composite", "lung"]
+
+    # Iterate over sparse/dense
+    for sparse in [True, False]:
+        suffix = "sparse" if sparse else "dense"
+        subset_df = stats_df[stats_df["sparse"] == sparse]
+
+        if subset_df.empty:
+            continue
+
+        unique_models = subset_df["model"].unique()
+
+        for model in unique_models:
+            model_df = subset_df[subset_df["model"] == model]
+
+            fig, axes = plt.subplots(1, 3, figsize=(10, 3.5), constrained_layout=True)
+
+            # Determine global intensity range for consistent colormap across subplots
+            all_intensities = sorted(model_df["intensity"].unique())
+            if not all_intensities:
+                plt.close(fig)
+                continue
+
+            cmap = plt.get_cmap("viridis")
+            if len(all_intensities) > 1:
+                norm = mcolors.Normalize(
+                    vmin=np.log10(min(all_intensities)),
+                    vmax=np.log10(max(all_intensities)),
+                )
+            else:
+                norm = mcolors.Normalize(vmin=0, vmax=1)
+
+            has_data = False
+
+            for col_idx, ds_name in enumerate(datasets_order):
+                ax = axes[col_idx]
+                ds_group = model_df[model_df["dataset"] == ds_name]
+
+                if ds_group.empty:
+                    ax.set_visible(False)
+                    continue
+
+                has_data = True
+
+                ds_intensities = sorted(ds_group["intensity"].unique())
+
+                for intensity in ds_intensities:
+                    sub = ds_group[ds_group["intensity"] == intensity]
+                    vals = sub["max_diff"].values
+
+                    # Efficient computation
+                    sorted_vals = np.sort(vals)
+                    n_samples = len(vals)
+                    indices = np.searchsorted(sorted_vals, log_inv_deltas, side="right")
+                    counts = n_samples - indices
+                    rates = counts / n_samples
+
+                    color = (
+                        cmap(norm(np.log10(intensity)))
+                        if len(all_intensities) > 1
+                        else "tab:blue"
+                    )
+
+                    # Add label for legend
+                    # Formatting: 1e6 -> 10^6 if possible, or just scientific
+                    label_str = r"$10^{" + f"{int(np.log10(intensity))}" + r"}$"
+                    ax.plot(
+                        deltas,
+                        rates,
+                        color=color,
+                        alpha=0.8,
+                        linewidth=1.5,
+                        label=label_str,
+                    )
+
+                    ax.plot(deltas, rates, color=color, alpha=0.8, linewidth=1.5)
+
+                # Plot diagonal
+                ax.plot(deltas, deltas, "k--", alpha=0.5)  # label="Target"
+
+                # ax.set_xscale("log")
+                # ax.set_yscale("log")
+                ax.set_xlabel(r"Target $\delta$")
+                if col_idx == 0:
+                    ax.set_ylabel(r"Empirical Rate $\hat{\delta}$")
+
+                ax.set_title(f"{ds_name.title()} Dataset")
+                ax.grid(True, which="major", alpha=0.3)
+
+            if not has_data:
+                plt.close(fig)
+                continue
+
+            # Add Legend to the last subplot (rightmost)
+            # User wants: legend into the subplot that is on the very right
+            # Title: Total Intensity
+
+            # We need handles and labels. Since all subplots presumably have the same intensities/lines,
+            # we can use handles/labels from the loop logic.
+            # However, we only added labels to the plot in the loop.
+            # Let's get handles/labels from the first subplot (axes[0]), assuming it has all intensities.
+            # If axes[0] is empty? We should try to get from any valid subplot.
+
+            handles, labels = [], []
+            for ax in axes:
+                if ax.lines:
+                    h, l = ax.get_legend_handles_labels()
+                    if h:
+                        handles, labels = h, l
+                        break
+
+            if handles:
+                axes[-1].legend(
+                    handles,
+                    labels,
+                    loc="best",
+                    title="Total Intensity",
+                    fontsize="small",
+                )
+
+            # Output path
+            # Save in global/scaling
+
+            global_dir = output_dir / "global" / "scaling"
+            global_dir.mkdir(parents=True, exist_ok=True)
+
+            out_path = (
+                global_dir / f"violation_rate_{model}_{suffix}_{range_suffix}.pdf"
+            )
+            plt.savefig(out_path, dpi=300, bbox_inches="tight")
+            plt.close(fig)
+
+
 def save_tables(
     df: pd.DataFrame, output_dir: Path, dataset_name: str, aggregation: str
 ):
     """Generates and saves summary tables for a dataset."""
 
-    # 1. Aggregate: Mean over seeds/runs (if multiple)
     # Group By: model, intensity, sparse
     # Metrics to average: psnr, ssim, rmse, nll_sum
 
@@ -428,16 +648,21 @@ def main(
         "l1",
         "rmse",
         "nll_sum",
-        "mix_mean_ratio",
+        "mean_mix_perc_diff",
         "nll_sum_mix",
         "nll_pred_last",
         "nll_pred_last_mix",
         "nll_gt_sum",
         "gt_nll_confcoef_diff",
         "gt_nll_confcoef_diff_mix",
+        "gt_nll_confcoef_perc_diff",
+        "gt_nll_confcoef_perc_diff_mix",
     ]
 
     range_suffix = "1e6_1e9" if filter_intensities else "1e4_1e9"
+
+    # --- 0. Violation Rate vs Delta Plots ---
+    plot_violation_rate_vs_delta(df, output_dir, range_suffix)
 
     # --- 1. Per-Dataset Plots ---
     groups = metric_df.groupby(["dataset", "sparse"])
@@ -473,6 +698,8 @@ def main(
                 "nll_gt_sum",
                 "gt_nll_confcoef_diff",
                 "gt_nll_confcoef_diff_mix",
+                "gt_nll_confcoef_perc_diff",
+                "gt_nll_confcoef_perc_diff_mix",
             ]:
                 metric_agg_suffix = ""
 
@@ -525,9 +752,15 @@ def main(
             )
             stats["sem"] = stats["std"] / np.sqrt(stats["count"])
 
+            current_max_y = -float("inf")
             for i, model in enumerate(models):
                 sub = stats[stats["model"] == model].sort_values("intensity")
                 if sub.empty:
+                    continue
+                if m == "mean_mix_perc_diff" and model not in (
+                    "diffusion",
+                    "unet_ensemble",
+                ):
                     continue
 
                 # ls = linestyles[i % len(linestyles)]
@@ -556,6 +789,11 @@ def main(
                     alpha=0.2,
                 )
 
+                # Track max y for this subplot
+                upper_bound = (sub["mean"] + sem).max()
+                if not np.isnan(upper_bound):
+                    current_max_y = max(current_max_y, upper_bound)
+
             ax.set_xscale("log")
             ax.set_xlabel("Total Intensity")
             ax.set_title(f"{ds_name.title()} Dataset")
@@ -566,13 +804,13 @@ def main(
             if m == "psnr":
                 pretty_name = "PSNR (dB)"
             if m == "rate":
-                pretty_name = "Crossover Rate"
+                pretty_name = r"Crossover Rate (\%)"
             if m == "nll":
                 pretty_name = "NLL"
             if m == "nll_sum":
                 pretty_name = "Seq. NLL"
-            if m == "mix_mean_ratio":
-                pretty_name = "Seq. NLL Mix-Mean Ratio"
+            if m == "mean_mix_perc_diff":
+                pretty_name = r"Seq. NLL Mean-Mix Diff. (\%)"
             if m == "nll_sum_mix":
                 pretty_name = "Seq. NLL (Mix.)"
             if m == "nll_pred_last":
@@ -583,6 +821,16 @@ def main(
                 pretty_name = "NLL"
             if m in ["gt_nll_confcoef_diff", "gt_nll_confcoef_diff_mix"]:
                 pretty_name = r"$L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast) - \beta_{t_\mathrm{final}}(\delta)$"
+            if m in ["gt_nll_confcoef_perc_diff", "gt_nll_confcoef_perc_diff_mix"]:
+                pretty_name = r"Diff. GT Image NLL and Conf. Coeff. (\%)"
+
+                # Debug logging for y-axis range
+                logger.info(
+                    f"Dataset: {ds_name}, Metric: {m} -> Max Upper Bound (Mean+SEM) across models: {current_max_y}"
+                )
+
+                # Clamp top to 25 to avoid showing empty space due to potential outliers or large SEM
+                ax.set_ylim(bottom=-200, top=25)
 
             if m == "nll_sum":
                 ax.set_yscale("log")
@@ -600,7 +848,9 @@ def main(
             "nll_gt_sum",
             "gt_nll_confcoef_diff",
             "gt_nll_confcoef_diff_mix",
-            "mix_mean_ratio",
+            "gt_nll_confcoef_perc_diff",
+            "gt_nll_confcoef_perc_diff_mix",
+            "mean_mix_perc_diff",
         ]:
             metric_agg_suffix = ""
 

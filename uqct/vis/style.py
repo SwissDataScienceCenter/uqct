@@ -18,27 +18,27 @@ plt.rcParams.update(
 # Standard Model Order
 MODEL_ORDER = [
     "fbp",
-    "bootstrapping_fbp",
     "mle",
     "unet",
-    "bootstrapping_unet",
     "unet_ensemble",
-    "bootstrapping_unet_ensemble",
     "diffusion",
+    "bootstrapping_fbp",
+    "bootstrapping_unet",
+    "bootstrapping_unet_ensemble",
     "boundary",
 ]
 
 # Display Names
 MODEL_NAMES = {
-    "diffusion": "Diffusion",
-    "boundary": "Boundary",
     "fbp": "FBP",
     "mle": "MLE",
     "unet": "U-Net",
     "unet_ensemble": "U-Net Ens.",
+    "diffusion": "Diffusion",
+    "bootstrapping_fbp": "FBP (Boot.)",
     "bootstrapping_unet": "U-Net (Boot.)",
     "bootstrapping_unet_ensemble": "U-Net Ens. (Boot.)",
-    "bootstrapping_fbp": "FBP (Boot.)",
+    "boundary": "Boundary",
 }
 
 

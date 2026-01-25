@@ -537,8 +537,8 @@ def main(
         logger.warning(f"Original H5 file not found: {h5_path}")
 
     # 2. Prepare Conf Coefs
-    # Parse 'nll_pred' from dataframe.
-    nll_preds_raw = df["nll_pred"].tolist()
+    # Parse 'nll_pred_mix' from dataframe.
+    nll_preds_raw = df["nll_pred_mix"].tolist()
     nll_pred_tensor = torch.tensor(
         nll_preds_raw, device=experiment.counts.device, dtype=torch.float32
     )
