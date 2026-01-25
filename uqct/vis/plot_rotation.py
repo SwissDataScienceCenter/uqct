@@ -105,7 +105,7 @@ def compute_rotated_nll(
     total_items = cat_images.shape[0]
 
     # Batch Size
-    batch_size = 128
+    batch_size = 64
 
     all_nlls = []
 
@@ -304,12 +304,14 @@ def plot_data(input_file: Path):
     df = pd.read_parquet(input_file)
 
     # Aggregate Exclusion Rate
+    # Aggregate Exclusion Rate
     agg = (
         df.groupby(["dataset", "intensity", "sparse", "model", "angle"])["excluded"]
-        .mean()
+        .agg(["mean", "std", "count"])
         .reset_index()
     )
-    agg.rename(columns={"excluded": "exclusion_rate"}, inplace=True)
+    agg["sem"] = agg["std"] / np.sqrt(agg["count"])
+    agg.rename(columns={"mean": "exclusion_rate"}, inplace=True)
 
     # Save Summary
     output_dir = Path("./plots/rotation")
@@ -344,6 +346,9 @@ def plot_data(input_file: Path):
                 sub = d_df[d_df["model"] == m].sort_values("angle")
                 style = get_style(m)
 
+                # Fill NaNs in SEM if any (single sample case)
+                sem = sub["sem"].fillna(0)
+
                 ax.plot(
                     sub["angle"],
                     100 * sub["exclusion_rate"],
@@ -351,6 +356,13 @@ def plot_data(input_file: Path):
                     color=style["color"],
                     marker="x",
                     alpha=0.8,
+                )
+                ax.fill_between(
+                    sub["angle"],
+                    (100 * (sub["exclusion_rate"] - sem)).clip(lower=0),
+                    (100 * (sub["exclusion_rate"] + sem)).clip(upper=100),
+                    alpha=0.2,
+                    color=style["color"],
                 )
 
             ax.set_xscale("log")
@@ -360,7 +372,7 @@ def plot_data(input_file: Path):
 
             if col_idx == 0:
                 ax.set_ylabel(r"Exclusion Rate (\%)")
-                ax.legend(fontsize=8)
+                ax.legend(fontsize=8, loc="best")
 
         # Directory: plots/rotation/{intensity}_{sparse}/
         inten_str = f"{intensity:.0e}".replace("+0", "").replace("+", "")

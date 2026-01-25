@@ -334,7 +334,7 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
         for model in unique_models:
             model_df = subset_df[subset_df["model"] == model]
 
-            fig, axes = plt.subplots(1, 3, figsize=(10, 3.5), constrained_layout=True)
+            fig, axes = plt.subplots(1, 3, figsize=(6.75, 2.5), constrained_layout=True)
 
             # Determine global intensity range for consistent colormap across subplots
             all_intensities = sorted(model_df["intensity"].unique())
@@ -376,6 +376,9 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
                     counts = n_samples - indices
                     rates = counts / n_samples
 
+                    # Compute SEM for proportion
+                    sem = np.sqrt(rates * (1 - rates) / n_samples)
+
                     color = (
                         cmap(norm(np.log10(intensity)))
                         if len(all_intensities) > 1
@@ -395,6 +398,15 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
                     )
 
                     ax.plot(deltas, rates, color=color, alpha=0.8, linewidth=1.5)
+
+                    # Plot Error Band
+                    ax.fill_between(
+                        deltas,
+                        (rates - sem).clip(0, 1),
+                        (rates + sem).clip(0, 1),
+                        color=color,
+                        alpha=0.2,
+                    )
 
                 # Plot diagonal
                 ax.plot(deltas, deltas, "k--", alpha=0.5)  # label="Target"

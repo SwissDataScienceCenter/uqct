@@ -526,9 +526,6 @@ def main(n_bootstraps):
                 if not data or not data["intensity"]:
                     continue
 
-                if metric_key not in data:
-                    continue
-
                 # Sort by intensity
                 ints = np.array(data["intensity"])
 

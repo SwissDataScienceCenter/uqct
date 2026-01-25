@@ -26,6 +26,7 @@ MODEL_ORDER = [
     "bootstrapping_unet",
     "bootstrapping_unet_ensemble",
     "boundary",
+    "distance_maximization",
 ]
 
 # Display Names
@@ -39,6 +40,7 @@ MODEL_NAMES = {
     "bootstrapping_unet": "U-Net (Boot.)",
     "bootstrapping_unet_ensemble": "U-Net Ens. (Boot.)",
     "boundary": "Boundary",
+    "distance_maximization": "Distance Max.",
 }
 
 
