@@ -1,4 +1,5 @@
 import torch
+import scipy.stats
 
 from uqct.ct import circular_mask
 
@@ -40,13 +41,13 @@ def gaussian_conservative_ci(
 
 
 def percentile_ci(
-    samples: torch.Tensor, alpha: float = 0.05, bdim=0
+    samples: torch.Tensor, delta: float = 0.05, bdim=0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Percentile bootstrap confidence interval.
     """
-    q_lo = alpha / 2
-    q_hi = 1 - alpha / 2
+    q_lo = delta / 2
+    q_hi = 1 - delta / 2
 
     lo = torch.quantile(samples, q_lo, dim=bdim)
     hi = torch.quantile(samples, q_hi, dim=bdim)
@@ -55,14 +56,14 @@ def percentile_ci(
 
 
 def basic_ci(
-    samples: torch.Tensor, alpha: float = 0.05, bdim=0
+    samples: torch.Tensor, delta: float = 0.05, bdim=0
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Basic (bias-corrected) bootstrap interval:
     [2θ̂ − q_hi, 2θ̂ − q_lo]
     """
-    q_lo = alpha / 2
-    q_hi = 1 - alpha / 2
+    q_lo = delta / 2
+    q_hi = 1 - delta / 2
 
     mean = samples.mean(dim=bdim)
     ql = torch.quantile(samples, q_lo, dim=bdim)
@@ -115,6 +116,46 @@ def simultaneous_ci(
 
     lo = mean - t_star * std
     hi = mean + t_star * std
+
+    return lo, hi
+
+
+def student_t_bonferroni_ci(
+    samples: torch.Tensor, delta: float = 0.05, bdim: int = 0, n_pixels: int = 128 * 128
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Bonferroni-corrected Student's t-interval using the base student_t_ci function.
+
+    It simply scales the delta: delta_new = delta / n_pixels.
+    """
+    return student_t_ci(samples, delta=delta / n_pixels, bdim=bdim)
+
+
+def student_t_ci(
+    samples: torch.Tensor, delta: float = 0.05, bdim: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Parametric Student's t-interval for unknown population standard deviation.
+
+    For a sample vector x \in R^n (along dim `bdim`), this computes:
+      lo = mean - t_{crit} * std
+      hi = mean + t_{crit} * std
+
+    where t_{crit} is the (1 - delta/2) quantile of a Student's t-distribution
+    with degrees of freedom nu = n - 1.
+    """
+    n = samples.shape[bdim]
+    df = n - 1
+
+    if n < 2:
+        raise ValueError(f"Student's t-interval requires at least 2 samples, got {n}.")
+
+    t_crit = scipy.stats.t.ppf(1 - delta / 2, df)
+
+    mean, std = mean_std(samples, bdim=bdim)
+
+    lo = mean - float(t_crit) * std
+    hi = mean + float(t_crit) * std
 
     return lo, hi
 
@@ -236,7 +277,6 @@ def sparsification_error(
     uncertainty: torch.Tensor,
     error: torch.Tensor,
     circle_mask: bool = True,
-    n_bins: int = 100,
 ) -> torch.Tensor:
     """
     Computes the Area Under the Sparsification Error curve (AUSE).
@@ -249,7 +289,6 @@ def sparsification_error(
         uncertainty (torch.Tensor): (..., H, W) Uncertainty map (e.g., ci_width or std).
         error (torch.Tensor): (..., H, W) Absolute error map.
         circle_mask (bool): If True, applies circular mask.
-        n_bins (int): Number of bins for the sparsification curve.
 
     Returns:
         torch.Tensor: AUSE values for each image in the batch. Output shape: (...,)
@@ -263,13 +302,6 @@ def sparsification_error(
         batch_dims = error.shape[:-2]
         error_flat = error.reshape(*batch_dims, -1)
         unc_flat = uncertainty.reshape(*batch_dims, -1)
-
-        # Note: If we just mask with * mask, the outside become 0.
-        # 0 uncertainty might be interpreted as high confidence.
-        # But 0 error is good.
-        # We need to filter indices where mask is 1.
-        # Assuming simple batch processing where mask is same for all is tricky if vectorizing.
-        # However, usually we compute mean over batch.
 
         # To strictly compute sparsification on valid pixels only:
         valid_indices = mask.flatten().nonzero().squeeze()
@@ -289,25 +321,7 @@ def sparsification_error(
     # Number of valid pixels
     n_pixels = error_flat.shape[-1]
 
-    # Vectorized sorting
-
-    # 1. Sort by Uncertainty (Model) Ascending
-    #    (Removing high uncertainty first = keeping low uncertainty pixels)
-    #    So curve x-axis is "fraction removed".
-    #    At x=0 (0 removed), we have all pixels. Mean error is global mean.
-    #    At x=0.99 (99% removed), we have top 1% uncertain pixels removed (or keep 1% most certain).
-    #    Wait, usually sparsification plots Error vs Fraction Removed.
-    #    Order: Remove highest uncertainty first.
-    #    So we define "remaining" set as those with lowest uncertainty.
-    #    So we sort by uncertainty ascending.
-    #    Remaining k% = first k% of sorted array.
-
     _, unc_indices = torch.sort(unc_flat, dim=-1, descending=False)
-
-    # 2. Sort by Error (Oracle) Ascending
-    #    Oracle removes highest error first.
-    #    Remaining k% = first k% of sorted array (lowest error).
-
     _, err_indices = torch.sort(error_flat, dim=-1, descending=False)
 
     # Reorder error

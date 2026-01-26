@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=uqct-bootstrapping
-#SBATCH --array=0-239
+#SBATCH --array=0-359
 #SBATCH --cpus-per-task=4
 #SBATCH --mem-per-cpu=8G
 #SBATCH --gpus=1

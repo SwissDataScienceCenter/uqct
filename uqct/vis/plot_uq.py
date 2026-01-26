@@ -1,6 +1,7 @@
 from collections import defaultdict
 from glob import glob
 from pathlib import Path
+from typing import Callable
 from uqct.debugging import plot_img
 
 import json
@@ -23,13 +24,15 @@ from uqct.uq import (
     simultaneous_ci,
     sparsification_error,
     studentized_ci,
+    student_t_ci,
+    student_t_bonferroni_ci,
 )
 from uqct.vis.style import MODEL_NAMES, get_model_colors
 
 # Configuration matching the user's setup
 TOTAL_INTENSITIES = [1e6, 1e7, 1e8, 1e9]
 DATASETS = ["lung", "composite", "lamino"]
-METHODS = ["distance_maximization", "fbp", "unet", "unet_ensemble", "boundary"]
+METHODS = ["fbp", "unet", "unet_ensemble", "distance_maximization", "boundary"]
 
 
 def load_h5_data(file_path: str, key: str = "preds") -> np.ndarray:
@@ -65,7 +68,7 @@ def get_ground_truth(dataset: str, image_range: tuple[int, int]) -> torch.Tensor
 
 
 def compute_stats_from_samples(
-    samples: torch.Tensor, gt: torch.Tensor
+    samples: torch.Tensor, gt: torch.Tensor, chosen_ci_fn: Callable
 ) -> dict[str, list[float]]:
     """
     Computes all UQ statistics for a batch of samples and ground truth.
@@ -97,15 +100,13 @@ def compute_stats_from_samples(
             "basic": basic_ci,
             "studentized": studentized_ci,
             "simultaneous": simultaneous_ci,
+            "student_t": student_t_ci,
+            "student_t_bonferroni": student_t_bonferroni_ci,
+            "chosen": chosen_ci_fn,
         }
 
         for name, func in ci_methods.items():
-            kwargs = {"bdim": 0}
-            if name in ["percentile", "basic"]:
-                kwargs["alpha"] = 0.05
-            else:
-                kwargs["delta"] = 0.05
-
+            kwargs = {"bdim": 0, "delta": 0.05}
             lower, upper = func(item_samples, **kwargs)
             lower = lower.clamp(0, 1)
             upper = upper.clamp(0, 1)
@@ -154,13 +155,7 @@ def find_files(
     """Finds run files matching the criteria."""
 
     if model == "boundary":
-        # Search in boundary_sampling dir
-        # Pattern: boundary_diffusion:dataset:intensity:*.h5
         search_dir = "results/boundary_sampling"
-        # The files are like: boundary_diffusion:composite:10000.0:True:10-20:0:timestamp.h5
-        # We match dataset and intensity.
-        # Note: intensity string format might vary (10000.0 vs 1e4).
-        # existing files have .0 suffix for floats.
         pattern = f"{search_dir}/boundary_diffusion:{dataset}:{intensity}*:*.h5"
         files = glob(pattern)
         return sorted(files)
@@ -170,47 +165,26 @@ def find_files(
         files = glob(pattern)
         return sorted(files)
 
-    # Standard / Bootstrapping
-    # Construct glob pattern
-    # Filename format: model:dataset:intensity:sparse:range:timestamp.parquet
-    # We assume sparse=True for bootstrapping as per code
-
     search_model = f"bootstrapping_{model}" if is_bootstrapping else model
-    # Relax pattern if needed, but this matches user provided example
     pattern = f"results/runs/{search_model}:{dataset}:{intensity}:True:*.parquet"
     files = glob(pattern)
-
-    # If is_bootstrapping and we find nothing, maybe we need to look for chunks.
-    # Actually, the pattern above matches ALL ranges.
-    # The issue is usually we pick *one* file.
-    # But if we have chunks, we will have multiple files (different ranges) with different timestamps potentially.
-    # We need to group them or select a consistent set.
-    # For now, let's just return all valid files and let calculate_metrics handle them.
-
     valid_files = []
     for f in files:
-        try:
-            # We relax the check to just valid parquet + H5 existence
-            # The strict SLURM ID check is removed as user might run locally or differently
-            h5_path = f.replace(".parquet", ".h5")
-            if Path(h5_path).exists():
-                # Check n_bootstraps if required
-                if is_bootstrapping and n_bootstraps is not None:
-                    try:
-                        df = pd.read_parquet(f)
-                        if "n_bootstraps" not in df.columns:
-                            continue
-                        if int(df["n_bootstraps"].iloc[0]) != n_bootstraps:
-                            continue
-                    except Exception:
+        h5_path = f.replace(".parquet", ".h5")
+        if Path(h5_path).exists():
+            # Check n_bootstraps if required
+            if is_bootstrapping and n_bootstraps is not None:
+                try:
+                    df = pd.read_parquet(f)
+                    if "n_bootstraps" not in df.columns:
                         continue
+                    if int(df["n_bootstraps"].iloc[0]) != n_bootstraps:
+                        continue
+                except Exception:
+                    continue
 
-                valid_files.append(f)
-        except Exception as e:
-            print(f"DEBUG: Error processing {f}: {e}")
-            continue
+            valid_files.append(f)
 
-    # Sort by timestamp (newest first)
     def get_ts(x):
         try:
             val = pd.read_parquet(x)["timestamp"].iloc[0]
@@ -236,58 +210,50 @@ def calculate_metrics(
             return {}
 
         for b_file in boundary_files:
-            try:
-                # Load samples (N, S, R, 1, H, W)
-                samples_all = load_h5_data(b_file, key="sampled_images")
+            # Load samples (N, S, R, 1, H, W)
+            samples_all = load_h5_data(b_file, key="sampled_images")
 
-                # Extract samples
-                if samples_all.ndim == 6:
-                    # (N, S, R, 1, H, W) -> (N, R, H, W)
-                    samples = samples_all[:, -1, :, 0, :, :]
-                elif samples_all.ndim == 5:
-                    # (N, S, R, H, W) -> (N, R, H, W)
-                    samples = samples_all[:, -1, :, :, :]
-                else:
-                    print(f"Skipping {b_file}: shape {samples_all.shape}")
-                    continue
+            # Extract samples
+            if samples_all.ndim == 6:
+                # (N, S, R, 1, H, W) -> (N, R, H, W)
+                samples = samples_all[:, -1, :, 0, :, :]
+            elif samples_all.ndim == 5:
+                # (N, S, R, H, W) -> (N, R, H, W)
+                samples = samples_all[:, -1, :, :, :]
+            else:
+                print(f"Skipping {b_file}: shape {samples_all.shape}")
+                continue
 
-                # Parse Range
-                parts = Path(b_file).name.split(":")
-                range_part = None
-                for p in parts:
-                    if "-" in p and p.replace("-", "").isdigit():
-                        range_part = p
-                        break
+            # Parse Range
+            parts = Path(b_file).name.split(":")
+            range_part = None
+            for p in parts:
+                if "-" in p and p.replace("-", "").isdigit():
+                    range_part = p
+                    break
 
-                if not range_part:
-                    continue
+            if not range_part:
+                continue
 
-                start, end = map(int, range_part.split("-"))
+            start, end = map(int, range_part.split("-"))
+            gt = get_ground_truth(dataset, (start, end))
+            samples = torch.tensor(samples).cuda()
 
-                # Load GT
-                gt = get_ground_truth(dataset, (start, end))
+            if gt.shape[-2:] != samples.shape[-2:]:
+                gt = F.interpolate(
+                    gt.unsqueeze(1), size=samples.shape[-2:], mode="area"
+                ).squeeze(1)
 
-                # To CUDA
-                samples = torch.tensor(samples).cuda()
+            n = min(len(gt), len(samples))
+            gt = gt[:n]
+            samples = samples[:n]
 
-                # Resize if needed
-                if gt.shape[-2:] != samples.shape[-2:]:
-                    gt = F.interpolate(
-                        gt.unsqueeze(1), size=samples.shape[-2:], mode="area"
-                    ).squeeze(1)
+            # Compute Stats
+            chunk_metrics = compute_stats_from_samples(samples, gt, student_t_ci)
 
-                n = min(len(gt), len(samples))
-                gt = gt[:n]
-                samples = samples[:n]
+            for k, v in chunk_metrics.items():
+                all_metrics[k].extend(v)
 
-                # Compute Stats
-                chunk_metrics = compute_stats_from_samples(samples, gt)
-
-                for k, v in chunk_metrics.items():
-                    all_metrics[k].extend(v)
-
-            except Exception as e:
-                print(f"Error processing {b_file}: {e}")
     elif method == "distance_maximization":
         files = find_files(dataset, intensity, method, is_bootstrapping=False)
         for file in files:
@@ -305,11 +271,14 @@ def calculate_metrics(
             in_ci = (lb <= gt_lr) & (gt_lr <= ub)
             sim_cov = in_ci.all((-2, -1)).float().mean()
             ind_cov = in_ci.float().mean()
-            width = (ub - lb).mean()
+            width = (ub - lb).abs().mean()
 
             all_metrics["distance_maximization_sim_cov"].append(sim_cov.cpu().item())
             all_metrics["distance_maximization_ind_cov"].append(ind_cov.cpu().item())
             all_metrics["distance_maximization_width"].append(width.cpu().item())
+            all_metrics["chosen_sim_cov"].append(sim_cov.cpu().item())
+            all_metrics["chosen_ind_cov"].append(ind_cov.cpu().item())
+            all_metrics["chosen_width"].append(width.cpu().item())
     else:
         # Bootstrapping / Ensemble
         if method == "unet_ensemble":
@@ -326,99 +295,75 @@ def calculate_metrics(
         if not boot_files:
             return {}
 
-        # New Logic: If bootstrapping, we might have multiple chunks (10-20, 20-30, etc.)
-        # If we have a full file (10-110), use that.
-        # Otherwise, try to aggregate chunks.
-
         files_to_process = []
-
-        # Check for full range first (simplistic check: assuming 10-110 is the target full range, but it might vary)
-        # Actually, let's just process all found files, but filter out duplicates (same range, older timestamp).
-        # find_files sorts by timestamp (newest first).
 
         processed_ranges = set()
 
         for f in boot_files:
-            try:
-                parts = Path(f).name.split(":")
-                range_part = None
-                for p in parts:
-                    if "-" in p and p.replace("-", "").isdigit():
-                        range_part = p
-                        break
+            parts = Path(f).name.split(":")
+            range_part = None
+            for p in parts:
+                if "-" in p and p.replace("-", "").isdigit():
+                    range_part = p
+                    break
 
-                if not range_part:
-                    continue
-
-                start, end = map(int, range_part.split("-"))
-                r_tuple = (start, end)
-                if r_tuple in processed_ranges:
-                    continue
-                is_overlap = False
-                for pr in processed_ranges:
-                    if max(start, pr[0]) < min(end, pr[1]):
-                        is_overlap = True
-                        break
-
-                if is_overlap:
-                    continue
-
-                processed_ranges.add(r_tuple)
-                files_to_process.append(f)
-
-            except Exception:
+            if not range_part:
                 continue
 
+            start, end = map(int, range_part.split("-"))
+            r_tuple = (start, end)
+            if r_tuple in processed_ranges:
+                continue
+            is_overlap = False
+            for pr in processed_ranges:
+                if max(start, pr[0]) < min(end, pr[1]):
+                    is_overlap = True
+                    break
+
+            if is_overlap:
+                continue
+
+            processed_ranges.add(r_tuple)
+            files_to_process.append(f)
+
         if not files_to_process:
-            # Fallback to old behavior if something fails
             files_to_process = [boot_files[0]]
 
         for boot_file in files_to_process:
-            try:
-                df_boot = pd.read_parquet(boot_file)
-                # Ensure metadata matches (sanity check)
+            df_boot = pd.read_parquet(boot_file)
 
-                start = int(df_boot["image_start_index"].iloc[0])
-                end = int(df_boot["image_end_index"].iloc[0])
+            start = int(df_boot["image_start_index"].iloc[0])
+            end = int(df_boot["image_end_index"].iloc[0])
 
-                preds_boot_np = load_h5_data(boot_file)
-                preds_boot = torch.tensor(preds_boot_np).cuda()
+            preds_boot_np = load_h5_data(boot_file)
+            preds_boot = torch.tensor(preds_boot_np).cuda()
 
-                # Format to (N, S, H, W)
-                # Ensemble: (N, Steps, Members, H, W) -> (N, Members, H, W)
-                # Boot: (N, 1, Samples, H, W) -> (N, Samples, H, W)
+            if method == "unet_ensemble":
+                chosen_ci_fn = student_t_ci
+                if preds_boot.ndim == 5:
+                    preds_boot = preds_boot[:, -1, ...]
+            else:
+                chosen_ci_fn = percentile_ci
+                if preds_boot.ndim == 5:
+                    preds_boot = preds_boot[:, 0, ...]
 
-                if method == "unet_ensemble":
-                    if preds_boot.ndim == 5:
-                        preds_boot = preds_boot[:, -1, ...]
-                else:
-                    if preds_boot.ndim == 5:
-                        preds_boot = preds_boot[:, 0, ...]
+            gt = get_ground_truth(dataset, (start, end))
 
-                # Load GT
-                gt = get_ground_truth(dataset, (start, end))
+            if gt.shape[-2:] != preds_boot.shape[-2:]:
+                gt = F.interpolate(
+                    gt.unsqueeze(1), size=preds_boot.shape[-2:], mode="area"
+                ).squeeze(1)
 
-                if gt.shape[-2:] != preds_boot.shape[-2:]:
-                    gt = F.interpolate(
-                        gt.unsqueeze(1), size=preds_boot.shape[-2:], mode="area"
-                    ).squeeze(1)
+            n = min(len(gt), len(preds_boot))
+            gt = gt[:n]
+            preds_boot = preds_boot[:n]
 
-                n = min(len(gt), len(preds_boot))
-                gt = gt[:n]
-                preds_boot = preds_boot[:n]
+            chunk_metrics = compute_stats_from_samples(preds_boot, gt, chosen_ci_fn)
 
-                chunk_metrics = compute_stats_from_samples(preds_boot, gt)
+            for k, v in chunk_metrics.items():
+                all_metrics[k].extend(v)
 
-                for k, v in chunk_metrics.items():
-                    all_metrics[k].extend(v)
-
-            except Exception as e:
-                print(f"Error processing {dataset} {method} file {boot_file}: {e}")
-                continue
-
-    # Average
     if not all_metrics:
-        # print("No metrics computed.")
         return {}
 
     return {k: float(np.nanmean(v)) for k, v in all_metrics.items()}
@@ -467,6 +412,9 @@ def main(n_bootstraps):
         "basic",
         "studentized",
         "simultaneous",
+        "student_t",
+        "student_t_bonferroni",
+        "chosen",
     ]
     ci_metrics = ["sim_cov", "ind_cov", "width"]
 
@@ -488,7 +436,10 @@ def main(n_bootstraps):
             if metric == "ind_cov":
                 metric_title = r"Ind. Coverage (\%)"
 
-            titles[key] = f"{method_title} {metric_title}"
+            if method_name == "chosen":
+                titles[key] = f"{metric_title}"
+            else:
+                titles[key] = f"{method_title} {metric_title}"
 
     metrics_to_plot.extend(["error_corr", "error_r2", "ause"])
     titles["error_corr"] = "Error-Width Correlation"
