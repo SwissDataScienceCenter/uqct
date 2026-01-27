@@ -3,6 +3,7 @@ from glob import glob
 from pathlib import Path
 from typing import Callable
 from uqct.debugging import plot_img
+from tqdm.auto import tqdm
 
 import json
 import click
@@ -27,12 +28,12 @@ from uqct.uq import (
     student_t_ci,
     student_t_bonferroni_ci,
 )
-from uqct.vis.style import MODEL_NAMES, get_model_colors
+from uqct.vis.style import ICML_COLUMN_WIDTH, MODEL_NAMES, get_model_colors
 
 # Configuration matching the user's setup
-TOTAL_INTENSITIES = [1e6, 1e7, 1e8, 1e9]
+TOTAL_INTENSITIES = [1e4, 1e5, 1e6, 1e7, 1e8, 1e9]
 DATASETS = ["lung", "composite", "lamino"]
-METHODS = ["fbp", "unet", "unet_ensemble", "distance_maximization", "boundary"]
+METHODS = ["fbp", "unet", "unet_ensemble", "boundary"]
 
 
 def load_h5_data(file_path: str, key: str = "preds") -> np.ndarray:
@@ -385,8 +386,10 @@ def main(n_bootstraps):
     else:
         for dataset in DATASETS:
             print(f"Processing {dataset}...")
-            for method in METHODS:
-                for intensity in TOTAL_INTENSITIES:
+            for method in tqdm(METHODS, desc="Methods", leave=False):
+                for intensity in tqdm(
+                    TOTAL_INTENSITIES, desc="Intensities", leave=False
+                ):
                     metrics = calculate_metrics(
                         dataset, intensity, method, n_bootstraps=n_bootstraps
                     )
@@ -422,24 +425,19 @@ def main(n_bootstraps):
     titles = {}
 
     for method_name in ci_methods:
-        method_title = method_name.replace("_", " ").title()
-        if method_name == "gaussian_cons":
-            method_title = "Gaussian (Cons.)"
-
         for metric in ci_metrics:
             key = f"{method_name}_{metric}"
             metrics_to_plot.append(key)
 
             metric_title = metric.replace("_", " ").title()
             if metric == "sim_cov":
-                metric_title = r"Sim. Coverage (\%)"
+                metric_title = r"Coverage (\%)"
             if metric == "ind_cov":
-                metric_title = r"Ind. Coverage (\%)"
+                metric_title = r"Coverage (\%)"
+            if metric == "width":
+                metric_title = r"CI Width"
 
-            if method_name == "chosen":
-                titles[key] = f"{metric_title}"
-            else:
-                titles[key] = f"{method_title} {metric_title}"
+            titles[key] = f"{metric_title}"
 
     metrics_to_plot.extend(["error_corr", "error_r2", "ause"])
     titles["error_corr"] = "Error-Width Correlation"
@@ -465,11 +463,20 @@ def main(n_bootstraps):
         if not has_data:
             continue
 
-        fig, axes = plt.subplots(1, 3, figsize=(6.75, 2.5), constrained_layout=True)
+        fig, axes = plt.subplots(
+            len(DATASETS),
+            1,
+            figsize=(ICML_COLUMN_WIDTH, 4.2),
+            sharey=True,
+            sharex=True,
+        )
         # axes is (3,) array
 
-        for col_idx, dataset in enumerate(DATASETS):
-            ax = axes[col_idx]
+        metric_title = titles.get(metric_key, metric_key)
+        # fig.supylabel(metric_title, x=0.03)
+
+        for row_idx, dataset in enumerate(DATASETS):
+            ax = axes[row_idx]
 
             # Loop methods
             for method in METHODS:
@@ -524,14 +531,41 @@ def main(n_bootstraps):
                 )
 
             ax.set_xscale("log")
-            ax.set_xlabel("Total Intensity")
+            if row_idx == len(DATASETS) - 1:
+                ax.set_xlabel("Total Intensity")
+            ax.set_ylabel(metric_title)
+
             ax.set_title(f"{dataset.title()} Dataset")
             ax.grid(True, which="both", linestyle="--", alpha=0.3)
 
-            # Y-label only on first plot
-            if col_idx == 0:
-                ax.set_ylabel(titles.get(metric_key, metric_key))
-                ax.legend(loc="best")
+        # Legend logic
+        handles, labels = [], []
+        seen_labels = set()
+
+        def add_handle_label(h, l):
+            if l not in seen_labels and l is not None:
+                handles.append(h)
+                labels.append(l)
+                seen_labels.add(l)
+
+        # Gather from all subplots to be safe
+        for ax in axes:
+            if ax.lines:
+                h_list, l_list = ax.get_legend_handles_labels()
+                for h, l in zip(h_list, l_list):
+                    add_handle_label(h, l)
+
+        fig.tight_layout(rect=(0, 0.09, 1, 1))
+
+        if handles:
+            fig.legend(
+                handles,
+                labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, 0.0),
+                ncol=2,
+                frameon=False,
+            )
 
         # Save
         out_path = out_dir / f"sparse_{metric_key}.pdf"

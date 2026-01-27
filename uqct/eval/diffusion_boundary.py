@@ -219,245 +219,245 @@ def evaluate_and_log_results(
     # Compute Reconstruction Metrics
     metrics = get_metrics(pred_mean, gt_lr, data_range=1.0)
 
-    # UQ Metrics
-    # Compute Gaussian CI
-    ci_lo_g, ci_hi_g = gaussian_ci(final_samples, delta=0.05, bdim=1)
-    ci_lo_percentile, ci_hi_percentile = percentile_ci(
-        final_samples, alpha=0.05, bdim=1
-    )
-    ci_lo_basic, ci_hi_basic = basic_ci(final_samples, alpha=0.05, bdim=1)
-    ci_lo_studentized, ci_hi_studentized = studentized_ci(
-        final_samples, delta=0.05, bdim=1
-    )
-    ci_lo_simultaneous, ci_hi_simultaneous = simultaneous_ci(
-        final_samples, delta=0.05, bdim=1
-    )
-    ci_width_g = ci_hi_g - ci_lo_g
-    ci_width_percentile = ci_hi_percentile - ci_lo_percentile
-    ci_width_basic = ci_hi_basic - ci_lo_basic
-    ci_width_studentized = ci_hi_studentized - ci_lo_studentized
-    ci_width_simultaneous = ci_hi_simultaneous - ci_lo_simultaneous
+    # # UQ Metrics
+    # # Compute Gaussian CI
+    # ci_lo_g, ci_hi_g = gaussian_ci(final_samples, delta=0.05, bdim=1)
+    # ci_lo_percentile, ci_hi_percentile = percentile_ci(
+    #     final_samples, alpha=0.05, bdim=1
+    # )
+    # ci_lo_basic, ci_hi_basic = basic_ci(final_samples, alpha=0.05, bdim=1)
+    # ci_lo_studentized, ci_hi_studentized = studentized_ci(
+    #     final_samples, delta=0.05, bdim=1
+    # )
+    # ci_lo_simultaneous, ci_hi_simultaneous = simultaneous_ci(
+    #     final_samples, delta=0.05, bdim=1
+    # )
+    # ci_width_g = ci_hi_g - ci_lo_g
+    # ci_width_percentile = ci_hi_percentile - ci_lo_percentile
+    # ci_width_basic = ci_hi_basic - ci_lo_basic
+    # ci_width_studentized = ci_hi_studentized - ci_lo_studentized
+    # ci_width_simultaneous = ci_hi_simultaneous - ci_lo_simultaneous
 
-    # Coverage
-    cov_g = coverage(ci_lo_g, ci_hi_g, gt_lr)
-    cov_percentile = coverage(ci_lo_percentile, ci_hi_percentile, gt_lr)
-    cov_basic = coverage(ci_lo_basic, ci_hi_basic, gt_lr)
-    cov_studentized = coverage(ci_lo_studentized, ci_hi_studentized, gt_lr)
-    cov_simultaneous = coverage(ci_lo_simultaneous, ci_hi_simultaneous, gt_lr)
+    # # Coverage
+    # cov_g = coverage(ci_lo_g, ci_hi_g, gt_lr)
+    # cov_percentile = coverage(ci_lo_percentile, ci_hi_percentile, gt_lr)
+    # cov_basic = coverage(ci_lo_basic, ci_hi_basic, gt_lr)
+    # cov_studentized = coverage(ci_lo_studentized, ci_hi_studentized, gt_lr)
+    # cov_simultaneous = coverage(ci_lo_simultaneous, ci_hi_simultaneous, gt_lr)
 
-    # R2
-    abs_error = (pred_mean - gt_lr).abs()
-    r2_g = error_r2(ci_width_g, abs_error, linear_fit=True)
-    r2_percentile = error_r2(ci_width_percentile, abs_error, linear_fit=True)
-    r2_basic = error_r2(ci_width_basic, abs_error, linear_fit=True)
-    r2_studentized = error_r2(ci_width_studentized, abs_error, linear_fit=True)
-    r2_simultaneous = error_r2(ci_width_simultaneous, abs_error, linear_fit=True)
+    # # R2
+    # abs_error = (pred_mean - gt_lr).abs()
+    # r2_g = error_r2(ci_width_g, abs_error, linear_fit=True)
+    # r2_percentile = error_r2(ci_width_percentile, abs_error, linear_fit=True)
+    # r2_basic = error_r2(ci_width_basic, abs_error, linear_fit=True)
+    # r2_studentized = error_r2(ci_width_studentized, abs_error, linear_fit=True)
+    # r2_simultaneous = error_r2(ci_width_simultaneous, abs_error, linear_fit=True)
 
-    # Correlation
-    corr = error_correlation(final_std, abs_error)
+    # # Correlation
+    # corr = error_correlation(final_std, abs_error)
 
-    # AUSE (Area Under Sparsification Error)
-    # Measures how well uncertainty rankings match error rankings.
-    ause_g = sparsification_error(ci_width_g, abs_error)
-    ause_percentile = sparsification_error(ci_width_percentile, abs_error)
-    ause_basic = sparsification_error(ci_width_basic, abs_error)
-    ause_studentized = sparsification_error(ci_width_studentized, abs_error)
-    ause_simultaneous = sparsification_error(ci_width_simultaneous, abs_error)
+    # # AUSE (Area Under Sparsification Error)
+    # # Measures how well uncertainty rankings match error rankings.
+    # ause_g = sparsification_error(ci_width_g, abs_error)
+    # ause_percentile = sparsification_error(ci_width_percentile, abs_error)
+    # ause_basic = sparsification_error(ci_width_basic, abs_error)
+    # ause_studentized = sparsification_error(ci_width_studentized, abs_error)
+    # ause_simultaneous = sparsification_error(ci_width_simultaneous, abs_error)
 
-    # Excess Width (Gaussian)
-    excess_width = ci_width_g - abs_error
+    # # Excess Width (Gaussian)
+    # excess_width = ci_width_g - abs_error
 
-    # --- Formatting Metrics Table ---
-    # Collect all metrics into a flat dict.
-    # We take the mean over the batch (N) for scalar representation.
+    # # --- Formatting Metrics Table ---
+    # # Collect all metrics into a flat dict.
+    # # We take the mean over the batch (N) for scalar representation.
 
-    metrics_data = {
-        "PSNR": metrics["PSNR"].mean().item(),
-        "RMSE": metrics["RMSE"].mean().item(),
-        "L1": metrics["L1"].mean().item(),
-        "SSIM": metrics["SS"].mean().item(),
-        "Corr(Err,Std)": corr.mean().item(),
-        "Cov_Gauss": cov_g.mean().item(),
-        "Width_Gauss": ci_width_g.mean().item(),
-        "R2_Gauss": r2_g.mean().item(),
-        "AUSE_Gauss": ause_g.mean().item(),
-        "Cov_Percentile": cov_percentile.mean().item(),
-        "Width_Percentile": ci_width_percentile.mean().item(),
-        "R2_Percentile": r2_percentile.mean().item(),
-        "AUSE_Percentile": ause_percentile.mean().item(),
-        "Cov_Basic": cov_basic.mean().item(),
-        "Width_Basic": ci_width_basic.mean().item(),
-        "R2_Basic": r2_basic.mean().item(),
-        "AUSE_Basic": ause_basic.mean().item(),
-        "Cov_Studentized": cov_studentized.mean().item(),
-        "Width_Studentized": ci_width_studentized.mean().item(),
-        "R2_Studentized": r2_studentized.mean().item(),
-        "AUSE_Studentized": ause_studentized.mean().item(),
-        "Cov_Simul": cov_simultaneous.mean().item(),
-        "Width_Simul": ci_width_simultaneous.mean().item(),
-        "R2_Simul": r2_simultaneous.mean().item(),
-        "AUSE_Simul": ause_simultaneous.mean().item(),
-    }
+    # metrics_data = {
+    #     "PSNR": metrics["PSNR"].mean().item(),
+    #     "RMSE": metrics["RMSE"].mean().item(),
+    #     "L1": metrics["L1"].mean().item(),
+    #     "SSIM": metrics["SS"].mean().item(),
+    #     "Corr(Err,Std)": corr.mean().item(),
+    #     "Cov_Gauss": cov_g.mean().item(),
+    #     "Width_Gauss": ci_width_g.mean().item(),
+    #     "R2_Gauss": r2_g.mean().item(),
+    #     "AUSE_Gauss": ause_g.mean().item(),
+    #     "Cov_Percentile": cov_percentile.mean().item(),
+    #     "Width_Percentile": ci_width_percentile.mean().item(),
+    #     "R2_Percentile": r2_percentile.mean().item(),
+    #     "AUSE_Percentile": ause_percentile.mean().item(),
+    #     "Cov_Basic": cov_basic.mean().item(),
+    #     "Width_Basic": ci_width_basic.mean().item(),
+    #     "R2_Basic": r2_basic.mean().item(),
+    #     "AUSE_Basic": ause_basic.mean().item(),
+    #     "Cov_Studentized": cov_studentized.mean().item(),
+    #     "Width_Studentized": ci_width_studentized.mean().item(),
+    #     "R2_Studentized": r2_studentized.mean().item(),
+    #     "AUSE_Studentized": ause_studentized.mean().item(),
+    #     "Cov_Simul": cov_simultaneous.mean().item(),
+    #     "Width_Simul": ci_width_simultaneous.mean().item(),
+    #     "R2_Simul": r2_simultaneous.mean().item(),
+    #     "AUSE_Simul": ause_simultaneous.mean().item(),
+    # }
 
-    metrics_df = pd.DataFrame([metrics_data])
+    # metrics_df = pd.DataFrame([metrics_data])
 
-    logger.info("=== Metrics Table ===")
-    # Print transposed for better readability in logs
-    logger.info("\n" + metrics_df.T.to_string(header=False))
+    # logger.info("=== Metrics Table ===")
+    # # Print transposed for better readability in logs
+    # logger.info("\n" + metrics_df.T.to_string(header=False))
 
-    # Save to CSV
-    if output_prefix:
-        csv_name = f"{output_prefix}_metrics.csv"
-    else:
-        csv_name = f"{dataset}_{total_intensity}_{run_id}_metrics.csv"
+    # # Save to CSV
+    # if output_prefix:
+    #     csv_name = f"{output_prefix}_metrics.csv"
+    # else:
+    #     csv_name = f"{dataset}_{total_intensity}_{run_id}_metrics.csv"
 
-    csv_path = output_dir / csv_name
-    metrics_df.to_csv(csv_path, index=False)
-    logger.info(f"Saved metrics to {csv_path}")
+    # csv_path = output_dir / csv_name
+    # metrics_df.to_csv(csv_path, index=False)
+    # logger.info(f"Saved metrics to {csv_path}")
 
-    # Plotting
-    num_plots = min(5, gt_lr.shape[0])
-    num_replicates_to_plot = min(5, final_samples.shape[1])
+    # # Plotting
+    # num_plots = min(5, gt_lr.shape[0])
+    # num_replicates_to_plot = min(5, final_samples.shape[1])
 
-    # Check if we have original predictions
-    orig_mean = None
-    orig_abs_err = None
-    if original_preds is not None:
-        # original_preds shape: (N, S, R, H, W) or (N, S, R, 1, H, W)
-        # We need the final time step.
-        # Check dimensions
-        if original_preds.ndim == 5:
-            # (N, S, R, H, W) -> unsqueeze channel
-            orig_final = original_preds[:, -1, :, :, :].unsqueeze(2)  # (N, R, 1, H, W)
-        elif original_preds.ndim == 6:
-            orig_final = original_preds[:, -1, :, :, :, :]  # (N, R, 1, H, W)
-        else:
-            logger.warning(
-                f"Unexpected original_preds shape: {original_preds.shape}. Skipping orig plot."
-            )
-            orig_final = None
+    # # Check if we have original predictions
+    # orig_mean = None
+    # orig_abs_err = None
+    # if original_preds is not None:
+    #     # original_preds shape: (N, S, R, H, W) or (N, S, R, 1, H, W)
+    #     # We need the final time step.
+    #     # Check dimensions
+    #     if original_preds.ndim == 5:
+    #         # (N, S, R, H, W) -> unsqueeze channel
+    #         orig_final = original_preds[:, -1, :, :, :].unsqueeze(2)  # (N, R, 1, H, W)
+    #     elif original_preds.ndim == 6:
+    #         orig_final = original_preds[:, -1, :, :, :, :]  # (N, R, 1, H, W)
+    #     else:
+    #         logger.warning(
+    #             f"Unexpected original_preds shape: {original_preds.shape}. Skipping orig plot."
+    #         )
+    #         orig_final = None
 
-        if orig_final is not None:
-            orig_mean = orig_final.mean(dim=1)  # (N, 1, H, W)
-            # Ensure on same device
-            orig_mean = orig_mean.to(gt_lr.device)
-            # Interpolate if needed
-            if orig_mean.shape[-1] != gt_lr.shape[-1]:
-                orig_mean = torch.nn.functional.interpolate(
-                    orig_mean, size=gt_lr.shape[-2:], mode="bilinear"
-                )
+    #     if orig_final is not None:
+    #         orig_mean = orig_final.mean(dim=1)  # (N, 1, H, W)
+    #         # Ensure on same device
+    #         orig_mean = orig_mean.to(gt_lr.device)
+    #         # Interpolate if needed
+    #         if orig_mean.shape[-1] != gt_lr.shape[-1]:
+    #             orig_mean = torch.nn.functional.interpolate(
+    #                 orig_mean, size=gt_lr.shape[-2:], mode="bilinear"
+    #             )
 
-            orig_abs_err = (orig_mean - gt_lr).abs()
+    #         orig_abs_err = (orig_mean - gt_lr).abs()
 
-    for i in range(num_plots):
-        # 3 Rows.
-        # Row 1: GT, Pred Mean, Std Dev, [Orig Mean]
-        # Row 2: CI Width, Abs Error, Excess Width, [Orig Error]
-        # Row 3: Replicates (5 cols)
+    # for i in range(num_plots):
+    #     # 3 Rows.
+    #     # Row 1: GT, Pred Mean, Std Dev, [Orig Mean]
+    #     # Row 2: CI Width, Abs Error, Excess Width, [Orig Error]
+    #     # Row 3: Replicates (5 cols)
 
-        # Determine number of columns for the grid
-        cols = 4 if orig_mean is not None else 3
+    #     # Determine number of columns for the grid
+    #     cols = 4 if orig_mean is not None else 3
 
-        fig = plt.figure(figsize=(20, 15))  # Wider
+    #     fig = plt.figure(figsize=(20, 15))  # Wider
 
-        # Helper to get subplot
-        def get_ax(row, col):
-            return plt.subplot2grid((3, cols), (row, col))
+    #     # Helper to get subplot
+    #     def get_ax(row, col):
+    #         return plt.subplot2grid((3, cols), (row, col))
 
-        # Row 1
-        ax_gt = get_ax(0, 0)
-        ax_pred = get_ax(0, 1)
-        ax_std = get_ax(0, 2)
+    #     # Row 1
+    #     ax_gt = get_ax(0, 0)
+    #     ax_pred = get_ax(0, 1)
+    #     ax_std = get_ax(0, 2)
 
-        # Ground Truth
-        im_gt = ax_gt.imshow(gt_lr[i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1)
-        ax_gt.set_title("Ground Truth")
-        ax_gt.axis("off")
-        plt.colorbar(im_gt, ax=ax_gt, fraction=0.046, pad=0.04)
+    #     # Ground Truth
+    #     im_gt = ax_gt.imshow(gt_lr[i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1)
+    #     ax_gt.set_title("Ground Truth")
+    #     ax_gt.axis("off")
+    #     plt.colorbar(im_gt, ax=ax_gt, fraction=0.046, pad=0.04)
 
-        # Prediction Mean
-        im_pred = ax_pred.imshow(
-            pred_mean[i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1
-        )
-        ax_pred.set_title("Ours: Mean")
-        ax_pred.axis("off")
-        plt.colorbar(im_pred, ax=ax_pred, fraction=0.046, pad=0.04)
+    #     # Prediction Mean
+    #     im_pred = ax_pred.imshow(
+    #         pred_mean[i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1
+    #     )
+    #     ax_pred.set_title("Ours: Mean")
+    #     ax_pred.axis("off")
+    #     plt.colorbar(im_pred, ax=ax_pred, fraction=0.046, pad=0.04)
 
-        # Std Dev
-        std_np = final_std[i, 0].cpu().numpy()
-        im_std = ax_std.imshow(std_np, cmap="inferno")
-        ax_std.set_title("Ours: Std Dev")
-        ax_std.axis("off")
-        plt.colorbar(im_std, ax=ax_std, fraction=0.046, pad=0.04)
+    #     # Std Dev
+    #     std_np = final_std[i, 0].cpu().numpy()
+    #     im_std = ax_std.imshow(std_np, cmap="inferno")
+    #     ax_std.set_title("Ours: Std Dev")
+    #     ax_std.axis("off")
+    #     plt.colorbar(im_std, ax=ax_std, fraction=0.046, pad=0.04)
 
-        if orig_mean is not None:
-            ax_orig = get_ax(0, 3)
-            im_orig = ax_orig.imshow(
-                orig_mean[i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1
-            )
-            ax_orig.set_title("Orig: Mean")
-            ax_orig.axis("off")
-            plt.colorbar(im_orig, ax=ax_orig, fraction=0.046, pad=0.04)
+    #     if orig_mean is not None:
+    #         ax_orig = get_ax(0, 3)
+    #         im_orig = ax_orig.imshow(
+    #             orig_mean[i, 0].cpu().numpy(), cmap="gray", vmin=0, vmax=1
+    #         )
+    #         ax_orig.set_title("Orig: Mean")
+    #         ax_orig.axis("off")
+    #         plt.colorbar(im_orig, ax=ax_orig, fraction=0.046, pad=0.04)
 
-        # Row 2
-        ax_width = get_ax(1, 0)
-        ax_err = get_ax(1, 1)
-        ax_diff = get_ax(1, 2)
+    #     # Row 2
+    #     ax_width = get_ax(1, 0)
+    #     ax_err = get_ax(1, 1)
+    #     ax_diff = get_ax(1, 2)
 
-        # CI Width (Gaussian)
-        w_np = ci_width_g[i, 0].cpu().numpy()
-        im_w = ax_width.imshow(w_np, cmap="inferno")
-        ax_width.set_title("Ours: Gaussian CI Width")
-        ax_width.axis("off")
-        plt.colorbar(im_w, ax=ax_width, fraction=0.046, pad=0.04)
+    #     # CI Width (Gaussian)
+    #     w_np = ci_width_g[i, 0].cpu().numpy()
+    #     im_w = ax_width.imshow(w_np, cmap="inferno")
+    #     ax_width.set_title("Ours: Gaussian CI Width")
+    #     ax_width.axis("off")
+    #     plt.colorbar(im_w, ax=ax_width, fraction=0.046, pad=0.04)
 
-        # Absolute Error
-        err_np = abs_error[i, 0].cpu().numpy()
-        im_err = ax_err.imshow(err_np, cmap="inferno")
-        ax_err.set_title("Ours: Abs Error")
-        ax_err.axis("off")
-        plt.colorbar(im_err, ax=ax_err, fraction=0.046, pad=0.04)
+    #     # Absolute Error
+    #     err_np = abs_error[i, 0].cpu().numpy()
+    #     im_err = ax_err.imshow(err_np, cmap="inferno")
+    #     ax_err.set_title("Ours: Abs Error")
+    #     ax_err.axis("off")
+    #     plt.colorbar(im_err, ax=ax_err, fraction=0.046, pad=0.04)
 
-        # Excess Width (Width - Error)
-        diff_np = excess_width[i, 0].cpu().numpy()
-        vmax = max(abs(diff_np.min()), abs(diff_np.max()))
-        im_diff = ax_diff.imshow(diff_np, cmap="seismic", vmin=-vmax, vmax=vmax)
-        ax_diff.set_title("Ours: Width - AbsError")
-        ax_diff.axis("off")
-        plt.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04)
+    #     # Excess Width (Width - Error)
+    #     diff_np = excess_width[i, 0].cpu().numpy()
+    #     vmax = max(abs(diff_np.min()), abs(diff_np.max()))
+    #     im_diff = ax_diff.imshow(diff_np, cmap="seismic", vmin=-vmax, vmax=vmax)
+    #     ax_diff.set_title("Ours: Width - AbsError")
+    #     ax_diff.axis("off")
+    #     plt.colorbar(im_diff, ax=ax_diff, fraction=0.046, pad=0.04)
 
-        if orig_abs_err is not None:
-            ax_orig_err = get_ax(1, 3)
-            o_err_np = orig_abs_err[i, 0].cpu().numpy()
-            im_o_err = ax_orig_err.imshow(o_err_np, cmap="inferno")
-            ax_orig_err.set_title("Orig: Abs Error")
-            ax_orig_err.axis("off")
-            plt.colorbar(im_o_err, ax=ax_orig_err, fraction=0.046, pad=0.04)
+    #     if orig_abs_err is not None:
+    #         ax_orig_err = get_ax(1, 3)
+    #         o_err_np = orig_abs_err[i, 0].cpu().numpy()
+    #         im_o_err = ax_orig_err.imshow(o_err_np, cmap="inferno")
+    #         ax_orig_err.set_title("Orig: Abs Error")
+    #         ax_orig_err.axis("off")
+    #         plt.colorbar(im_o_err, ax=ax_orig_err, fraction=0.046, pad=0.04)
 
-        # Row 3: Replicates
-        # We need to span 'cols' columns.
-        # If cols=4, we fit 4 reps, or maybe 5 with colspan?
-        # Let's just plot 'cols' replicates.
-        for r in range(min(cols, num_replicates_to_plot)):
-            ax_rep = get_ax(2, r)
-            rep_img = final_samples[i, r, 0].cpu().numpy()
-            ax_rep.imshow(rep_img, cmap="gray", vmin=0, vmax=1)
-            ax_rep.set_title(f"Ours: Rep {r}")
-            ax_rep.axis("off")
+    #     # Row 3: Replicates
+    #     # We need to span 'cols' columns.
+    #     # If cols=4, we fit 4 reps, or maybe 5 with colspan?
+    #     # Let's just plot 'cols' replicates.
+    #     for r in range(min(cols, num_replicates_to_plot)):
+    #         ax_rep = get_ax(2, r)
+    #         rep_img = final_samples[i, r, 0].cpu().numpy()
+    #         ax_rep.imshow(rep_img, cmap="gray", vmin=0, vmax=1)
+    #         ax_rep.set_title(f"Ours: Rep {r}")
+    #         ax_rep.axis("off")
 
-        if output_prefix:
-            plot_name = f"{output_prefix}_sample_{i}.png"
-        else:
-            plot_name = f"{dataset}_{total_intensity}_{run_id}_sample_{i}.png"
+    #     if output_prefix:
+    #         plot_name = f"{output_prefix}_sample_{i}.png"
+    #     else:
+    #         plot_name = f"{dataset}_{total_intensity}_{run_id}_sample_{i}.png"
 
-        save_path = output_dir / plot_name
-        plt.suptitle(
-            f"Sample {i} | PSNR: {metrics['PSNR'][i].item():.2f} | Cov: {cov_g[i].item():.2f}"
-        )
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150)
-        plt.close(fig)
-        logger.info(f"Saved plot to {save_path}")
+    #     save_path = output_dir / plot_name
+    #     plt.suptitle(
+    #         f"Sample {i} | PSNR: {metrics['PSNR'][i].item():.2f} | Cov: {cov_g[i].item():.2f}"
+    #     )
+    #     plt.tight_layout()
+    #     plt.savefig(save_path, dpi=150)
+    #     plt.close(fig)
+    #     logger.info(f"Saved plot to {save_path}")
 
 
 @click.command()
@@ -663,17 +663,17 @@ def main(
     logger.info(f"Saved results to {out_path}")
 
     # 6. Evaluate and Plot
-    evaluate_and_log_results(
-        gt_lr=gt_lr,
-        sampled_images=sampled_images,
-        std_dev=std_dev,
-        output_dir=output_dir,
-        dataset=dataset,
-        total_intensity=total_intensity,
-        run_id=f"{run_id}{range_str}",
-        original_preds=original_preds,
-        output_prefix=output_prefix,
-    )
+    # evaluate_and_log_results(
+    #     gt_lr=gt_lr,
+    #     sampled_images=sampled_images,
+    #     std_dev=std_dev,
+    #     output_dir=output_dir,
+    #     dataset=dataset,
+    #     total_intensity=total_intensity,
+    #     run_id=f"{run_id}{range_str}",
+    #     original_preds=original_preds,
+    #     output_prefix=output_prefix,
+    # )
 
 
 if __name__ == "__main__":

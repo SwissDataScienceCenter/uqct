@@ -14,6 +14,10 @@ plt.rcParams.update(
     }
 )
 
+ICML_TEXT_WIDTH = 6.75133
+ICML_COLUMN_WIDTH = 3.25063
+ICML_COLUMN_HEIGHT = 4.2
+
 
 # Standard Model Order
 MODEL_ORDER = [

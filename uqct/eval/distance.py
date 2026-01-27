@@ -45,6 +45,7 @@ class DistanceRun:
 
     # Optional detailed stats
     mean_pixel_uncertainty: np.ndarray | None = None
+    replicates: np.ndarray | None = None
 
     run_id: str = field(default_factory=lambda: str(uuid4()))
     timestamp: datetime = field(default_factory=datetime.now)
@@ -107,6 +108,15 @@ class DistanceRun:
                 compression="gzip",
                 compression_opts=4,
             )
+
+            if self.replicates is not None:
+                f.create_dataset(
+                    "replicates",
+                    data=self.replicates,
+                    dtype="float32",
+                    compression="gzip",
+                    compression_opts=4,
+                )
 
         logger.info(f"Saved distance uncertainty data at \n- {fp_parquet}\n- {fp_h5}")
 
@@ -451,6 +461,179 @@ def check_confidence_set_violation(
             raise RuntimeError("Constraint violation detected after optimization!")
 
 
+def simultaneous_replicate_optimization(
+    pred: torch.Tensor,
+    confcoef: torch.Tensor,
+    experiment: Experiment,
+    schedule: torch.Tensor,
+    k: int = 8,
+    lr: float = 1.0,
+    lr_reduce_threshold: int = 10,
+    patience: int = 5,
+    max_steps: int = 10000,
+    projection_lr: float = 1e-2,
+    projection_steps: int = 10000,
+    verbose: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Optimizes k replicates simultaneously to maximize their spread (distance from mean).
+    Returns (min_image, max_image, replicates) across all replicates.
+    """
+    device = pred.device
+    N, H, W = pred.shape
+
+    # Initialize k replicates based on pred
+    # shape: (N * k, H, W)
+    # We repeat the batch N times k.
+    # Replicates for sample i are at indices i*k to (i+1)*k
+    theta_replicates = pred.repeat_interleave(k, dim=0).clone()
+
+    # Perturb slightly to break symmetry if needed, though gradients from mean might handle it.
+    # But if they are identical, mean is identical, gradient is zero.
+    # So we MUST perturb.
+    theta_replicates += torch.randn_like(theta_replicates) * 1e-3
+    theta_replicates.clamp_(0, 1)
+
+    mask = circular_mask(H, device=device, dtype=torch.bool)  # (H, W)
+    if mask is not None:
+        theta_replicates[..., ~mask] = 0.0
+
+    # Expanded confcoefs
+    confcoefs_expanded = confcoef.repeat_interleave(k, dim=0)
+
+    # Expanded Experiment for projection
+    # Experiment expects counts and intensities to match batch size
+    counts_expanded = experiment.counts.repeat_interleave(k, dim=0)
+    intensities_expanded = experiment.intensities.repeat_interleave(k, dim=0)
+
+    experiment_expanded = Experiment(
+        counts=counts_expanded,
+        intensities=intensities_expanded,
+        angles=experiment.angles,
+        sparse=experiment.sparse,
+    )
+
+    # Persistent projection state
+    proj_param = theta_replicates.detach().clone()
+    proj_param.requires_grad_()
+    proj_optimizer = optim.Adam([proj_param], lr=projection_lr)
+
+    best_spread = torch.zeros(N, device=device)
+    # Store min and max images for the best spread
+    best_min_img = torch.full((N, H, W), 1.0, device=device)
+    best_max_img = torch.full((N, H, W), 0.0, device=device)
+
+    patience_counter = 0
+    best_spread_mean = 0
+    prev_best_spread_mean = 0
+
+    # Pixel-wise stopping masks (N, H, W) -> broadcast to replicates?
+    # Requirement:
+    # STOP MAXIMISING all pixels (i, j) if it has reached >0.999 for ANY of the replicates.
+    # STOP MINIMISING all pixels (i, j) if any of the replicates has reach <0.001.
+
+    for step in (pbar := tqdm(range(1, max_steps + 1), disable=not verbose)):
+        # 1. Calculate Mean of replicates
+        # Reshape to (N, k, H, W)
+        replicates_view = theta_replicates.view(N, k, H, W)
+        mean_replicate = replicates_view.mean(dim=1, keepdim=True)  # (N, 1, H, W)
+
+        # 2. Calculate Directions
+        # We want to maximize distance from mean.
+        # Direction = (theta_i - mean)
+        diff = replicates_view - mean_replicate  # (N, k, H, W)
+
+        # Initialize grad with raw difference
+        grad = diff.clone()
+
+        # 3. Apply Pixel-wise Stopping Criteria
+
+        # Check conditions across replicates
+        max_vals = replicates_view.amax(dim=1, keepdim=True)  # (N, 1, H, W)
+        min_vals = replicates_view.amin(dim=1, keepdim=True)  # (N, 1, H, W)
+
+        stop_max_mask = max_vals > 0.999  # (N, 1, H, W)
+        stop_min_mask = min_vals < 0.001  # (N, 1, H, W)
+
+        # Where grad > 0 and stop_max, set to 0
+        grad[(grad > 0) & stop_max_mask.expand_as(grad)] = 0.0
+
+        # Where grad < 0 and stop_min, set to 0
+        grad[(grad < 0) & stop_min_mask.expand_as(grad)] = 0.0
+
+        # 4. Normalize Gradient after masking
+        flat_grad = grad.view(N * k, -1)
+        norm = flat_grad.norm(p=2, dim=-1)
+        grad = flat_grad / (norm[:, None] + 1e-8)
+        grad = grad.view(N, k, H, W)
+
+        # 5. Update
+        # Reshape back to (N*k, H, W) for update
+        grad_flat = grad.view(N * k, H, W)
+        theta_proposed = theta_replicates + lr * grad_flat
+
+        theta_proposed.data.clamp_(0, 1)
+        if mask is not None:
+            theta_proposed.data[..., ~mask] = 0.0
+
+        # 5. Project all replicates
+        # project_to_confidence_set processes a batch. passing (N*k) samples works fine.
+        theta_projected, p_steps = project_to_confidence_set(
+            theta_proposed,
+            experiment_expanded,
+            schedule,
+            confcoefs_expanded,
+            mask,
+            max_steps=projection_steps,
+            optimizer=proj_optimizer,
+        )
+
+        if p_steps == projection_steps:
+            lr *= 0.1
+            patience_counter += 1
+            continue
+
+        if p_steps > lr_reduce_threshold:
+            lr *= 0.9
+
+        theta_replicates = theta_projected
+
+        # 6. Track Best Spread (using min/max distance)
+        with torch.no_grad():
+            # Current min and max images
+            rep_view = theta_replicates.view(N, k, H, W)
+            curr_max = rep_view.amax(dim=1)  # (N, H, W)
+            curr_min = rep_view.amin(dim=1)  # (N, H, W)
+
+            best_max_img[curr_max > best_max_img] = curr_max[curr_max > best_max_img]
+            best_min_img[curr_min < best_min_img] = curr_min[curr_min < best_min_img]
+            best_spread = (best_max_img - best_min_img).abs()
+
+        best_spread_mean = best_spread.mean().item()
+
+        # Patience check
+        if step > 1 and best_spread_mean - prev_best_spread_mean < 1e-5:
+            patience_counter += 1
+        else:
+            patience_counter = 0
+
+        if patience_counter > patience:
+            break
+
+        prev_best_spread_mean = best_spread_mean
+
+        pbar.set_postfix(
+            {
+                "spread_mean": best_spread_mean,
+                "proj_steps": p_steps,
+                "lr": lr,
+                "patience": f"{patience_counter}/{patience}",
+            }
+        )
+
+    return best_min_img, best_max_img, theta_replicates.view(N, k, H, W)
+
+
 @click.command()
 @click.option(
     "--dataset", type=click.Choice(["lung", "composite", "lamino"]), required=True
@@ -474,6 +657,18 @@ def check_confidence_set_violation(
 @click.option("--patience", type=int, default=5)
 @click.option("--max-steps", type=int, default=1000)
 @click.option("--last-only", default=False, is_flag=True)
+@click.option(
+    "--strategy",
+    type=click.Choice(["pairwise", "simultaneous"]),
+    default="pairwise",
+    help="Optimization strategy.",
+)
+@click.option(
+    "--replicates",
+    type=int,
+    default=8,
+    help="Number of replicates for simultaneous optimization.",
+)
 def main(
     dataset,
     model,
@@ -486,6 +681,8 @@ def main(
     patience,
     max_steps,
     last_only,
+    strategy,
+    replicates,
 ):
     schedule_length = 32
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -526,18 +723,36 @@ def main(
     B, r = experiment.counts.shape[0], experiment.counts.shape[-1]
 
     p_batch = torch.full((B, r, r), 0.5, device=device)
+    batch_replicates = []
 
-    best_theta_0, best_theta_1 = pairwise_distance_maximization(
-        p_batch,
-        confcoefs,
-        experiment,
-        schedule,
-        lr=lr,
-        patience=patience,
-        max_steps=max_steps,
-    )
-    check_confidence_set_violation(best_theta_0, experiment, schedule, confcoefs)
-    check_confidence_set_violation(best_theta_1, experiment, schedule, confcoefs)
+    if strategy == "pairwise":
+        best_theta_0, best_theta_1 = pairwise_distance_maximization(
+            p_batch,
+            confcoefs,
+            experiment,
+            schedule,
+            lr=lr,
+            patience=patience,
+            max_steps=max_steps,
+        )
+        check_confidence_set_violation(best_theta_0, experiment, schedule, confcoefs)
+        check_confidence_set_violation(best_theta_1, experiment, schedule, confcoefs)
+    elif strategy == "simultaneous":
+        best_theta_0, best_theta_1, replicates_out = (
+            simultaneous_replicate_optimization(
+                p_batch,
+                confcoefs,
+                experiment,
+                schedule,
+                k=replicates,
+                lr=lr,
+                patience=patience,
+                max_steps=max_steps,
+            )
+        )
+        batch_replicates.append(replicates_out.detach().cpu().numpy())
+    else:
+        raise ValueError(f"Unknown strategy: {strategy}")
 
     # maximizers_batch: (B, S, H, W)
     # p_batch: (B, S, H, W)
@@ -569,6 +784,11 @@ def main(
     # batch_uncertainties shape: (N, S, H, W)
     mean_pixel_uncertainty = np.mean(batch_uncertainties, axis=0)  # (S, H, W)
 
+    if batch_replicates:
+        batch_replicates = np.concatenate(batch_replicates, axis=0)
+    else:
+        batch_replicates = None
+
     # Store binary search count instead of projection steps
     run = DistanceRun(
         ct_settings=ct_settings,
@@ -579,6 +799,7 @@ def main(
         uncertainty_images=batch_uncertainties,
         distance_maximizers=batch_maximizers,
         mean_pixel_uncertainty=mean_pixel_uncertainty,
+        replicates=batch_replicates,
         slurm_job_id=os.environ.get("SLURM_JOB_ID"),
     )
 

@@ -10,7 +10,13 @@ from tqdm import tqdm
 
 from uqct.utils import get_results_dir, load_runs
 from uqct.logging import get_logger
-from uqct.vis.style import MODEL_ORDER, get_style, MODEL_NAMES
+from uqct.vis.style import (
+    ICML_COLUMN_HEIGHT,
+    ICML_COLUMN_WIDTH,
+    MODEL_ORDER,
+    get_style,
+    MODEL_NAMES,
+)
 from uqct.eval.run import get_default_angle_schedule
 import matplotlib.colors as mcolors
 from matplotlib.lines import Line2D
@@ -126,6 +132,7 @@ def process_metrics(
             "rate": 100 * rate,
             "nll_sum": nll_sum,
             "nll_sum_mix": nll_sum_mix,
+            "mean_mix_diff": nll_sum - nll_sum_mix,
             "mean_mix_perc_diff": 100 * (nll_sum - nll_sum_mix) / nll_sum_mix,
             **metrics_vals,
         }
@@ -134,11 +141,13 @@ def process_metrics(
         record["nll_pred_last_mix"] = row.get("nll_pred_last_mix")
         record["nll_gt_sum"] = row.get("nll_gt").sum()
 
+        record["snll_gt_nll_diff"] = record["nll_sum"] - record["nll_gt_sum"]
+        record["snll_gt_nll_diff_mix"] = record["nll_sum_mix"] - record["nll_gt_sum"]
         record["gt_nll_confcoef_diff"] = (
-            record["nll_gt_sum"] - record["nll_sum"] + LOG_INV_DELTA
+            record["nll_gt_sum"] - record["nll_sum"] - LOG_INV_DELTA
         )
         record["gt_nll_confcoef_diff_mix"] = (
-            record["nll_gt_sum"] - record["nll_sum_mix"] + LOG_INV_DELTA
+            record["nll_gt_sum"] - record["nll_sum_mix"] - LOG_INV_DELTA
         )
         record["gt_nll_confcoef_perc_diff"] = (
             100
@@ -175,7 +184,7 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
         sub = stats_df[stats_df["model"] == model].sort_values("intensity")
         if sub.empty:
             continue
-        if metric == "mean_mix_perc_diff" and model not in (
+        if metric in ("mean_mix_perc_diff", "mean_mix_diff") and model not in (
             "unet_ensemble",
             "diffusion",
         ):
@@ -225,6 +234,8 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
         pretty_name = "Seq. NLL (Mix.)"
     if metric == "mean_mix_perc_diff":
         pretty_name = r"Seq. NLL Mean-Mix Diff. (\%)"
+    if metric == "mean_mix_diff":
+        pretty_name = r"Seq. NLL. Diff."
     if metric == "nll_pred_last":
         pretty_name = "NLL Last Prediction"
     if metric == "nll_pred_last_mix":
@@ -232,12 +243,14 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     if metric == "nll_gt_sum":
         pretty_name = "NLL"
     if metric in ["gt_nll_confcoef_diff", "gt_nll_confcoef_diff_mix"]:
-        pretty_name = r"$L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast) - \beta_{t_\mathrm{final}}(\delta)$"
+        pretty_name = r"$L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast) - \beta_{t_\mathrm{final}, \delta}$"
+    if metric in ["snll_gt_nll_diff", "snll_gt_nll_diff_mix"]:
+        pretty_name = r"$\beta_{t_\mathrm{final}} - L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast)$"
     if metric in ["gt_nll_confcoef_perc_diff", "gt_nll_confcoef_perc_diff_mix"]:
         pretty_name = r"Diff. GT Image NLL and Conf. Coeff. (\%)"
         plt.ylim(bottom=-200, top=25)
 
-    if metric == "nll_sum":
+    if metric in ("nll_sum", "mean_mix_diff"):
         plt.yscale("log")
 
     plt.ylabel(f"{pretty_name}")
@@ -266,10 +279,6 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
 
     # Pre-compute max_diff for valid rows with list inputs
     records = []
-
-    # Filter rows that have nll_pred and nll_gt as lists/arrays
-    # We can rely on a quick check or try/except
-    # But to be safe and consistent with process_metrics:
 
     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Pre-computing max diffs"):
         nll_pred = row.get("nll_pred")
@@ -312,13 +321,6 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
     deltas = np.logspace(-3, 0, 100)
     log_inv_deltas = np.log(1.0 / deltas)
 
-    # We want ONE plot per MODEL, with 3 subplots (Lamino, Composite, Lung)
-    # Filter for sparse only? The prompt implies "dataset" scaling, usually we care about sparse.
-    # The user didn't explicitly say "sparse only", but previous plots separate sparse/dense.
-    # Let's assume we do this for the sparse case primarily, or we produce two files per model (sparse/dense).
-    # Given the context of "scaling laws", it's usually the sparse setting.
-    # Let's stick to generating for both sparse and dense if data exists, but separate files.
-
     datasets_order = ["lamino", "composite", "lung"]
 
     # Iterate over sparse/dense
@@ -334,7 +336,16 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
         for model in unique_models:
             model_df = subset_df[subset_df["model"] == model]
 
-            fig, axes = plt.subplots(1, 3, figsize=(6.75, 2.5), constrained_layout=True)
+            fig, axes = plt.subplots(
+                3,
+                1,
+                figsize=(ICML_COLUMN_WIDTH, 4.2),
+                sharey=True,
+                sharex=True,
+                constrained_layout=False,  # Use tight_layout manually given rect arg
+            )
+
+            # fig.supylabel(r"Empirical Rate", x=0.03)
 
             # Determine global intensity range for consistent colormap across subplots
             all_intensities = sorted(model_df["intensity"].unique())
@@ -411,44 +422,49 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
                 # Plot diagonal
                 ax.plot(deltas, deltas, "k--", alpha=0.5)  # label="Target"
 
-                # ax.set_xscale("log")
-                # ax.set_yscale("log")
-                ax.set_xlabel(r"Target $\delta$")
-                if col_idx == 0:
-                    ax.set_ylabel(r"Empirical Rate $\hat{\delta}$")
+                if col_idx == 2:
+                    ax.set_xlabel(r"Error Level $\delta$")
 
                 ax.set_title(f"{ds_name.title()} Dataset")
+                ax.set_ylabel("Empirical Rate")
                 ax.grid(True, which="major", alpha=0.3)
 
             if not has_data:
                 plt.close(fig)
                 continue
 
-            # Add Legend to the last subplot (rightmost)
-            # User wants: legend into the subplot that is on the very right
-            # Title: Total Intensity
-
-            # We need handles and labels. Since all subplots presumably have the same intensities/lines,
-            # we can use handles/labels from the loop logic.
-            # However, we only added labels to the plot in the loop.
-            # Let's get handles/labels from the first subplot (axes[0]), assuming it has all intensities.
-            # If axes[0] is empty? We should try to get from any valid subplot.
-
+            # Legend Logic: Gather handles from subplots
             handles, labels = [], []
+            seen_labels = set()
+
+            # Helper to deduplicate
+            def add_handle_label(h, l):
+                if l not in seen_labels and l is not None:
+                    handles.append(h)
+                    labels.append(l)
+                    seen_labels.add(l)
+
             for ax in axes:
                 if ax.lines:
-                    h, l = ax.get_legend_handles_labels()
-                    if h:
-                        handles, labels = h, l
-                        break
+                    h_list, l_list = ax.get_legend_handles_labels()
+                    for h, l in zip(h_list, l_list):
+                        add_handle_label(h, l)
+
+            # Sort handles/labels by intensity if possible?
+            # They should be inserted in order of plotting (sorted intensity)
+
+            # Layout
+            fig.tight_layout(rect=(0, 0.12, 1, 1))
 
             if handles:
-                axes[-1].legend(
+                fig.legend(
                     handles,
                     labels,
-                    loc="best",
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, 0.0),
+                    ncol=3 if len(all_intensities) > 4 else len(all_intensities),
+                    frameon=False,
                     title="Total Intensity",
-                    fontsize="small",
                 )
 
             # Output path
@@ -660,6 +676,7 @@ def main(
         "l1",
         "rmse",
         "nll_sum",
+        "mean_mix_diff",
         "mean_mix_perc_diff",
         "nll_sum_mix",
         "nll_pred_last",
@@ -667,6 +684,8 @@ def main(
         "nll_gt_sum",
         "gt_nll_confcoef_diff",
         "gt_nll_confcoef_diff_mix",
+        "snll_gt_nll_diff",
+        "snll_gt_nll_diff_mix",
         "gt_nll_confcoef_perc_diff",
         "gt_nll_confcoef_perc_diff_mix",
     ]
@@ -708,6 +727,8 @@ def main(
                 "nll_pred_last",
                 "nll_pred_last_mix",
                 "nll_gt_sum",
+                "snll_gt_nll_diff",
+                "snll_gt_nll_diff_mix",
                 "gt_nll_confcoef_diff",
                 "gt_nll_confcoef_diff_mix",
                 "gt_nll_confcoef_perc_diff",
@@ -732,8 +753,44 @@ def main(
         if m not in metric_df.columns:
             continue
 
-        fig, axes = plt.subplots(1, 3, figsize=(6.75, 2.5), constrained_layout=True)
+        fig, axes = plt.subplots(
+            3,
+            1,
+            figsize=(ICML_COLUMN_WIDTH, ICML_COLUMN_HEIGHT),  # <--- WIDER and SHORTER
+            sharey=True,
+            sharex=True,  # <--- Critical: Hides inner x-labels to save space
+        )
         # axes is (3,)
+        # Pretty Y-Label
+        pretty_name = m.upper()
+        if m == "psnr":
+            pretty_name = "PSNR (dB)"
+        if m == "rate":
+            pretty_name = r"Crossover Rate (\%)"
+        if m == "nll":
+            pretty_name = "NLL"
+        if m == "nll_sum":
+            pretty_name = "Seq. NLL"
+        if m == "mean_mix_diff":
+            pretty_name = r"Seq. NLL. Diff."
+        if m == "mean_mix_perc_diff":
+            pretty_name = r"Seq. NLL. Diff. (\%)"
+        if m == "nll_sum_mix":
+            pretty_name = "Seq. NLL (Mix.)"
+        if m == "nll_pred_last":
+            pretty_name = "NLL Last Prediction"
+        if m == "nll_pred_last_mix":
+            pretty_name = "Seq. NLL Last Prediction (Mix.)"
+        if m == "nll_gt_sum":
+            pretty_name = "NLL"
+        if m in ["snll_gt_nll_diff", "snll_gt_nll_diff_mix"]:
+            pretty_name = r"$\beta_{t_\mathrm{final}} - L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast)$"
+        if m in ["gt_nll_confcoef_diff", "gt_nll_confcoef_diff_mix"]:
+            pretty_name = r"Difference between GT NLL and Conf. Coeff."
+        if m in ["gt_nll_confcoef_perc_diff", "gt_nll_confcoef_perc_diff_mix"]:
+            pretty_name = r"Difference between GT NLL and Conf. Coeff. (\%)"
+
+        # fig.supylabel(pretty_name, x=0.03)
 
         # Consistent Models for Legend
         available_models = set(metric_df["model"].unique())
@@ -744,9 +801,13 @@ def main(
 
         # linestyles = ["-", "--", "-.", ":"]
 
-        # Loop Columns (Datasets)
-        for col_idx, ds_name in enumerate(datasets_order):
-            ax = axes[col_idx]
+        # Loop Rows (Datasets)
+        for row_idx, ds_name in enumerate(datasets_order):
+            ax = axes[row_idx]
+
+            if m in ["gt_nll_confcoef_perc_diff", "gt_nll_confcoef_perc_diff_mix"]:
+                # Clamp top to 25 to avoid showing empty space due to potential outliers or large SEM
+                ax.set_ylim(bottom=-200, top=25)
 
             ds_df = metric_df[(metric_df["dataset"] == ds_name) & (metric_df["sparse"])]
             if ds_df.empty:
@@ -780,6 +841,10 @@ def main(
                 color = style["color"]
                 label = style["label"]
 
+                # if m == "gt_nll_confcoef_perc_diff_mix":
+                if m == "snll_gt_nll_diff_mix":
+                    print(f"{ds_name=}, {model=}, {m=}:\n\t{list(sub['mean'])}")
+
                 # Plot Mean
                 ax.plot(
                     sub["intensity"],
@@ -807,49 +872,33 @@ def main(
                     current_max_y = max(current_max_y, upper_bound)
 
             ax.set_xscale("log")
-            ax.set_xlabel("Total Intensity")
+            if row_idx == 2:
+                ax.set_xlabel("Total Intensity")
+
             ax.set_title(f"{ds_name.title()} Dataset")
             ax.grid(True, which="major", linestyle="--", alpha=0.3)
 
-            # Pretty Y-Label
-            pretty_name = m.upper()
-            if m == "psnr":
-                pretty_name = "PSNR (dB)"
-            if m == "rate":
-                pretty_name = r"Crossover Rate (\%)"
-            if m == "nll":
-                pretty_name = "NLL"
-            if m == "nll_sum":
-                pretty_name = "Seq. NLL"
-            if m == "mean_mix_perc_diff":
-                pretty_name = r"Seq. NLL Mean-Mix Diff. (\%)"
-            if m == "nll_sum_mix":
-                pretty_name = "Seq. NLL (Mix.)"
-            if m == "nll_pred_last":
-                pretty_name = "NLL Last Prediction"
-            if m == "nll_pred_last_mix":
-                pretty_name = "NLL Last Prediction (Mix.)"
-            if m == "nll_gt_sum":
-                pretty_name = "NLL"
-            if m in ["gt_nll_confcoef_diff", "gt_nll_confcoef_diff_mix"]:
-                pretty_name = r"$L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast) - \beta_{t_\mathrm{final}}(\delta)$"
-            if m in ["gt_nll_confcoef_perc_diff", "gt_nll_confcoef_perc_diff_mix"]:
-                pretty_name = r"Diff. GT Image NLL and Conf. Coeff. (\%)"
-
-                # Debug logging for y-axis range
-                logger.info(
-                    f"Dataset: {ds_name}, Metric: {m} -> Max Upper Bound (Mean+SEM) across models: {current_max_y}"
-                )
-
-                # Clamp top to 25 to avoid showing empty space due to potential outliers or large SEM
-                ax.set_ylim(bottom=-200, top=25)
-
-            if m == "nll_sum":
+            if m in (
+                "nll_sum",
+                "snll_gt_nll_diff",
+                "snll_gt_nll_diff_mix",
+                "mean_mix_diff",
+            ):
                 ax.set_yscale("log")
 
-            if col_idx == 0:
-                ax.set_ylabel(pretty_name)
-                ax.legend(fontsize=8)
+            ax.set_ylabel(pretty_name)
+
+        handles, labels = axes[-1].get_legend_handles_labels()
+        fig.tight_layout(rect=(0, 0.08, 1, 1))
+
+        fig.legend(
+            handles,
+            labels,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.0),
+            ncol=3,
+            frameon=False,
+        )
 
         # Save
         metric_agg_suffix = f"_{aggregation}"
@@ -858,11 +907,14 @@ def main(
             "nll_pred_last",
             "nll_pred_last_mix",
             "nll_gt_sum",
+            "snll_gt_nll_diff",
+            "snll_gt_nll_diff_mix",
             "gt_nll_confcoef_diff",
             "gt_nll_confcoef_diff_mix",
             "gt_nll_confcoef_perc_diff",
             "gt_nll_confcoef_perc_diff_mix",
             "mean_mix_perc_diff",
+            "mean_mix_diff",
         ]:
             metric_agg_suffix = ""
 
@@ -870,7 +922,6 @@ def main(
             global_dir / f"sparse_shared_{m}{metric_agg_suffix}_{range_suffix}.pdf"
         )
         plt.savefig(out_path, dpi=300, bbox_inches="tight")
-        # logger.info(f"Saved {out_path}")
         plt.close(fig)
 
     # --- 3. CSV Tables ---

@@ -17,7 +17,7 @@ import uqct
 from uqct.eval.run import setup_experiment
 from uqct.ct import nll_mixture_angle_schedule
 from uqct.datasets.utils import get_dataset
-from uqct.vis.style import MODEL_ORDER, get_style
+from uqct.vis.style import ICML_COLUMN_HEIGHT, ICML_COLUMN_WIDTH, MODEL_ORDER, get_style
 
 # Patch get_dataset to speed up repeated calls in setup_experiment
 uqct.eval.run.get_dataset = lru_cache(maxsize=None)(get_dataset)
@@ -150,7 +150,7 @@ def compute_rotated_nll(
     return results
 
 
-DATASETS = ["lung", "composite", "lamino"]
+DATASETS = ["composite", "lamino", "lung"]
 
 
 def generate_data(
@@ -166,7 +166,8 @@ def generate_data(
 
     # Filter for valid entries (need nll_pred_mix)
     df = df[
-        df["nll_pred_mix"].notna() & df["total_intensity"].isin([1e6, 1e7, 1e8, 1e9])
+        df["nll_pred_mix"].notna()
+        & df["total_intensity"].isin([1e4, 1e5, 1e6, 1e7, 1e8, 1e9])
     ]
 
     # Define Angles
@@ -320,14 +321,24 @@ def plot_data(input_file: Path):
 
     # Group by Intensity and Sparse for Figures
     grouped_settings = agg.groupby(["intensity", "sparse"])
+    agg.to_csv(output_dir / "rotation_exclusion_summary.csv", index=False)
+    agg[agg["intensity"] == 1e9].to_csv(
+        output_dir / "rotation_exclusion_summary_1e9.csv", index=False
+    )
 
     for (intensity, sparse), group_df in grouped_settings:
+        # fig, axes = plt.subplots(3, 1, figsize=(3.4, 4.25), sharey=True)
         fig, axes = plt.subplots(
-            1, 3, figsize=(6.75, 2.5), constrained_layout=True, sharey=True
+            3,
+            1,
+            figsize=(ICML_COLUMN_WIDTH, ICML_COLUMN_HEIGHT),  # <--- WIDER and SHORTER
+            sharey=True,
+            sharex=True,  # <--- Critical: Hides inner x-labels to save space
         )
+        # fig.supylabel(r"Exclusion Rate (\%)", x=0.03)
 
-        for col_idx, dataset in enumerate(DATASETS):
-            ax = axes[col_idx]
+        for row_idx, dataset in enumerate(DATASETS):
+            ax = axes[row_idx]
 
             d_df = group_df[group_df["dataset"] == dataset]
 
@@ -366,13 +377,34 @@ def plot_data(input_file: Path):
                 )
 
             ax.set_xscale("log")
-            ax.set_xlabel("Rotation Angle (Deg)")
             ax.set_title(f"{dataset.title()} Dataset")
             ax.grid(True, which="both", linestyle="--", alpha=0.3)
 
-            if col_idx == 0:
-                ax.set_ylabel(r"Exclusion Rate (\%)")
-                ax.legend(fontsize=8, loc="best")
+            if row_idx == 2:
+                ax.set_xlabel("Rotation Angle (Deg)")
+                # ax.legend(fontsize=8, loc="best")
+            ax.set_ylabel(r"Exclusion Rate (\%)")
+        handles, labels = axes[-1].get_legend_handles_labels()
+        # fig.tight_layout(rect=[0, 0.05, 1, 1])
+        fig.tight_layout(rect=[0, 0.08, 1, 1])
+
+        fig.legend(
+            handles,
+            labels,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.0),
+            ncol=3,
+            frameon=False,
+        )
+        # fig.tight_layout(rect=[0, 0.08, 1, 1])
+        # fig.legend(
+        #     handles,
+        #     labels,
+        #     loc="lower center",
+        #     bbox_to_anchor=(0.5, 0.02),
+        #     ncol=3,
+        #     frameon=False,
+        # )
 
         # Directory: plots/rotation/{intensity}_{sparse}/
         inten_str = f"{intensity:.0e}".replace("+0", "").replace("+", "")
