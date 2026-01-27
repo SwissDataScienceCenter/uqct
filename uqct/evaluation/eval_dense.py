@@ -615,7 +615,7 @@ if __name__ == "__main__":
     print(f"Dataset: {args.dataset}, Model: {args.model}")
 
     mixing_models = ["diffusion", "cond_diffusion", "unet_ensemble", "fbp_bootstrap", "unet_bootstrap", "beta_cond_diffusion", "diverse_cond_diffusion"]
-
+    per_sample_models = ['gt', 'cond_diffusion', 'diffusion', 'diverse_cond_diffusion']
  
     angles_rotation_deg = torch.tensor([0.0] + np.logspace(np.log(0.1), np.log(90), 10, base=np.e).tolist())
 
@@ -629,6 +629,11 @@ if __name__ == "__main__":
     # Add extra metadata
     experiment_params["experiment_id"] = output_file_name
     experiment_params["datetime"] = datetime.datetime.now().isoformat()
+    
+    # get env variables that start with RUNAI
+    for k, v in os.environ.items():
+        if k.startswith("RUNAI_"):
+            experiment_params[k] = v
 
     
     # check git state and warn if not clean, ask for confirmation to proceed
@@ -761,14 +766,20 @@ if __name__ == "__main__":
             # list all *.nc files in the checkpoint directory
             import glob
             import xarray as xr
-            nc_files = sorted(glob.glob(f"{args.output_dir}/*.nc", recursive=False))
+            nc_files = [f for f in sorted(glob.glob(f"{args.output_dir}/*.nc", recursive=False)) if not f.endswith('samples.nc')]
             beta_file = None
             beta_ds = None
             for f in nc_files:
                 ds = xr.open_dataset(f)
                 match_kwargs = ['model', 'dataset', 'diffusion_num_inference_steps', 'guidance_end', 'guidance_num_gradient_steps', 'guidance_lr', 'guidance_lr_decay', 'diffusion_seed', 'initial_intensity', 'total_intensity', 'num_steps', 'num_samples', 'seeds', 'num_images']
                 target_str_args = {k: str(v) for k, v in vars(args).items()}
+                # hard code parameters to match
                 target_str_args['model'] = 'cond_diffusion'  # match cond_diffusion
+                target_str_args['guidance_lr'] = str(1e-3)
+                target_str_args['guidance_lr_decay'] = str(False)
+                target_str_args['guidance_num_gradient_steps'] = str(5)
+                target_str_args['diffusion_num_inference_steps'] = str(50)
+
                  # check if all match
                 if all(target_str_args[k] == ds.attrs[k] for k in match_kwargs):
                     if beta_file is not None:
@@ -867,7 +878,7 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             if args.model in mixing_models:
-                if args.model in ["diffusion", "cond_diffusion", "unet_ensemble"] or args.num_bootstrap_samples <= 20:
+                if args.model in ["diffusion", "cond_diffusion", "unet_ensemble", "diverse_cond_diffusion"] or args.num_bootstrap_samples <= 20:
                     _seq_nll_mix = nll_mixture(
                         pred[:, :, :-1].contiguous(), data[:, 1:], schedule[1:], angles
                     ).squeeze(-1)
@@ -916,7 +927,7 @@ if __name__ == "__main__":
             res['nll_1'].append(nll_1)
             
             # compute per sample metrics
-            if model_name in ['gt', 'cond_diffusion', 'diffusion']:
+            if model_name in per_sample_models:
                 sample_indices = indices.unsqueeze(0).expand(num_samples, -1).reshape(-1)
                 sample_seed = seed.unsqueeze(0).expand(num_samples, -1).reshape(-1)
                 samples = samples.reshape(-1, *samples.shape[2:])
@@ -1002,7 +1013,7 @@ if __name__ == "__main__":
     print(f"Results written to {output_file}")
 
 
-    if model_name in ['gt', 'cond_diffusion', 'diffusion']:
+    if model_name in per_sample_models:
         for k in res_samples:
             res_samples[k] = torch.cat(res_samples[k], dim=0)
 
