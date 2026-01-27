@@ -3,36 +3,42 @@
 # diffusion_ablation.sh
 # Script for running diffusion ablation experiments
 
+export OMP_NUM_THREADS=2
+export OPENBLAS_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+export NUMEXPR_NUM_THREADS=2
+export VECLIB_MAXIMUM_THREADS=2
+export PYTORCH_NUM_THREADS=2
+
 cd /mydata/chip/johannes/uq-xray-ct
 
 uv sync --active
 
 dataset="lamino"
 total_intensity="1e9"
-initial_intensity="1e6"
+initial_intensity="1e4"
 
 # Default values for diffusion parameters
 diffusion_num_inference_steps=50
 guidance_num_gradient_steps=5
 guidance_lr=1e-3
 guidance_lr_decay=false
-guidance_end=5
+guidance_end=0
 batch_size=-1
 # Set output_dir to results/{current_date} by default
-current_date=$(date +%Y-%m-%d)
-output_dir="results/$current_date"
+# current_date=$(date +%Y-%m-%d)
+output_dir="results-final/2026-01-24"
 existing="skip"
 rotation=false
-seeds="0"
-num_images=50
+seeds="0-10"
+num_images=100
 init_fraction=false
-num_steps=10
-num_samples=10
-bypass_inverse_crime=false
+num_steps=30
+num_samples=16
 verbose=false
-iterative_num_gradient_steps=80
+iterative_num_gradient_steps=100
 iterative_lr=1e-1
-
+num_bootstrap_samples=100
 # Default model(s) and dataset(s)
 models=("fbp")
 datasets=("lamino")
@@ -64,10 +70,10 @@ while [[ $# -gt 0 ]]; do
         --seeds)                        seeds="$2"; shift 2;;
         --num_images)                   num_images="$2"; shift 2;;
         --num_samples)                  num_samples="$2"; shift 2;;
+        --num_bootstrap_samples)         num_bootstrap_samples="$2"; shift 2;;
         --batch_size)                    batch_size="$2"; shift 2;;
         --init_fraction)                init_fraction="$2"; shift 2;;
         --num_steps)                    num_steps="$2"; shift 2;;
-        --bypass_inverse_crime)          bypass_inverse_crime=true; shift ;;
         --model)
             shift
             models=()
@@ -88,12 +94,18 @@ for dataset in "${datasets[@]}"; do
         # Set batch_size depending on model if batch_size is -1
         if [[ "$batch_size" -eq -1 ]]; then
             if [[ "$model" == "cond_diffusion" ||  "$model" == "beta_cond_diffusion" ||  "$model" == "diverse_cond_diffusion" ||  "$model" == "diffusion" ]]; then
-            model_batch_size=12  # 0.2 A100
+            model_batch_size=15  # 0.2 A100
             # model_batch_size=  # 0.5 A100
             elif [[ "$model" == "gt" ]]; then
-            model_batch_size=20  # 0.2 A100
+            model_batch_size=15  # 0.2 A100
+            elif [[ "$model" == "mle" ]]; then
+            model_batch_size=30
+            elif [[ "$model" == "unet" ]]; then
+            model_batch_size=30
+            elif [[ "$model" == "unet_bootstrap" ]]; then
+            model_batch_size=12
             else
-            model_batch_size=100 # 0.2 A100
+            model_batch_size=20 # 0.2 A100
             # model_batch_size=300 # 0.5 A100
             fi
         else
@@ -107,6 +119,7 @@ for dataset in "${datasets[@]}"; do
             --total_intensity "$total_intensity"
             --initial_intensity "$initial_intensity"
             --num_samples "$num_samples"
+            --num_bootstrap_samples "$num_bootstrap_samples"
             --schedule exponential
             --dataset "$dataset"
             --iterative_num_gradient_steps "$iterative_num_gradient_steps"
@@ -123,7 +136,6 @@ for dataset in "${datasets[@]}"; do
             $( [[ "$init_fraction" != "false" ]] && echo --init_fraction "$init_fraction" )
             --seeds "$seeds"
             --num_images "$num_images"
-            $( [[ "$bypass_inverse_crime" != "false" ]] && echo --bypass_inverse_crime )
             $( [[ "$verbose" == "true" ]] && echo --verbose )
         )
         echo "${cmd[@]}"
