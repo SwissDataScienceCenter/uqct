@@ -2,8 +2,6 @@ import torch
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from uqct.ct import circular_mask
 
-
-
 def rmse(
     prediction: torch.Tensor, target: torch.Tensor, circle_mask: bool = True
 ) -> torch.Tensor:
@@ -103,7 +101,9 @@ def get_metrics(
         target = target.unsqueeze(-3)
 
     return {
-        "PSNR": psnr(prediction, target, data_range=data_range, circle_mask=circle_mask),
+        "PSNR": psnr(
+            prediction, target, data_range=data_range, circle_mask=circle_mask
+        ),
         "RMSE": rmse(prediction, target, circle_mask=circle_mask),
         "L1": torch.mean(torch.abs(target - prediction), dim=(-2, -1)),
         "SS": ssim(prediction, target, data_range=data_range, circle_mask=circle_mask),
@@ -138,7 +138,7 @@ if __name__ == "__main__":
             print(f"Analyzing metric: {k}")
             print(f"Shape: {v.shape}")
             print(f"Expected shape: {shape[:-2]}")
-            assert (
-                v.shape == shape[:-2]
-            ), f"Shape mismatch for {k}: {v.shape} != {shape[:-2]}"
-        print(f"\n")
+            assert v.shape == shape[:-2], (
+                f"Shape mismatch for {k}: {v.shape} != {shape[:-2]}"
+            )
+        print("\n")

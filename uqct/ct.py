@@ -3,7 +3,6 @@ from typing import Any, Callable, Literal
 
 import astra
 import numpy as np
-import numpy.typing as npt
 import torch
 
 
@@ -66,6 +65,7 @@ def nll(
     intensities: torch.Tensor,
     angles: torch.Tensor,
     l: int = 5,
+    radon_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Poisson negative log-likelihood.
 
@@ -75,6 +75,7 @@ def nll(
         intensities (torch.Tensor): (..., n_angles, 1)
         angles (torch.Tensor): (n_angles)
         l (int)
+        radon_fn (Callable): Optional cached radon function.
     Returns:
         torch.Tensor: (..., n_angles, side_length)
     """
@@ -82,11 +83,35 @@ def nll(
         f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
     )
     intensities = intensities.clip(1e-9)
-    sino = radon(images, angles)
+    if radon_fn is not None:
+        sino = radon_fn(images, angles)
+    else:
+        sino = radon(images, angles)
     scale = l / images.shape[-1]
     log_lam = torch.log(intensities) - scale * sino
     nll = torch.exp(log_lam) - counts * log_lam + torch.lgamma(counts + 1)
     return nll
+
+
+def get_parallel_beam_op(
+    angles: torch.Tensor, im_size: int, n_slices: int
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """
+    Pre-creates an ASTRA parallel beam operator/layer for fixed geometry.
+    Useful for optimization loops where geometry doesn't change.
+
+    Args:
+        angles: (n_angles,)
+        im_size: image size (H, W common)
+        n_slices: batch size (number of slices flattened)
+
+    Returns:
+        Callable layer that takes (B, H, W) images and returns (B, n_angles, n_det)
+    """
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_3d(angles, im_size, n_slices)
+    op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
+    parallel3d_layer = make_radon_layer(op3d)
+    return parallel3d_layer
 
 
 def nll_mixture(
@@ -125,6 +150,7 @@ def nll_mixture_angle_schedule(
     intensities: torch.Tensor,
     angles: torch.Tensor,
     schedule: torch.Tensor,
+    reduce: bool = True,
     l: int = 5,
 ) -> torch.Tensor:
     r"""Compute nll only over angle-based partitions of observations.
@@ -133,16 +159,18 @@ def nll_mixture_angle_schedule(
     images[..., 1] for counts[..., 7:10],
     images[..., 2] for counts[..., 10:].
 
-    Arguments:
+    Arguments
         images (`torch.Tensor`): (..., s, n_preds, H, W)
         counts (`torch.Tensor`): (..., n_angles, n_detectors)
         intensities (`torch.Tensor`): (..., n_angles, 1)
         angles (`torch.Tensor`): (n_angles,)
         schedule (`torch.Tensor`): (s,) with s <= n_angles
         l: (`int`)
-    Returns:
-        `torch.Tensor`: (...). Let (...) = (d_1, ..., d_k),
-        the returned tensor has shape (d_1, ..., d_k, s).
+
+    Returns
+        `torch.Tensor`: (...). Let (...) = (d_1, ..., d_k).
+        If full == False, then the returned tensor has shape (d_1, ..., d_k, s),
+        otherwise it has shape (d_1, ..., d_k, n_angles - min(schedule) + 1).
 
     Notes: Ignoring batch dimensions, output[i] equals
     $$
@@ -151,10 +179,10 @@ def nll_mixture_angle_schedule(
     $$
     """
 
+    # schedule: [1] -> condition prediction on nlls using data up to time 1
+
     device = images.device
     n_angles = counts.shape[-2]
-    if schedule is None:
-        schedule = torch.arange(1, n_angles + 1, device=device)
 
     # (s, n_angles)
     schedule_lb = schedule.unsqueeze(1)
@@ -174,7 +202,10 @@ def nll_mixture_angle_schedule(
     mix_input = -nlls.sum(-1) - math.log(n_pred)  # (..., s, n_pred, n_angles)
     mix = -torch.logsumexp(mix_input, dim=-2)
     mix[..., ~mask] = 0
-    out = mix.sum(-1)
+    if reduce:
+        out = mix.sum(-1)
+    else:
+        out = mix.sum(-2)[..., schedule.min() :]  # min=2 -> [1:]
     return out.float()
 
 
@@ -190,14 +221,10 @@ def radon(images: torch.Tensor, angles: torch.Tensor):
     batch_dims = images.size()[:-2]
     img_shape = images.size()[-2:]
     images = images.reshape(-1, *img_shape)
-
     proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(angles, images)
-
     op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
     parallel3d_layer = make_radon_layer(op3d)
-
     sino = parallel3d_layer(images)
-
     return sino.view(*batch_dims, sino.shape[1], img_shape[0])
 
 
@@ -382,10 +409,10 @@ class Experiment:
         self.intensities = intensities
         self.counts = counts
         if sparse:
-            self.total_exposure = intensities.sum((-2, -1)) * self.counts.shape[-1]
+            self.total_intensity = intensities.sum((-2, -1)) * self.counts.shape[-1]
             self.batch_dims = counts.shape[:-2]
         else:
-            self.total_exposure = intensities.sum((-3, -2, -1)) * self.counts.shape[-1]
+            self.total_intensity = intensities.sum((-3, -2, -1)) * self.counts.shape[-1]
             self.batch_dims = counts.shape[:-3]
         self.sparse = sparse
 
@@ -399,7 +426,7 @@ class Experiment:
         self.angles = self.angles.to(device)
         self.intensities = self.intensities.to(device)
         self.counts = self.counts.to(device)
-        self.total_exposure = self.total_exposure.to(device)
+        self.total_intensity = self.total_intensity.to(device)
         return self
 
 
@@ -649,9 +676,13 @@ def circular_mask(
         torch.arange(img_size, device=device),
         indexing="ij",
     )
+    # Note: Is this correct?
     r = img_size // 2
     mask = ((yy - r) ** 2 + (xx - r) ** 2 <= r**2).to(dtype)
-    return mask
+    # Center for ASTRA alignment
+    # center = (img_size - 1) / 2.0
+    # mask = (yy - center) ** 2 + (xx - center) ** 2 <= (img_size / 2.0) ** 2
+    return mask.to(dtype)
 
 
 ##################################################
@@ -854,14 +885,12 @@ def fbp_2d(
     for angle_set_i, counts_i, intensity_i in zip(angle_sets, counts, intensities):
         if not isinstance(intensity_i, torch.Tensor):
             intensity_i = torch.tensor(intensity_i)
-        print(f"{intensity_i=}")
         sino = sinogram_from_counts(
             counts_i, intensity_i.clone().to(counts_i.device)
         ).clamp_min(0)
         proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(
             angle_set_i, counts_i.shape[-1]
         )
-        print(f"{sino=}")
         fbp = fbp_single_from_forward(
             vol_geom=vol_geom_lr,
             proj_geom=proj_geom_lr,
@@ -923,7 +952,7 @@ def prepare_inputs_from_experiment(
         angles_i = experiment.angles[:i]
         counts_i = experiment.counts[..., :i, :]
         intensities_i = experiment.intensities[..., :i, :]
-        sino_i = sinogram_from_counts(counts_i, intensities_i)
+        sino_i = sinogram_from_counts(counts_i, intensities_i).clamp_min(0.0)
         fbp_i = fbp(sino_i, angles_i)
         fbps.append(fbp_i)
         intensities.append(intensities_i.sum((-2, -1)))
@@ -1001,7 +1030,7 @@ if __name__ == "__main__":
     diff = nlls_sched - nlls_manual
     print(diff)
 
-    from scipy.special import logsumexp, loggamma
+    from scipy.special import loggamma, logsumexp
 
     def nll_mix(x: float, log_lams: list[float]) -> float:
         def lam2nll(log_lam: float) -> float:
