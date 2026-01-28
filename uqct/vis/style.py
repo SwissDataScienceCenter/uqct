@@ -44,7 +44,7 @@ MODEL_NAMES = {
     "bootstrapping_unet": "U-Net (Boot.)",
     "bootstrapping_unet_ensemble": "U-Net Ens. (Boot.)",
     "boundary": "Boundary",
-    "distance_maximization": "Distance Max.",
+    "distance_maximization": "Worst-Case",
 }
 
 

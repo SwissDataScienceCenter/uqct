@@ -47,7 +47,7 @@ def process_metrics(
 
     for _, row in tqdm(df.iterrows(), total=len(df)):
         # 1. Crossover Rate
-        nll_pred = row.get("nll_pred")
+        nll_pred = row.get("nll_pred_mix")
         nll_gt = row.get("nll_gt")
 
         rate = np.nan
@@ -196,6 +196,13 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
         color = style["color"]
         label = style["label"]
 
+        if (label == "Diffusion" or label == "U-Net Ens.") and metric in (
+            "snll_gt_diff_mix",
+            "rate" "gt_nll_confcoef_diff_mix",
+            "gt_nll_confcoef_perc_diff_mix",
+        ):
+            label = f"{label} (Mix.)"
+
         # Plot Mean
         plt.plot(
             sub["intensity"],
@@ -235,7 +242,7 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     if metric == "mean_mix_perc_diff":
         pretty_name = r"Seq. NLL Mean-Mix Diff. (\%)"
     if metric == "mean_mix_diff":
-        pretty_name = r"Seq. NLL. Diff."
+        pretty_name = r"$\beta_{t_{\text{final}}}^{\text{mean}} - \beta_{t_{\text{final}}}^{\text{mix}}$"
     if metric == "nll_pred_last":
         pretty_name = "NLL Last Prediction"
     if metric == "nll_pred_last_mix":
@@ -243,9 +250,11 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     if metric == "nll_gt_sum":
         pretty_name = "NLL"
     if metric in ["gt_nll_confcoef_diff", "gt_nll_confcoef_diff_mix"]:
-        pretty_name = r"$L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast) - \beta_{t_\mathrm{final}, \delta}$"
+        pretty_name = r"$L_{t_{\text{final}}}(\mathbf{x}^\ast) - \beta_{t_{\text{final}}, \delta}$"
     if metric in ["snll_gt_nll_diff", "snll_gt_nll_diff_mix"]:
-        pretty_name = r"$\beta_{t_\mathrm{final}} - L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast)$"
+        pretty_name = (
+            r"$\beta_{t_{\text{final}}} - L_{t_{\text{final}}}(\mathbf{x}^\ast)$"
+        )
     if metric in ["gt_nll_confcoef_perc_diff", "gt_nll_confcoef_perc_diff_mix"]:
         pretty_name = r"Diff. GT Image NLL and Conf. Coeff. (\%)"
         plt.ylim(bottom=-200, top=25)
@@ -772,7 +781,7 @@ def main(
         if m == "nll_sum":
             pretty_name = "Seq. NLL"
         if m == "mean_mix_diff":
-            pretty_name = r"Seq. NLL. Diff."
+            pretty_name = r"$\beta_{t_{\text{final}}}^{\text{mean}} - \beta_{t_{\text{final}}}^{\text{mix}}$"
         if m == "mean_mix_perc_diff":
             pretty_name = r"Seq. NLL. Diff. (\%)"
         if m == "nll_sum_mix":
@@ -784,7 +793,9 @@ def main(
         if m == "nll_gt_sum":
             pretty_name = "NLL"
         if m in ["snll_gt_nll_diff", "snll_gt_nll_diff_mix"]:
-            pretty_name = r"$\beta_{t_\mathrm{final}} - L_{t_\mathrm{final}}(\boldsymbol{\theta}^\ast)$"
+            pretty_name = (
+                r"$\beta_{t_{\text{final}}} - L_{t_{\text{final}}}(\mathbf{x}^\ast)$"
+            )
         if m in ["gt_nll_confcoef_diff", "gt_nll_confcoef_diff_mix"]:
             pretty_name = r"Difference between GT NLL and Conf. Coeff."
         if m in ["gt_nll_confcoef_perc_diff", "gt_nll_confcoef_perc_diff_mix"]:
@@ -830,7 +841,7 @@ def main(
                 sub = stats[stats["model"] == model].sort_values("intensity")
                 if sub.empty:
                     continue
-                if m == "mean_mix_perc_diff" and model not in (
+                if m in ("mean_mix_diff", "mean_mix_perc_diff") and model not in (
                     "diffusion",
                     "unet_ensemble",
                 ):
@@ -841,8 +852,21 @@ def main(
                 color = style["color"]
                 label = style["label"]
 
+                # mix_metrics = ["rate", "nll_sum_mix", "nll_pred_last_mix", "gt_nll_confcoef_diff_mix", "snll_gt_nll_diff_mix", "gt_nll_confcoef_perc_diff_mix"]
+                # mean_metrics = ["nll_pred_last", "gt_nll_confcoef_diff", "snll_gt_nll_diff", "gt_nll_confcoef_perc_diff" ]
+                # if m in mix_metrics:
+                #     if model == "diffusion":
+                #         label = "Diffusion (Mix.)"
+                #     if model == "unet_ensemble":
+                #         label = "U-Net Ens. (Mix.)"
+                # elif m in mean_metrics:
+                #     if model == "diffusion":
+                #         label = "Diffusion (Mean)"
+                #     if model == "unet_ensemble":
+                #         label = "U-Net Ens. (Mean)"
+
                 # if m == "gt_nll_confcoef_perc_diff_mix":
-                if m == "snll_gt_nll_diff_mix":
+                if m == "mean_mix_diff":
                     print(f"{ds_name=}, {model=}, {m=}:\n\t{list(sub['mean'])}")
 
                 # Plot Mean

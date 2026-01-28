@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from torchvision.transforms.functional import gaussian_blur
 
 from uqct.uq import (
     basic_ci,
@@ -33,7 +32,7 @@ from uqct.vis.style import ICML_COLUMN_WIDTH, MODEL_NAMES, get_model_colors
 # Configuration matching the user's setup
 TOTAL_INTENSITIES = [1e4, 1e5, 1e6, 1e7, 1e8, 1e9]
 DATASETS = ["lung", "composite", "lamino"]
-METHODS = ["fbp", "unet", "unet_ensemble", "boundary"]
+METHODS = ["fbp", "unet", "unet_ensemble", "boundary", "distance_maximization"]
 
 
 def load_h5_data(file_path: str, key: str = "preds") -> np.ndarray:
@@ -159,7 +158,8 @@ def find_files(
         search_dir = "results/boundary_sampling"
         pattern = f"{search_dir}/boundary_diffusion:{dataset}:{intensity}*:*.h5"
         files = glob(pattern)
-        return sorted(files)
+        out = sorted(files)
+        return out
     elif model == "distance_maximization":
         search_dir = "results/uncertainty_distance"
         pattern = f"{search_dir}/diffusion:{dataset}:{intensity}:*.h5"
@@ -270,16 +270,18 @@ def calculate_metrics(
             )
             lb, ub = samples_all.min(1).values, samples_all.max(1).values
             in_ci = (lb <= gt_lr) & (gt_lr <= ub)
-            sim_cov = in_ci.all((-2, -1)).float().mean()
-            ind_cov = in_ci.float().mean()
-            width = (ub - lb).abs().mean()
 
-            all_metrics["distance_maximization_sim_cov"].append(sim_cov.cpu().item())
-            all_metrics["distance_maximization_ind_cov"].append(ind_cov.cpu().item())
-            all_metrics["distance_maximization_width"].append(width.cpu().item())
-            all_metrics["chosen_sim_cov"].append(sim_cov.cpu().item())
-            all_metrics["chosen_ind_cov"].append(ind_cov.cpu().item())
-            all_metrics["chosen_width"].append(width.cpu().item())
+            # Compute per-image statistics (N,)
+            sim_cov = in_ci.flatten(1).all(1).float()
+            ind_cov = in_ci.float().mean((1, 2))
+            width = (ub - lb).abs().mean((1, 2))
+
+            all_metrics["distance_maximization_sim_cov"].extend(sim_cov.cpu().tolist())
+            all_metrics["distance_maximization_ind_cov"].extend(ind_cov.cpu().tolist())
+            all_metrics["distance_maximization_width"].extend(width.cpu().tolist())
+            all_metrics["chosen_sim_cov"].extend(sim_cov.cpu().tolist())
+            all_metrics["chosen_ind_cov"].extend(ind_cov.cpu().tolist())
+            all_metrics["chosen_width"].extend(width.cpu().tolist())
     else:
         # Bootstrapping / Ensemble
         if method == "unet_ensemble":
@@ -367,7 +369,11 @@ def calculate_metrics(
     if not all_metrics:
         return {}
 
-    return {k: float(np.nanmean(v)) for k, v in all_metrics.items()}
+    ret = {}
+    for k, v in all_metrics.items():
+        ret[k] = float(np.nanmean(v))
+        ret[f"{k}_std"] = float(np.nanstd(v))
+    return ret
 
 
 @click.command()
@@ -384,12 +390,9 @@ def main(n_bootstraps):
         results = json.load(open("results/uq_comparison.json", "r"))
         files_found = True
     else:
-        for dataset in DATASETS:
-            print(f"Processing {dataset}...")
-            for method in tqdm(METHODS, desc="Methods", leave=False):
-                for intensity in tqdm(
-                    TOTAL_INTENSITIES, desc="Intensities", leave=False
-                ):
+        for dataset in tqdm(DATASETS, desc="Datasets", leave=True):
+            for intensity in tqdm(TOTAL_INTENSITIES, desc="Intensities", leave=False):
+                for method in tqdm(METHODS, desc="Methods", leave=False):
                     metrics = calculate_metrics(
                         dataset, intensity, method, n_bootstraps=n_bootstraps
                     )
@@ -490,12 +493,28 @@ def main(n_bootstraps):
                 if method == "distance_maximization":
                     if "sim_cov" in metric_key:
                         vals = np.array(data["distance_maximization_sim_cov"])
+                        search_key = "distance_maximization_sim_cov"
                     elif "ind_cov" in metric_key:
                         vals = np.array(data["distance_maximization_ind_cov"])
+                        search_key = "distance_maximization_ind_cov"
                     elif "width" in metric_key:
                         vals = np.array(data["distance_maximization_width"])
+                        search_key = "distance_maximization_width"
+                    else:
+                        search_key = (
+                            None  # Ensure search_key is defined for the next if
+                        )
+
+                    if search_key and search_key in data:
+                        vals = np.array(data[search_key])
+                        std_vals = np.array(data[f"{search_key}_std"])
+                    else:
+                        continue  # Skip if metric type not relevant (e.g. ause)
                 else:
+                    if metric_key not in data:
+                        continue
                     vals = np.array(data[metric_key])
+                    std_vals = np.array(data[f"{metric_key}_std"])
 
                 if len(ints) != len(vals):
                     print(
@@ -514,8 +533,10 @@ def main(n_bootstraps):
 
                 if "_cov" in metric_key.lower():
                     vals_plot = vals[sort_idx] * 100
+                    std_plot = std_vals[sort_idx] * 100
                 else:
                     vals_plot = vals[sort_idx]
+                    std_plot = std_vals[sort_idx]
 
                 if method == "boundary":
                     color = get_model_colors().get("diffusion")
@@ -528,6 +549,13 @@ def main(n_bootstraps):
                     label=label,
                     color=color,
                     marker="x",
+                )
+                ax.fill_between(
+                    ints[sort_idx],
+                    vals_plot - std_plot,
+                    vals_plot + std_plot,
+                    color=color,
+                    alpha=0.2,
                 )
 
             ax.set_xscale("log")
@@ -563,7 +591,7 @@ def main(n_bootstraps):
                 labels,
                 loc="lower center",
                 bbox_to_anchor=(0.5, 0.0),
-                ncol=2,
+                ncol=3,
                 frameon=False,
             )
 

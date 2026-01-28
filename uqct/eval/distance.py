@@ -23,6 +23,7 @@ from uqct.eval.nll_constraints import (
 from uqct.eval.run import setup_experiment, CTSettings
 from uqct.logging import get_logger
 from uqct.utils import get_results_dir, load_runs
+from uqct.debugging import plot_img
 
 logger = get_logger(__name__)
 
@@ -466,7 +467,7 @@ def simultaneous_replicate_optimization(
     confcoef: torch.Tensor,
     experiment: Experiment,
     schedule: torch.Tensor,
-    k: int = 8,
+    k: int = 10,
     lr: float = 1.0,
     lr_reduce_threshold: int = 10,
     patience: int = 5,
@@ -612,8 +613,9 @@ def simultaneous_replicate_optimization(
         best_spread_mean = best_spread.mean().item()
 
         # Patience check
-        if step > 1 and best_spread_mean - prev_best_spread_mean < 1e-5:
+        if step > 1 and best_spread_mean - prev_best_spread_mean <= 1e-5:
             patience_counter += 1
+            lr = max(lr * 0.5, 1e-4)
         else:
             patience_counter = 0
 

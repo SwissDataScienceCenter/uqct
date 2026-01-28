@@ -174,7 +174,7 @@ def main(
     filtered_runs = [
         r
         for r in all_runs
-        if r.method == "diffusion" and r.seed == 0 and 1e6 <= r.intensity <= 1e9
+        if r.method == "diffusion" and r.seed == 0 and 1e4 <= r.intensity <= 1e9
     ]
 
     if dry_run:
@@ -301,4 +301,3 @@ eval "$CMD"
 
 if __name__ == "__main__":
     main()
-

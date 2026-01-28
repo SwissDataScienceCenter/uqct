@@ -327,13 +327,12 @@ def plot_data(input_file: Path):
     )
 
     for (intensity, sparse), group_df in grouped_settings:
-        # fig, axes = plt.subplots(3, 1, figsize=(3.4, 4.25), sharey=True)
         fig, axes = plt.subplots(
             3,
             1,
             figsize=(ICML_COLUMN_WIDTH, ICML_COLUMN_HEIGHT),  # <--- WIDER and SHORTER
             sharey=True,
-            sharex=True,  # <--- Critical: Hides inner x-labels to save space
+            sharex=True,
         )
         # fig.supylabel(r"Exclusion Rate (\%)", x=0.03)
 
@@ -396,15 +395,6 @@ def plot_data(input_file: Path):
             ncol=3,
             frameon=False,
         )
-        # fig.tight_layout(rect=[0, 0.08, 1, 1])
-        # fig.legend(
-        #     handles,
-        #     labels,
-        #     loc="lower center",
-        #     bbox_to_anchor=(0.5, 0.02),
-        #     ncol=3,
-        #     frameon=False,
-        # )
 
         # Directory: plots/rotation/{intensity}_{sparse}/
         inten_str = f"{intensity:.0e}".replace("+0", "").replace("+", "")

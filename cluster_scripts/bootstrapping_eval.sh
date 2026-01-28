@@ -13,7 +13,7 @@ set -euo pipefail
 
 # Root of the repo (Adjusted to match user's environment variable usage if possible, else standard)
 # User's sparse_eval.sh used PROJECT_ROOT="${HOME}/uq-xray-ct"
-PROJECT_ROOT="${HOME}/Dropbox/eth/uq-xray-ct"
+PROJECT_ROOT="${HOME}/uq-xray-ct"
 
 cd "${PROJECT_ROOT}"
 export PYTHONPATH="${PROJECT_ROOT}"
@@ -26,6 +26,11 @@ if [ ! -f "${PROJECT_ROOT}/.venv/bin/python" ]; then
 fi
 
 source "${PROJECT_ROOT}/.venv/bin/activate"
+
+# Load environment variables from .env file
+set -o allexport
+[[ -f ${PROJECT_ROOT}/.env ]] && source .env
+set +o allexport
 
 # Determine Job ID (Normal vs Retry)
 if [ "${1:-}" != "" ] && [ -f "$1" ]; then
