@@ -1,5 +1,5 @@
-import torch
 import scipy.stats
+import torch
 
 from uqct.ct import circular_mask
 
@@ -134,7 +134,7 @@ def student_t_bonferroni_ci(
 def student_t_ci(
     samples: torch.Tensor, delta: float = 0.05, bdim: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
+    r"""
     Parametric Student's t-interval for unknown population standard deviation.
 
     For a sample vector x \in R^n (along dim `bdim`), this computes:
@@ -198,6 +198,7 @@ def simultaneous_coverage(
     else:
         covered = (target >= ci_lo) & (target <= ci_hi)
         return covered.all(dim=(-1, -2, -3))
+
 
 def error_correlation(
     ci_width: torch.Tensor,

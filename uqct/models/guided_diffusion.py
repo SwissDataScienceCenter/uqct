@@ -1,10 +1,9 @@
-import click
+from typing import Literal
 
-from typing import Optional, Tuple, Union, Literal
+import click
+import torch
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler, DDPMSchedulerOutput
 from diffusers.utils.torch_utils import randn_tensor
-from diffusers.models.unets.unet_2d import UNet2DOutput
-import torch
 from tqdm.auto import tqdm
 
 
@@ -13,13 +12,13 @@ class GradientGuidance:
     Applies gradient-based guidance to an image tensor during diffusion model sampling.
     """
 
-    def __init__(self, 
-        loss_fct, 
-        num_gradient_steps=10, 
-        guidance_start=1000, 
-        guidance_end=0, 
-        lr=1e-1, 
-        learning_rate_decay=False
+    def __init__(
+        self,
+        loss_fct,
+        num_gradient_steps=10,
+        guidance_start=1000,
+        guidance_end=0,
+        lr=1e-1,
     ):
         """
         Initialize the GradientGuidance class.
@@ -36,8 +35,7 @@ class GradientGuidance:
         self.guidance_start = guidance_start
         self.guidance_end = guidance_end
         self.lr = lr
-        self.learning_rate_decay = learning_rate_decay
-    
+
     def __call__(self, pred_original_sample, t):
         """
         Apply gradient-based guidance to the predicted original sample.
@@ -51,11 +49,7 @@ class GradientGuidance:
             return pred_original_sample
         with torch.enable_grad():
             image = torch.nn.Parameter(pred_original_sample.detach().clone())
-            if self.learning_rate_decay:
-                lr = self.lr * t / 1000
-            else:
-                lr = self.lr
-            optimizer = torch.optim.Adam([image], lr=lr)
+            optimizer = torch.optim.Adam([image], lr=self.lr)
 
             for _ in range(self.num_gradient_steps):
                 optimizer.zero_grad()
@@ -83,16 +77,13 @@ class GuidedDiffusionPipeline:
         self.scheduler = scheduler
 
     def __call__(
-            self, 
-            batch_size: int = 1,
-            generator: Optional[torch.Generator] = None,
-            num_inference_steps: int = 1000,
-            timesteps=None,
-            guidance=None,
-            verbose=False,
-            cond_kwargs=None,
-            image_shape=None,
-        ):
+        self,
+        batch_size: int = 1,
+        generator: torch.Generator | None = None,
+        num_inference_steps: int = 1000,
+        guidance=None,
+        verbose=False,
+    ):
         """
         Generates images using the guided diffusion process.
         Args:
@@ -106,20 +97,19 @@ class GuidedDiffusionPipeline:
         """
 
         # Sample gaussian noise to begin loop
-        if image_shape is None:
-            if isinstance(self.unet.config.sample_size, int):
-                image_shape = (
-                    batch_size,
-                    self.unet.config.in_channels,
-                    self.unet.config.sample_size,
-                    self.unet.config.sample_size,
-                )
-            else:
-                image_shape = (
-                    batch_size, 
-                    self.unet.config.in_channels, 
-                    *self.unet.config.sample_size
-                )
+        if isinstance(self.unet.config.sample_size, int):
+            image_shape = (
+                batch_size,
+                self.unet.config.in_channels,
+                self.unet.config.sample_size,
+                self.unet.config.sample_size,
+            )
+        else:
+            image_shape = (
+                batch_size,
+                self.unet.config.in_channels,
+                *self.unet.config.sample_size,
+            )
 
         device = self.unet.device
         if device.type == "mps":
@@ -130,23 +120,17 @@ class GuidedDiffusionPipeline:
             image = randn_tensor(image_shape, generator=generator, device=device)
 
         # set step values
-        self.scheduler.set_timesteps(num_inference_steps, timesteps=timesteps)
+        self.scheduler.set_timesteps(num_inference_steps)
 
-        cond_kwargs = cond_kwargs if cond_kwargs is not None else {}
         for t in tqdm(self.scheduler.timesteps, disable=not verbose):
             # 1. predict noise model_output
             with torch.no_grad():
-                
-                model_output = self.unet(image, timestep=t, **cond_kwargs)
-                if isinstance(model_output, tuple):
-                    model_output = model_output[0]
-                elif isinstance(model_output, UNet2DOutput):
-                    model_output = model_output.sample
+                model_output = self.unet(image, t).sample
 
             # 2. compute previous image: x_t -> x_t-1
             image = self.step(
                 model_output, t, image, guidance=guidance, generator=generator
-            ).prev_sample
+            ).prev_sample  # type: ignore
 
         image = (image / 2 + 0.5).clamp(0, 1)
         return image
@@ -156,10 +140,10 @@ class GuidedDiffusionPipeline:
         model_output: torch.Tensor,
         timestep: int,
         sample: torch.Tensor,
-        guidance: Optional[GradientGuidance] = None,
+        guidance: GradientGuidance | None = None,
         generator=None,
         return_dict: bool = True,
-    ) -> Union[DDPMSchedulerOutput, Tuple]:
+    ) -> DDPMSchedulerOutput | tuple:
         """
         This is the DDPM reference implementation of the reverse diffusion step, with an additional guidance step.
 
@@ -187,7 +171,10 @@ class GuidedDiffusionPipeline:
 
         if model_output.shape[1] == sample.shape[
             1
-        ] * 2 and self.scheduler.variance_type in ["learned", "learned_range"]:
+        ] * 2 and self.scheduler.variance_type in [
+            "learned",
+            "learned_range",
+        ]:
             model_output, predicted_variance = torch.split(
                 model_output, sample.shape[1], dim=1
             )
@@ -224,7 +211,7 @@ class GuidedDiffusionPipeline:
 
         # 3. Clip or threshold "predicted x_0"
         if self.scheduler.config.thresholding:
-            pred_original_sample = self._threshold_sample(pred_original_sample)
+            pred_original_sample = self._threshold_sample(pred_original_sample)  # type: ignore
         elif self.scheduler.config.clip_sample:
             pred_original_sample = pred_original_sample.clamp(
                 -self.scheduler.config.clip_sample_range,
@@ -299,10 +286,10 @@ class GuidedDiffusionPipeline:
 def main(dataset: Literal["lung", "composite", "lamino"]):
     import numpy as np
 
-    from uqct.ct import sample_observations, nll
+    from uqct.ct import nll, sample_observations
     from uqct.datasets.utils import get_dataset
-    from uqct.models.diffusion import load_unet, find_ckpt
     from uqct.debugging import plot_img
+    from uqct.models.diffusion import find_ckpt, load_unet
 
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -320,13 +307,13 @@ def main(dataset: Literal["lung", "composite", "lamino"]):
     n_angles = 180
     angles = torch.from_numpy(np.linspace(0, 180, n_angles, endpoint=False)).to(device)
     total_intensity = 1e5
-    n_detectors_hr = gt.shape[-1]
+    # n_detectors_hr = gt.shape[-1]
     intensities = torch.tensor(total_intensity, device=device)
 
     counts = sample_observations(gt, intensities, angles)
     intensities_lr = intensities * 2
 
-    def guidance_loss(counts, intensities, angles, l=5.0, circle=True):
+    def guidance_loss(counts, intensities, angles, length_scale=5.0, circle=True):
         """
         Define a loss function for the diffusion model.
         This can be used to guide the diffusion process.
@@ -352,14 +339,14 @@ def main(dataset: Literal["lung", "composite", "lamino"]):
             image = ((image + 1.0) / 2).clip(0, 1)
             if circle:
                 image = image * circle_mask
-            loss = nll(image, counts, intensities, angles, l=l)
+            loss = nll(image, counts, intensities, angles, length_scale=length_scale)
             return loss.sum()
 
         return loss_fn
 
-    ckpt_path = find_ckpt(dataset)
+    ckpt_path = find_ckpt(dataset, cond=False)
     print(f"Loading unet from {ckpt_path}")
-    unet = load_unet(ckpt_path)
+    unet = load_unet(ckpt_path, cond=False)
 
     scheduler = DDPMScheduler(num_train_timesteps=1000, beta_schedule="linear")
     guided_diffusion = GuidedDiffusionPipeline(unet, scheduler)

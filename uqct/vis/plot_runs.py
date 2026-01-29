@@ -1,16 +1,15 @@
+import concurrent.futures
 import math
 from pathlib import Path
-from typing import Optional, Tuple
-import concurrent.futures
 
 import click
-import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
-from uqct.utils import get_results_dir, load_runs
 from uqct.logging import get_logger
+from uqct.utils import get_results_dir, load_runs
 
 logger = get_logger(__name__)
 
@@ -29,7 +28,7 @@ LOG_INV_DELTA = math.log(1 / DELTA)
 
 
 def process_and_plot(
-    latest_runs: dict[Tuple[str, str, float, bool], pd.DataFrame],
+    latest_runs: dict[tuple[str, str, float, bool], pd.DataFrame],
     output_dir: Path,
     log_scale: bool = False,
     show_progress: bool = True,
@@ -78,7 +77,7 @@ def process_and_plot(
             nll_pred = row["nll_pred"]
             nll_gt = row["nll_gt"]
             psnr_traj = row["psnr"]
-            schedule = row["angle_schedule"]
+            # schedule = row["angle_schedule"]
 
             if isinstance(nll_pred, np.ndarray):
                 nll_pred = nll_pred.tolist()
@@ -349,12 +348,12 @@ def process_single_group(args):
     "--parallel/--no-parallel", default=True, help="Enable parallel processing."
 )
 def main(
-    runs_dir: Optional[Path],
-    consolidated_file: Optional[Path],
+    runs_dir: Path | None,
+    consolidated_file: Path | None,
     output_dir: Path,
-    dataset: Optional[str],
-    intensity: Optional[float],
-    sparse: Optional[bool],
+    dataset: str | None,
+    intensity: float | None,
+    sparse: bool | None,
     log_scale: bool,
     parallel: bool,
 ):
@@ -408,7 +407,8 @@ def main(
         if parallel:
             logger.info("Processing in parallel...")
             with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
-                results = list(executor.map(process_single_group, tasks))
+                # results = list(executor.map(process_single_group, tasks))
+                list(executor.map(process_single_group, tasks))
         else:
             logger.info("Processing sequentially...")
             for t in tqdm(tasks):

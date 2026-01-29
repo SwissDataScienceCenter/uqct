@@ -1,22 +1,22 @@
 import math
+import tomllib
+from functools import lru_cache
+from pathlib import Path
+
 import click
-import torch
+import einops
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import tomllib
-import einops
-from pathlib import Path
-from tqdm import tqdm
-from typing import Optional, List, Dict
 import scipy.ndimage as ndimage
+import torch
 import torch.nn.functional as F
-from functools import lru_cache
+from tqdm import tqdm
 
 import uqct
-from uqct.eval.run import setup_experiment
 from uqct.ct import nll_mixture_angle_schedule
 from uqct.datasets.utils import get_dataset
+from uqct.eval.run import setup_experiment
 from uqct.vis.style import ICML_COLUMN_HEIGHT, ICML_COLUMN_WIDTH, MODEL_ORDER, get_style
 
 # Patch get_dataset to speed up repeated calls in setup_experiment
@@ -37,8 +37,8 @@ LOG_INV_DELTA = math.log(1 / DELTA)
 
 
 def compute_rotated_nll(
-    gt: torch.Tensor, angles_deg: List[float], experiment, schedule
-) -> Dict[float, List[float]]:
+    gt: torch.Tensor, angles_deg: list[float], experiment, schedule
+) -> dict[float, list[float]]:
     """
     Computes cumulative NLL for rotated versions of GT.
     Returns: Dict[angle, nll_trajectory]
@@ -49,7 +49,7 @@ def compute_rotated_nll(
     results = {}
 
     gt_np = gt.detach().cpu().numpy()
-    T = len(schedule) if schedule is not None else 1
+    t_steps = len(schedule) if schedule is not None else 1
     n_images = gt.shape[0]
     n_angles_rot = len(angles_deg)
 
@@ -118,7 +118,7 @@ def compute_rotated_nll(
         batch_intensities = experiment.intensities[batch_idx]
 
         # Expand: (B, H, W) -> (B, T, 1, H, W)
-        batch_expanded = einops.repeat(batch, "b w h -> b t 1 w h", t=T)
+        batch_expanded = einops.repeat(batch, "b w h -> b t 1 w h", t=t_steps)
         batch_expanded = batch_expanded.contiguous()
 
         with torch.no_grad():
@@ -157,7 +157,7 @@ def generate_data(
     consolidated_file: Path,
     output_file: Path,
     device: str,
-    limit: Optional[int],
+    limit: int | None,
     schedule_length: int = 32,
 ):
     """Generates rotation exclusion data and saves to Parquet."""
@@ -243,23 +243,23 @@ def generate_data(
                 img_row = model_df.iloc[i]
 
                 nll_pred_list = img_row["nll_pred_mix"]
-                if not isinstance(nll_pred_list, (list, np.ndarray)):
+                if not isinstance(nll_pred_list, list | np.ndarray):
                     continue
 
                 pred_traj = np.array(nll_pred_list)
                 pred_cum = np.cumsum(pred_traj)
                 thresh_cum = pred_cum + LOG_INV_DELTA
 
-                L_pred = len(pred_cum)
+                len_pred = len(pred_cum)
 
                 for angle in angles_deg:
                     rot_traj = np.array(rot_nlls_map[angle][i])
 
                     # Align lengths
-                    L_rot = len(rot_traj)
-                    if L_rot > L_pred:
-                        rot_traj = rot_traj[-L_pred:]
-                    elif L_rot < L_pred:
+                    len_rot = len(rot_traj)
+                    if len_rot > len_pred:
+                        rot_traj = rot_traj[-len_pred:]
+                    elif len_rot < len_pred:
                         pass
 
                     rot_cum = np.cumsum(rot_traj)
@@ -327,13 +327,12 @@ def plot_data(input_file: Path):
     )
 
     for (intensity, sparse), group_df in grouped_settings:
-        # fig, axes = plt.subplots(3, 1, figsize=(3.4, 4.25), sharey=True)
         fig, axes = plt.subplots(
             3,
             1,
             figsize=(ICML_COLUMN_WIDTH, ICML_COLUMN_HEIGHT),  # <--- WIDER and SHORTER
             sharey=True,
-            sharex=True,  # <--- Critical: Hides inner x-labels to save space
+            sharex=True,
         )
         # fig.supylabel(r"Exclusion Rate (\%)", x=0.03)
 
@@ -382,10 +381,8 @@ def plot_data(input_file: Path):
 
             if row_idx == 2:
                 ax.set_xlabel("Rotation Angle (Deg)")
-                # ax.legend(fontsize=8, loc="best")
             ax.set_ylabel(r"Exclusion Rate (\%)")
         handles, labels = axes[-1].get_legend_handles_labels()
-        # fig.tight_layout(rect=[0, 0.05, 1, 1])
         fig.tight_layout(rect=[0, 0.08, 1, 1])
 
         fig.legend(
@@ -396,15 +393,6 @@ def plot_data(input_file: Path):
             ncol=3,
             frameon=False,
         )
-        # fig.tight_layout(rect=[0, 0.08, 1, 1])
-        # fig.legend(
-        #     handles,
-        #     labels,
-        #     loc="lower center",
-        #     bbox_to_anchor=(0.5, 0.02),
-        #     ncol=3,
-        #     frameon=False,
-        # )
 
         # Directory: plots/rotation/{intensity}_{sparse}/
         inten_str = f"{intensity:.0e}".replace("+0", "").replace("+", "")
@@ -451,11 +439,11 @@ def plot_data(input_file: Path):
     help="Device to use.",
 )
 def main(
-    consolidated_file: Optional[Path],
+    consolidated_file: Path | None,
     data_file: Path,
     generate: bool,
     plot: bool,
-    limit: Optional[int],
+    limit: int | None,
     device: str,
 ):
     """Analyze exclusion rate of rotated GT images."""

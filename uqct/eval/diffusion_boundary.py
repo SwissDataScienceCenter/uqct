@@ -1,30 +1,20 @@
 import math
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import click
 import einops
 import h5py
-import matplotlib.pyplot as plt
 import pandas as pd
 import torch
 
 from uqct.ct import Experiment, nll
 from uqct.eval.run import setup_experiment
-from uqct.metrics import get_metrics
-from uqct.models.diffusion import Diffusion
 from uqct.logging import get_logger
-from uqct.uq import (
-    error_correlation,
-    gaussian_ci,
-    coverage,
-    error_r2,
-    percentile_ci,
-    basic_ci,
-    studentized_ci,
-    simultaneous_ci,
-    sparsification_error,
-)
+
+# from uqct.metrics import get_metrics
+from uqct.models.diffusion import Diffusion
 from uqct.utils import get_results_dir
 
 logger = get_logger(__name__)
@@ -134,7 +124,7 @@ def get_boundary_guidance_loss_fn(
         Returns:
             torch.Tensor: Scalar loss.
         """
-        R, N, S, H, W = images.shape
+        r, n, s, h, w = images.shape
         images = images[:, :, 0, :, :]
         images_flat = einops.rearrange(images, "r n h w -> (n r) h w").contiguous()
         start_angle_idx = schedule[0].item()
@@ -143,15 +133,15 @@ def get_boundary_guidance_loss_fn(
         counts_slice = experiment.counts[:, start_angle_idx:end_angle_idx, :]
         intensities_slice = experiment.intensities[:, start_angle_idx:end_angle_idx, :]
         angles_slice = experiment.angles[start_angle_idx:end_angle_idx]
-        counts_rep = einops.repeat(counts_slice, "n ... -> (n r) ...", r=R)
-        intensities_rep = einops.repeat(intensities_slice, "n ... -> (n r) ...", r=R)
+        counts_rep = einops.repeat(counts_slice, "n ... -> (n r) ...", r=r)
+        intensities_rep = einops.repeat(intensities_slice, "n ... -> (n r) ...", r=r)
         nlls_raw = nll(images_flat, counts_rep, intensities_rep, angles_slice)
         current_nll = einops.reduce(nlls_raw, "b ... -> b", "sum")
-        threshold = einops.repeat(conf_coefs, "n -> (n r)", r=R)
+        threshold = einops.repeat(conf_coefs, "n -> (n r)", r=r)
         cond = current_nll < threshold  # (NR,)
 
         loss_nll_term = (~cond).float() * current_nll
-        images_vec = images.reshape(R, N, -1)
+        images_vec = images.reshape(r, n, -1)
         dists = torch.square(images_vec[:, None, :, :] - images_vec[None, :, :, :]).sum(
             dim=-1
         )
@@ -195,7 +185,7 @@ def evaluate_and_log_results(
 
     # sampled_images shape: (N, S, R, 1, H, W).
     final_samples = sampled_images[:, -1, :, :, :, :]  # (N, R, 1, H, W)
-    final_std = std_dev[:, -1, :, :, :]  # (N, 1, H, W)
+    # final_std = std_dev[:, -1, :, :, :]  # (N, 1, H, W)
 
     # Compute Mean Prediction
     pred_mean = final_samples.mean(dim=1)  # (N, 1, H, W)
@@ -217,7 +207,7 @@ def evaluate_and_log_results(
         )
 
     # Compute Reconstruction Metrics
-    metrics = get_metrics(pred_mean, gt_lr, data_range=1.0)
+    # metrics = get_metrics(pred_mean, gt_lr, data_range=1.0)
 
     # # UQ Metrics
     # # Compute Gaussian CI
@@ -510,9 +500,15 @@ def main(
         anneal_lr: Whether to anneal the learning rate.
     """
     # 1. Load Experiment
-    df, dataset, total_intensity, experiment, schedule, config_row, gt = (
-        load_experiment_from_parquet(parquet_path_str)
-    )
+    (
+        df,
+        dataset,
+        total_intensity,
+        experiment,
+        schedule,
+        config_row,
+        gt,
+    ) = load_experiment_from_parquet(parquet_path_str)
     gt_lr = torch.nn.functional.interpolate(
         gt.unsqueeze(0), size=gt.shape[-1] // 2, mode="area"
     ).squeeze(0)
@@ -617,8 +613,9 @@ def main(
     )
 
     # Define Guidance Function
+    assert time_step is not None
     guidance_fn = get_boundary_guidance_loss_fn(
-        experiment, schedule, conf_coefs, time_step, dist_loss_fac
+        experiment, schedule, conf_coefs, time_step
     )
 
     # Sample

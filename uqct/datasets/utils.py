@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from torch.utils.data import Subset
@@ -17,17 +17,21 @@ DATA_DIR_CANDIDATES = [
         "./data",
     )
 ]
-DATA_DIR = os.getenv("UQCT_DATA_DIR", None)
-if DATA_DIR is not None:
-    DATA_DIR = Path(DATA_DIR)
+DATA_DIR_ENV = os.getenv("UQCT_DATA_DIR", None)
+DATA_DIR: Path = Path(".")
+if DATA_DIR_ENV is not None:
+    DATA_DIR = Path(DATA_DIR_ENV)
 else:
+    found = False
     for x in DATA_DIR_CANDIDATES:
         if x.is_dir():
             DATA_DIR = x
-if DATA_DIR is None:
-    raise FileNotFoundError(
-        f"Couldn't find data directory. Checked {DATA_DIR_CANDIDATES}"
-    )
+            found = True
+            break
+    if not found:
+        raise FileNotFoundError(
+            f"Couldn't find data directory. Checked {DATA_DIR_CANDIDATES}"
+        )
 
 KWARGS_LAMINO = {
     "path": DATA_DIR / "lamino_tiff",
@@ -59,7 +63,7 @@ DatasetName = Literal["composite", "lamino", "lung"]
 def get_dataset(
     name: DatasetName, high_res: bool = False
 ) -> tuple[Subset[torch.Tensor], Subset[torch.Tensor]]:
-    settings = {
+    settings: dict[str, dict[str, Any]] = {
         "composite": {"kwargs": KWARGS_COMPOSITE, "filetype": "nii"},
         "lamino": {"kwargs": KWARGS_LAMINO, "filetype": "tiff"},
         "lung": {"kwargs": KWARGS_LUNG, "filetype": "h5"},
@@ -91,7 +95,7 @@ def get_dataset(
 
 
 if __name__ == "__main__":
-    datasets = ("lamino", "lung")
+    datasets: tuple[DatasetName, ...] = ("lamino", "lung")
     for ds_name in datasets:
         print(f"Dataset: {ds_name}")
         print("Finding min and max pixel values in training and test set...")

@@ -70,7 +70,9 @@ def sample_fbp_sparse(
     split_indices = np.cumsum(n_angles[:-1])
     total = int(n_angles.sum())
     angle_sets = np.split(np.random.rand(total) * ANGULAR_RANGE, split_indices)
-    fbp = forward_and_fbp_2d(images, angle_sets, total_intensities.tolist(), l=L)
+    fbp = forward_and_fbp_2d(
+        images, angle_sets, total_intensities.tolist(), length_scale=L
+    )
     return (
         fbp.to(device),
         total_intensities.to(device),

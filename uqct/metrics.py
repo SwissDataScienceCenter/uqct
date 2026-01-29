@@ -1,6 +1,8 @@
 import torch
 from torchmetrics.image import StructuralSimilarityIndexMeasure
+
 from uqct.ct import circular_mask
+
 
 def rmse(
     prediction: torch.Tensor, target: torch.Tensor, circle_mask: bool = True
@@ -113,32 +115,3 @@ def get_metrics(
 def print_metrics(original, compressed):
     for k, v in get_metrics(original, compressed).items():
         print(k, v)
-
-
-if __name__ == "__main__":
-    test_shapes = [
-        (1, 2, 3, 256, 256),
-        (1, 1, 256, 256),
-        (1, 3, 256, 256),
-        (4, 1, 256, 256),
-        (4, 3, 256, 256),
-        (1, 1, 128, 128),
-        (1, 3, 128, 128),
-        (4, 1, 128, 128),
-        (4, 3, 128, 128),
-        (1, 64, 64),
-        (3, 64, 64),
-    ]
-    for shape in test_shapes:
-        print(f"Analyzing shape: {shape}")
-        pred = torch.rand(shape)
-        target = torch.rand(shape)
-        metrics = get_metrics(pred, target)
-        for k, v in metrics.items():
-            print(f"Analyzing metric: {k}")
-            print(f"Shape: {v.shape}")
-            print(f"Expected shape: {shape[:-2]}")
-            assert v.shape == shape[:-2], (
-                f"Shape mismatch for {k}: {v.shape} != {shape[:-2]}"
-            )
-        print("\n")

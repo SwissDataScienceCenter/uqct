@@ -1,9 +1,10 @@
 import math
 import os
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 import einops
@@ -311,7 +312,7 @@ def evaluate_and_save(
     )
     gt_lr = einops.rearrange(gt_lr, "n 1 w h -> n w h")
 
-    metric2lists = defaultdict(list)
+    metric2lists: dict[str, list[list[float]]] = defaultdict(list)
     for image_index in range(n_gt):
         # Iterate over "timesteps" or "samples" dimension
         for t in range(preds_mean.shape[1]):
@@ -425,7 +426,7 @@ def evaluate_and_save(
         preds=preds.cpu().numpy(),
         slurm_job_id=slurm_id,
         extra=extra_metadata,
-        **({"timestamp": timestamp} if timestamp is not None else {}),
+        **({"timestamp": timestamp} if timestamp is not None else {}),  # type: ignore
     )
     logger.info(run)
     run.dump_parquet()
@@ -474,7 +475,7 @@ def run_evaluation(
     if schedule is not None:
         ct_settings_kwargs["angle_schedule"] = schedule.tolist()
 
-    ct_settings = CTSettings(**ct_settings_kwargs)
+    ct_settings = CTSettings(**ct_settings_kwargs)  # type: ignore
 
     evaluate_and_save(
         preds=preds,

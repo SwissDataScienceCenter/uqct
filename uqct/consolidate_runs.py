@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import Optional
 
 import click
+import numpy as np
 import pandas as pd
 
 from uqct.logging import get_logger
@@ -36,12 +36,12 @@ logger = get_logger(__name__)
 )
 @click.option("--sparse/--no-sparse", default=None, help="Sparse setting flag.")
 def main(
-    runs_dir: Optional[Path],
+    runs_dir: Path | None,
     output_file: Path,
     jobid: tuple[int, ...],
-    dataset: Optional[str],
-    intensity: Optional[float],
-    sparse: Optional[bool],
+    dataset: str | None,
+    intensity: float | None,
+    sparse: bool | None,
 ):
     """Consolidate run results into a single parquet file."""
 
@@ -62,14 +62,16 @@ def main(
         return
 
     # Consolidate all models into one dataframe
-    all_runs = []
+    all_runs: list[pd.DataFrame] = []
 
     # Logic: Intersect models WITHIN the same (dataset, intensity, sparse) application
     # to ensure fair comparison, then concat everything.
 
     # 1. Group keys by (dataset, intensity, sparse)
-    groups = {}
+    groups: dict[tuple[str, float, bool], list[pd.DataFrame]] = {}
     for key, df in aggregated_runs.items():
+        if not isinstance(key, tuple):
+            continue
         ds, mod, inten, sp, seed = key
         group_key = (ds, inten, sp)
         if group_key not in groups:
@@ -137,9 +139,6 @@ def main(
             "NaN values detected in required columns of the consolidated dataframe!"
         )
 
-    # 2. Deep check for NaNs in list/array columns
-    import numpy as np
-
     list_cols = ["psnr", "ssim", "nll_pred", "nll_gt", "rmse", "l1"]
     present_list_cols = [c for c in list_cols if c in final_df.columns]
 
@@ -148,7 +147,7 @@ def main(
             final_df[col]
             .apply(
                 lambda x: (
-                    np.isnan(x).any() if isinstance(x, (list, np.ndarray)) else False
+                    np.isnan(x).any() if isinstance(x, list | np.ndarray) else False
                 )
             )
             .any()

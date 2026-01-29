@@ -1,12 +1,14 @@
-from uqct.ct import Experiment
-from uqct.models.iterative import reconstruct, ReconstructionMethod
 from typing import Literal
-import torch
+
 import click
+import torch
+
+from uqct.ct import Experiment
+from uqct.eval.options import common_options
 from uqct.eval.run import (
     run_evaluation,
 )
-from uqct.eval.options import common_options
+from uqct.models.iterative import ReconstructionMethod, reconstruct
 
 DatasetName = Literal["lung", "composite", "lamino"]
 

@@ -77,7 +77,7 @@ class UNet2DModelAux(nn.Module):
         return self.unet.forward(
             x_t_fbp, timestep, encoder_hidden_states=proj, return_dict=False
         )[0]
-    
+
     @property
     def config(self):
         return self.unet.config

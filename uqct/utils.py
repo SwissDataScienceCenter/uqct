@@ -2,16 +2,18 @@ import math
 import os
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Any
 
 import pandas as pd
+import tensorrt
+import torch
 
 from uqct.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-def _git_root(start: Path) -> Optional[Path]:
+def _git_root(start: Path) -> Path | None:
     current = start
     while True:
         if (current / ".git").exists():
@@ -22,8 +24,8 @@ def _git_root(start: Path) -> Optional[Path]:
         current = parent
 
 
-def _candidate_root_dirs() -> List[Path]:
-    candidates: List[Path] = []
+def _candidate_root_dirs() -> list[Path]:
+    candidates: list[Path] = []
     env_root = os.environ.get("UQCT_ROOT_DIR")
     if env_root:
         candidates.append(Path(env_root).expanduser())
@@ -68,7 +70,7 @@ def get_results_dir() -> Path:
 
 def get_cache_dir() -> Path:
     """Resolve a writable cache directory, creating it when the parent exists."""
-    candidates: List[Path] = []
+    candidates: list[Path] = []
     env_cache = os.environ.get("UQCT_CACHE_DIR")
     if env_cache:
         candidates.append(Path(env_cache).expanduser())
@@ -101,8 +103,6 @@ def get_hardware_specific_engine_path(dataset: str) -> Path:
     """
     Returns a unique path inside get_cache_dir() based on the current GPU and TRT version.
     """
-    import tensorrt
-    import torch
 
     # 1. Get your project's base cache location
     # Ensure it's a Path object
@@ -140,11 +140,11 @@ def get_hardware_specific_engine_path(dataset: str) -> Path:
 
 def load_runs(
     runs_dir: Path,
-    dataset: str,
-    intensity: float,
-    sparse: bool,
-    job_ids: tuple[int, ...],
-) -> dict[str, pd.DataFrame]:
+    dataset: str | None = None,
+    intensity: float | None = None,
+    sparse: bool | None = None,
+    job_ids: tuple[int, ...] | None = None,
+) -> dict[Any, pd.DataFrame]:
     """
     Scans the runs directory and returns the most recent run for each model
     matching the given criteria, aggregating across image chunks.
@@ -165,11 +165,11 @@ def load_runs(
 
             # Split back into dict
             # GroupBy model
-            aggregated_runs = {}
+            runs_map = {}
             for model, group in df.groupby("model"):
-                aggregated_runs[str(model)] = group.copy()
+                runs_map[str(model)] = group.copy()
 
-            return aggregated_runs
+            return runs_map
         except Exception as e:
             logger.error(f"Error loading consolidated file: {e}")
             return {}
@@ -276,10 +276,12 @@ def load_runs(
     # Sort candidates by timestamp descending (newest first)
     candidates.sort(key=lambda x: x["timestamp"], reverse=True)
 
-    aggregated_runs = {}
+    aggregated_runs: dict[Any, pd.DataFrame] = {}
 
     # Organize by configuration
-    config_candidates = {}
+    config_candidates: dict[
+        tuple[str, str, float, bool, int], list[dict[str, Any]]
+    ] = {}
     for c in candidates:
         cfg = c["config"]
         if cfg not in config_candidates:

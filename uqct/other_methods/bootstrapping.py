@@ -1,6 +1,6 @@
 import torch
 
-from uqct.ct import Experiment, sinogram_from_counts, fbp, circular_mask
+from uqct.ct import Experiment, circular_mask, fbp, sinogram_from_counts
 from uqct.eval.run import run_evaluation
 from uqct.models.unet import FBPUNet
 
@@ -40,13 +40,13 @@ def get_bootstrap_predictor(
 
             # Batching Logic for Images to prevent OOM
             # Experiment has shape (N, ...)
-            N_images = experiment.counts.shape[0]
+            n_images = experiment.counts.shape[0]
             batch_size = 32
 
             final_preds = []
 
-            for i in range(0, N_images, batch_size):
-                end_i = min(i + batch_size, N_images)
+            for i in range(0, n_images, batch_size):
+                end_i = min(i + batch_size, n_images)
 
                 # Slice experiment data for this batch
                 # counts: (N, n_angles, n_det)
