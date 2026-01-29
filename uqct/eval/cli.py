@@ -3,8 +3,8 @@ import tomllib
 from typing import Any, Literal
 
 import click
-
 import torch
+
 from uqct.datasets.utils import DatasetName
 from uqct.eval.bootstrapping import run_bootstrapping
 from uqct.eval.diffusion import run_diffusion
@@ -436,7 +436,7 @@ def _dispatch(
 
             from uqct.eval.run import CTSettings
 
-            ct_settings = CTSettings(**ct_settings_kwargs)
+            ct_settings = CTSettings(**ct_settings_kwargs)  # type: ignore
 
             # Evaluate and save (overwriting logic is inside dump_parquet if we reuse timestamp)
             evaluate_and_save(

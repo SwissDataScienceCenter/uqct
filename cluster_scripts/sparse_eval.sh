@@ -32,7 +32,7 @@ if [ "${1:-}" != "" ] && [ -f "$1" ]; then
     # SLURM_ARRAY_TASK_ID is 0-indexed, sed uses 1-indexed lines
     LINE_NUM=$((SLURM_ARRAY_TASK_ID + 1))
     JOB_ID=$(sed -n "${LINE_NUM}p" "$1")
-    
+
     if [ -z "$JOB_ID" ]; then
         echo "No job ID found at line ${LINE_NUM} of $1. Assuming array task out of range for fewer failed jobs."
         exit 0

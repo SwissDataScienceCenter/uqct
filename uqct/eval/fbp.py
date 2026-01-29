@@ -3,9 +3,9 @@ from typing import Literal
 import click
 import torch
 
-from uqct.ct import prepare_inputs_from_experiment, Experiment
-from uqct.eval.run import run_evaluation
+from uqct.ct import Experiment, prepare_inputs_from_experiment
 from uqct.eval.options import common_options
+from uqct.eval.run import run_evaluation
 
 DatasetName = Literal["lung", "composite", "lamino"]
 

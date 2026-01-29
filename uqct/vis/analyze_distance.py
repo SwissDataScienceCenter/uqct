@@ -1,22 +1,18 @@
-import uqct
-import os
-from pathlib import Path
-import h5py
-import numpy as np
-import matplotlib.pyplot as plt
 from collections import defaultdict
-from datetime import datetime
+from pathlib import Path
+
+import h5py
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn.functional as F
 
-from uqct.vis.style import (
-    MODEL_NAMES,
-    ICML_TEXT_WIDTH,
-    ICML_COLUMN_WIDTH,
-    ICML_COLUMN_HEIGHT,
-)
-from uqct.eval.run import setup_experiment
 from uqct.ct import circular_mask
+from uqct.eval.run import setup_experiment
+from uqct.vis.style import (
+    ICML_COLUMN_WIDTH,
+    ICML_TEXT_WIDTH,
+)
 
 # Setup
 RESULTS_DIR = Path("results/uncertainty_distance")
@@ -80,7 +76,7 @@ def get_latest_runs(runs):
 
 cleaned_runs = get_latest_runs(all_runs)
 
-gt_cache = {}
+gt_cache: dict[tuple[str, int, int], torch.Tensor] = {}
 
 
 def get_gt_chunk(dataset, start, end):
@@ -102,7 +98,7 @@ def get_gt_chunk(dataset, start, end):
 
 
 # Store list of image means per (dataset, intensity) for SEM calculation
-dataset_intensity_stats = defaultdict(
+dataset_intensity_stats: dict[tuple[str, float], dict[str, list[float]]] = defaultdict(
     lambda: {"uncertainty_means": [], "coverage_means": []}
 )
 
@@ -114,14 +110,15 @@ for r in cleaned_runs:
 
     try:
         gt_batch = get_gt_chunk(ds, start, end)
-    except Exception as e:
-        print(f"Skipping GT load for {ds}: {e}")
+    except Exception as err:
+        print(f"Skipping GT load for {ds}: {err}")
         gt_batch = None
 
     with h5py.File(r["path"], "r") as f:
         # Calculate mean per image in the chunk
         # uncertainty shape: (N, H, W)
-        u = f["uncertainty"][:]
+        # uncertainty shape: (N, H, W)
+        u: np.ndarray = f["uncertainty"][:]  # type: ignore
         # Mean over pixels (axis 1, 2) -> (N,)
         image_means = u.mean(axis=(1, 2))
         dataset_intensity_stats[(ds, inten)]["uncertainty_means"].extend(
@@ -129,8 +126,8 @@ for r in cleaned_runs:
         )
 
         if gt_batch is not None and "maximizers" in f:
-            mins = torch.from_numpy(f["maximizers"][:, 0]).to(device)
-            maxs = torch.from_numpy(f["maximizers"][:, 1]).to(device)
+            mins: torch.Tensor = torch.from_numpy(f["maximizers"][:, 0]).to(device)  # type: ignore
+            maxs: torch.Tensor = torch.from_numpy(f["maximizers"][:, 1]).to(device)  # type: ignore
             n_imgs = min(len(gt_batch), len(mins))
             # Coverage per image
             covered = (gt_batch[:n_imgs] >= mins[:n_imgs]) & (
@@ -142,18 +139,18 @@ for r in cleaned_runs:
                 cov_per_img.tolist()
             )
 
-final_stats = {}
+final_stats: dict[tuple[str, float], dict[str, float | None]] = {}
 for k, v in dataset_intensity_stats.items():
     u_vals = np.array(v["uncertainty_means"])
     c_vals = np.array(v["coverage_means"])
 
     final_stats[k] = {
-        "uncertainty_mean": np.mean(u_vals),
-        "uncertainty_sem": (
+        "uncertainty_mean": float(np.mean(u_vals)),
+        "uncertainty_sem": float(
             np.std(u_vals, ddof=1) / np.sqrt(len(u_vals)) if len(u_vals) > 1 else 0.0
         ),
-        "coverage_mean": np.mean(c_vals) if len(c_vals) > 0 else None,
-        "coverage_sem": (
+        "coverage_mean": float(np.mean(c_vals)) if len(c_vals) > 0 else None,
+        "coverage_sem": float(
             np.std(c_vals, ddof=1) / np.sqrt(len(c_vals)) if len(c_vals) > 1 else 0.0
         ),
     }
@@ -178,13 +175,13 @@ for i, ds in enumerate(DATASETS):
 
     xy = sorted(zip(intensities, means, sems))
     if xy:
-        x, y, e = zip(*xy)
-        x = np.array(x)
-        y = np.array(y)
-        e = np.array(e)
+        x_tup, y_tup, e_tup = zip(*xy)
+        x_arr = np.array(x_tup)
+        y_arr = np.array(y_tup)
+        e_arr = np.array(e_tup)
 
-        ax.plot(x, y, marker="x", label=f"{ds.capitalize()}")
-        ax.fill_between(x, y - e, y + e, alpha=0.3)
+        ax.plot(x_arr, y_arr, marker="x", label=f"{ds.capitalize()}")
+        ax.fill_between(x_arr, y_arr - e_arr, y_arr + e_arr, alpha=0.3)
 
     ax.set_xscale("log")
     ax.set_title(ds.capitalize())
@@ -215,13 +212,13 @@ for i, ds in enumerate(DATASETS):
 
     xy = sorted(zip(intensities, means, sems))
     if xy:
-        x, y, e = zip(*xy)
-        x = np.array(x)
-        y = np.array(y)
-        e = np.array(e)
+        x_tup, y_tup, e_tup = zip(*xy)
+        x_arr = np.array(x_tup)
+        y_arr = np.array(y_tup)
+        e_arr = np.array(e_tup)
 
-        ax.plot(x, y, marker="x", label=f"{ds.capitalize()}")
-        ax.fill_between(x, y - e, y + e, alpha=0.3)
+        ax.plot(x_arr, y_arr, marker="x", label=f"{ds.capitalize()}")
+        ax.fill_between(x_arr, y_arr - e_arr, y_arr + e_arr, alpha=0.3)
 
     ax.set_xscale("log")
     ax.set_title(ds.capitalize())
@@ -259,7 +256,7 @@ for i, ds in enumerate(DATASETS):
         ax_gt.text(0.5, 0.5, "GT N/A", ha="center", va="center")
     ax_gt.axis("off")
     if i == 0:
-        ax_gt.set_title("GT", fontsize=8)
+        ax_gt.set_title("GT")
 
     ax_gt.text(
         -0.2,
@@ -269,7 +266,6 @@ for i, ds in enumerate(DATASETS):
         rotation=90,
         va="center",
         ha="right",
-        fontsize=10,
         fontweight="bold",
     )
 
@@ -286,14 +282,14 @@ for i, ds in enumerate(DATASETS):
                 break
         if run:
             with h5py.File(run["path"], "r") as f:
-                unc = f["uncertainty"][BATCH_INDEX]
+                unc: np.ndarray = f["uncertainty"][BATCH_INDEX]  # type: ignore
                 # Force vmin=0, vmax=1
                 im = ax.imshow(unc, cmap="inferno", vmin=0, vmax=1)
         ax.axis("off")
         if i == 0:
             # Use 10^k formatting
             exponent = int(np.log10(inten))
-            ax.set_title(f"$10^{{{exponent}}}$", fontsize=8)
+            ax.set_title(f"$10^{{{exponent}}}$")
 
 # Reduce margins manually if needed, constrained_layout handles mostly
 plt.savefig(PLOTS_DIR / "uncertainty_evolution.pdf")
@@ -325,7 +321,7 @@ for j, inten in enumerate(INTENSITIES):
 
     if run:
         with h5py.File(run["path"], "r") as f:
-            mms = f["maximizers"][BATCH_INDEX]
+            mms: np.ndarray = f["maximizers"][BATCH_INDEX]  # type: ignore
             min_img = mms[0]
             max_img = mms[1]
             upper_ax.imshow(max_img, cmap="gray", vmin=0, vmax=1)
@@ -343,7 +339,6 @@ for j, inten in enumerate(INTENSITIES):
             rotation=90,
             va="center",
             ha="right",
-            fontsize=9,
         )
         lower_ax.text(
             -0.1,
@@ -353,12 +348,11 @@ for j, inten in enumerate(INTENSITIES):
             rotation=90,
             va="center",
             ha="right",
-            fontsize=9,
         )
 
     # Label logic: 10^4, 10^5...
     exponent = int(np.log10(inten))
-    upper_ax.set_title(f"$10^{{{exponent}}}$", fontsize=8)
+    upper_ax.set_title(f"$10^{{{exponent}}}$")
 
 plt.savefig(PLOTS_DIR / f"{DS_TARGET}_bounds_evolution.pdf")
 print(f"Saved {DS_TARGET}_bounds_evolution plots")
@@ -382,17 +376,16 @@ for r in cleaned_runs:
 if run:
     with h5py.File(run["path"], "r") as f:
         if "replicates" in f:
-            reps = f["replicates"][BATCH_INDEX]
-            k = reps.shape[0]
-            breakpoint()
+            reps: np.ndarray = f["replicates"][BATCH_INDEX]  # type: ignore
+            n_reps: int = reps.shape[0]  # type: ignore
 
-            if k > 1:
-                axes = fig.subplots(1, k)
+            if n_reps > 1:
+                axes = fig.subplots(1, n_reps)
             else:
                 axes = np.array([fig.subplots(1, 1)])
             axes = axes.flatten()
 
-            for i in range(k):
+            for i in range(n_reps):
                 ax = axes[i]
                 ax.imshow(reps[i], cmap="gray", vmin=0, vmax=1)
                 ax.axis("off")

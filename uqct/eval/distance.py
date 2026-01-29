@@ -1,3 +1,4 @@
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -5,25 +6,20 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-import math
 import click
 import h5py
 import numpy as np
 import pandas as pd
 import torch
+
+# import torch.nn.functional as F
 from torch import optim
-import torch.nn.functional as F
 from tqdm.auto import tqdm
 
 from uqct.ct import Experiment, circular_mask, nll
-from uqct.eval.nll_constraints import (
-    compute_nll_trajectory,
-    compute_constraint_violation,
-)
-from uqct.eval.run import setup_experiment, CTSettings
+from uqct.eval.run import CTSettings, setup_experiment
 from uqct.logging import get_logger
 from uqct.utils import get_results_dir, load_runs
-from uqct.debugging import plot_img
 
 logger = get_logger(__name__)
 
@@ -230,7 +226,7 @@ def project_to_confidence_set(
 
             violations = nlls > confcoefs
 
-            if violations.any() == False:
+            if not violations.any():
                 break
             loss = nlls[violations].sum()
 
@@ -384,11 +380,11 @@ def pairwise_distance_maximization(
     Recycles distance_maximization by alternating the reference 'pred'.
     """
     device = pred.device
-    N, H, _ = pred.shape
+    n, h, _ = pred.shape
 
     # Initialize
     print(f"{pred.shape=}")
-    mask = circular_mask(H, device=device, dtype=torch.bool)
+    mask = circular_mask(h, device=device, dtype=torch.bool)
     theta1 = pred.clone()
     theta2 = torch.full_like(pred, 0.5)
 
@@ -398,7 +394,7 @@ def pairwise_distance_maximization(
         theta1[..., ~mask] = 0.0
         theta2[..., ~mask] = 0.0
 
-    best_dist = torch.zeros(N, device=device)
+    best_dist = torch.zeros(n, device=device)
     best_theta1 = theta1.clone()
     best_theta2 = theta2.clone()
 
@@ -432,7 +428,7 @@ def pairwise_distance_maximization(
         )
 
         with torch.no_grad():
-            dist = torch.norm((theta1 - theta2).view(N, -1), p=2, dim=-1)
+            dist = torch.norm((theta1 - theta2).view(n, -1), p=2, dim=-1)
             improved = dist > best_dist
 
             if improved.any():
@@ -481,7 +477,8 @@ def simultaneous_replicate_optimization(
     Returns (min_image, max_image, replicates) across all replicates.
     """
     device = pred.device
-    N, H, W = pred.shape
+    device = pred.device
+    n_dim, h, w = pred.shape
 
     # Initialize k replicates based on pred
     # shape: (N * k, H, W)
@@ -495,7 +492,7 @@ def simultaneous_replicate_optimization(
     theta_replicates += torch.randn_like(theta_replicates) * 1e-3
     theta_replicates.clamp_(0, 1)
 
-    mask = circular_mask(H, device=device, dtype=torch.bool)  # (H, W)
+    mask = circular_mask(h, device=device, dtype=torch.bool)  # (H, W)
     if mask is not None:
         theta_replicates[..., ~mask] = 0.0
 
@@ -519,10 +516,10 @@ def simultaneous_replicate_optimization(
     proj_param.requires_grad_()
     proj_optimizer = optim.Adam([proj_param], lr=projection_lr)
 
-    best_spread = torch.zeros(N, device=device)
+    best_spread = torch.zeros(n_dim, device=device)
     # Store min and max images for the best spread
-    best_min_img = torch.full((N, H, W), 1.0, device=device)
-    best_max_img = torch.full((N, H, W), 0.0, device=device)
+    best_min_img = torch.full((n_dim, h, w), 1.0, device=device)
+    best_max_img = torch.full((n_dim, h, w), 0.0, device=device)
 
     patience_counter = 0
     best_spread_mean = 0
@@ -536,7 +533,7 @@ def simultaneous_replicate_optimization(
     for step in (pbar := tqdm(range(1, max_steps + 1), disable=not verbose)):
         # 1. Calculate Mean of replicates
         # Reshape to (N, k, H, W)
-        replicates_view = theta_replicates.view(N, k, H, W)
+        replicates_view = theta_replicates.view(n_dim, k, h, w)
         mean_replicate = replicates_view.mean(dim=1, keepdim=True)  # (N, 1, H, W)
 
         # 2. Calculate Directions
@@ -563,14 +560,14 @@ def simultaneous_replicate_optimization(
         grad[(grad < 0) & stop_min_mask.expand_as(grad)] = 0.0
 
         # 4. Normalize Gradient after masking
-        flat_grad = grad.view(N * k, -1)
+        flat_grad = grad.view(n_dim * k, -1)
         norm = flat_grad.norm(p=2, dim=-1)
         grad = flat_grad / (norm[:, None] + 1e-8)
-        grad = grad.view(N, k, H, W)
+        grad = grad.view(n_dim, k, h, w)
 
         # 5. Update
         # Reshape back to (N*k, H, W) for update
-        grad_flat = grad.view(N * k, H, W)
+        grad_flat = grad.view(n_dim * k, h, w)
         theta_proposed = theta_replicates + lr * grad_flat
 
         theta_proposed.data.clamp_(0, 1)
@@ -602,7 +599,7 @@ def simultaneous_replicate_optimization(
         # 6. Track Best Spread (using min/max distance)
         with torch.no_grad():
             # Current min and max images
-            rep_view = theta_replicates.view(N, k, H, W)
+            rep_view = theta_replicates.view(n_dim, k, h, w)
             curr_max = rep_view.amax(dim=1)  # (N, H, W)
             curr_min = rep_view.amin(dim=1)  # (N, H, W)
 
@@ -633,7 +630,7 @@ def simultaneous_replicate_optimization(
             }
         )
 
-    return best_min_img, best_max_img, theta_replicates.view(N, k, H, W)
+    return best_min_img, best_max_img, theta_replicates.view(n_dim, k, h, w)
 
 
 @click.command()
@@ -706,9 +703,9 @@ def main(
         seed,
         schedule_length,
     )
-    gt_lr = F.interpolate(
-        gt_hr.unsqueeze(0), gt_hr.shape[-1] // 2, mode="area"
-    ).squeeze(0)
+    # gt_lr = F.interpolate(
+    #     gt_hr.unsqueeze(0), gt_hr.shape[-1] // 2, mode="area"
+    # ).squeeze(0)
     assert schedule is not None
 
     batch_uncertainties = []
@@ -722,9 +719,9 @@ def main(
     )  # (B, S_full)
     log_inv_delta = math.log(1.0 / 0.05)
     confcoefs = nll_pred_full.sum(-1) + log_inv_delta
-    B, r = experiment.counts.shape[0], experiment.counts.shape[-1]
+    b_size, r_dim = experiment.counts.shape[0], experiment.counts.shape[-1]
 
-    p_batch = torch.full((B, r, r), 0.5, device=device)
+    p_batch = torch.full((b_size, r_dim, r_dim), 0.5, device=device)
     batch_replicates = []
 
     if strategy == "pairwise":
@@ -740,17 +737,19 @@ def main(
         check_confidence_set_violation(best_theta_0, experiment, schedule, confcoefs)
         check_confidence_set_violation(best_theta_1, experiment, schedule, confcoefs)
     elif strategy == "simultaneous":
-        best_theta_0, best_theta_1, replicates_out = (
-            simultaneous_replicate_optimization(
-                p_batch,
-                confcoefs,
-                experiment,
-                schedule,
-                k=replicates,
-                lr=lr,
-                patience=patience,
-                max_steps=max_steps,
-            )
+        (
+            best_theta_0,
+            best_theta_1,
+            replicates_out,
+        ) = simultaneous_replicate_optimization(
+            p_batch,
+            confcoefs,
+            experiment,
+            schedule,
+            k=replicates,
+            lr=lr,
+            patience=patience,
+            max_steps=max_steps,
         )
         batch_replicates.append(replicates_out.detach().cpu().numpy())
     else:

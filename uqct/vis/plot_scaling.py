@@ -1,25 +1,23 @@
 import math
 from pathlib import Path
-from typing import Optional
 
 import click
-import pandas as pd
-import numpy as np
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
-from uqct.utils import get_results_dir, load_runs
+from uqct.eval.run import get_default_angle_schedule
 from uqct.logging import get_logger
+from uqct.utils import get_results_dir, load_runs
 from uqct.vis.style import (
-    ICML_COLUMN_HEIGHT,
     ICML_COLUMN_WIDTH,
+    ICML_TEXT_WIDTH,
+    MODEL_NAMES,
     MODEL_ORDER,
     get_style,
-    MODEL_NAMES,
 )
-from uqct.eval.run import get_default_angle_schedule
-import matplotlib.colors as mcolors
-from matplotlib.lines import Line2D
 
 plt.rcParams.update(
     {
@@ -51,8 +49,8 @@ def process_metrics(
         nll_gt = row.get("nll_gt")
 
         rate = np.nan
-        if isinstance(nll_pred, (list, np.ndarray)) and isinstance(
-            nll_gt, (list, np.ndarray)
+        if isinstance(nll_pred, list | np.ndarray) and isinstance(
+            nll_gt, list | np.ndarray
         ):
             if len(nll_pred) > 0:
                 nll_p = np.array(nll_pred)
@@ -68,8 +66,8 @@ def process_metrics(
 
         # Helper to compute scalar from trajectory
         def compute_scalar(val, mode, row_data):
-            if not (isinstance(val, (list, np.ndarray)) and len(val) > 0):
-                return float(val) if isinstance(val, (int, float)) else np.nan
+            if not (isinstance(val, list | np.ndarray) and len(val) > 0):
+                return float(val) if isinstance(val, int | float) else np.nan
 
             if mode == "last":
                 return float(val[-1])
@@ -83,7 +81,7 @@ def process_metrics(
                 # Check for angle_schedule column
                 angle_schedule = None
                 val_sch = row_data.get("angle_schedule")
-                if isinstance(val_sch, (list, np.ndarray)) and len(val_sch) > 0:
+                if isinstance(val_sch, list | np.ndarray) and len(val_sch) > 0:
                     angle_schedule = list(val_sch)
                 elif "angle_schedule" not in row_data:
                     angle_schedule = get_default_angle_schedule()
@@ -232,7 +230,7 @@ def plot_scaling_metric(stats_df: pd.DataFrame, metric: str, output_path: Path):
     if metric == "psnr":
         pretty_name = "PSNR (dB)"
     if metric == "rate":
-        pretty_name = r"Crossover Rate (\%)"
+        pretty_name = r"Cross. Rate (\%)"
     if metric == "nll":
         pretty_name = "NLL"
     if metric == "nll_sum":
@@ -293,8 +291,8 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
         nll_pred = row.get("nll_pred")
         nll_gt = row.get("nll_gt")
 
-        if isinstance(nll_pred, (list, np.ndarray)) and isinstance(
-            nll_gt, (list, np.ndarray)
+        if isinstance(nll_pred, list | np.ndarray) and isinstance(
+            nll_gt, list | np.ndarray
         ):
             if len(nll_pred) > 0:
                 nll_p = np.array(nll_pred)
@@ -327,7 +325,7 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
 
     # Deltas to verify
     # Log space from 1e-4 to 1.0 (since delta is probability)
-    deltas = np.logspace(-3, 0, 100)
+    deltas = np.linspace(0, 1.0, 20)
     log_inv_deltas = np.log(1.0 / deltas)
 
     datasets_order = ["lamino", "composite", "lung"]
@@ -348,7 +346,7 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
             fig, axes = plt.subplots(
                 3,
                 1,
-                figsize=(ICML_COLUMN_WIDTH, 4.2),
+                figsize=(ICML_COLUMN_WIDTH, 3.5),  # Reduced height (was 4.2)
                 sharey=True,
                 sharex=True,
                 constrained_layout=False,  # Use tight_layout manually given rect arg
@@ -412,12 +410,12 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
                         deltas,
                         rates,
                         color=color,
+                        marker="x",
                         alpha=0.8,
                         linewidth=1.5,
                         label=label_str,
+                        markersize=4,
                     )
-
-                    ax.plot(deltas, rates, color=color, alpha=0.8, linewidth=1.5)
 
                     # Plot Error Band
                     ax.fill_between(
@@ -434,8 +432,18 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
                 if col_idx == 2:
                     ax.set_xlabel(r"Error Level $\delta$")
 
-                ax.set_title(f"{ds_name.title()} Dataset")
-                ax.set_ylabel("Empirical Rate")
+                # ax.set_title(f"{ds_name.title()} Dataset")
+                ax.text(
+                    1.02,
+                    0.5,
+                    f"{ds_name.title()}",
+                    transform=ax.transAxes,
+                    rotation=-90,
+                    va="center",
+                    #         ha="left",
+                    fontsize=9,
+                )
+                ax.set_ylabel("Cross. Rate")
                 ax.grid(True, which="major", alpha=0.3)
 
             if not has_data:
@@ -447,23 +455,24 @@ def plot_violation_rate_vs_delta(df: pd.DataFrame, output_dir: Path, range_suffi
             seen_labels = set()
 
             # Helper to deduplicate
-            def add_handle_label(h, l):
-                if l not in seen_labels and l is not None:
+            # Helper to deduplicate
+            def add_handle_label(h, lbl):
+                if lbl not in seen_labels and lbl is not None:
                     handles.append(h)
-                    labels.append(l)
-                    seen_labels.add(l)
+                    labels.append(lbl)
+                    seen_labels.add(lbl)
 
             for ax in axes:
                 if ax.lines:
                     h_list, l_list = ax.get_legend_handles_labels()
-                    for h, l in zip(h_list, l_list):
-                        add_handle_label(h, l)
+                    for h, lbl in zip(h_list, l_list):
+                        add_handle_label(h, lbl)
 
             # Sort handles/labels by intensity if possible?
             # They should be inserted in order of plotting (sorted intensity)
 
             # Layout
-            fig.tight_layout(rect=(0, 0.12, 1, 1))
+            fig.tight_layout(rect=(0, 0.14, 1, 1), h_pad=0.5)
 
             if handles:
                 fig.legend(
@@ -613,11 +622,11 @@ def save_tables(
     help="Filter total intensities to range [1e6, 1e9].",
 )
 def main(
-    runs_dir: Optional[Path],
-    consolidated_file: Optional[Path],
+    runs_dir: Path | None,
+    consolidated_file: Path | None,
     output_dir: Path,
-    dataset: Optional[str],
-    sparse: Optional[bool],
+    dataset: str | None,
+    sparse: bool | None,
     aggregation: str,
     job_ids: tuple[str],
     filter_intensities: bool,
@@ -704,50 +713,6 @@ def main(
     # --- 0. Violation Rate vs Delta Plots ---
     plot_violation_rate_vs_delta(df, output_dir, range_suffix)
 
-    # --- 1. Per-Dataset Plots ---
-    groups = metric_df.groupby(["dataset", "sparse"])
-
-    for (ds, sp), group_df in groups:
-        suffix = "sparse" if sp else "dense"
-        logger.info(f"Plotting for {ds} ({suffix})...")
-
-        # Output directory: plots/{ds}/scaling_{suffix}
-        target_dir = output_dir / ds / f"scaling_{suffix}"
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        # Loop metrics
-        for m in metrics_to_plot:
-            if m not in group_df.columns:
-                continue
-
-            # Stats
-            stats = (
-                group_df.groupby(["model", "intensity"])[m]
-                .agg(mean="mean", std="std", count="count")
-                .reset_index()
-            )
-            stats["sem"] = stats["std"] / np.sqrt(stats["count"])
-
-            # Filename: sparse_{m}_{aggregation}_{range_suffix}.pdf
-            # If metric is already specific (like nll_pred_last), drop aggregation suffix if it matches or is irrelevant
-            metric_agg_suffix = f"_{aggregation}"
-            if m in [
-                "nll_sum",
-                "nll_pred_last",
-                "nll_pred_last_mix",
-                "nll_gt_sum",
-                "snll_gt_nll_diff",
-                "snll_gt_nll_diff_mix",
-                "gt_nll_confcoef_diff",
-                "gt_nll_confcoef_diff_mix",
-                "gt_nll_confcoef_perc_diff",
-                "gt_nll_confcoef_perc_diff_mix",
-            ]:
-                metric_agg_suffix = ""
-
-            plot_path = target_dir / f"sparse_{m}{metric_agg_suffix}_{range_suffix}.pdf"
-            plot_scaling_metric(stats, m, plot_path)
-
     # --- 2. Global Plots (3 Columns: Lamino, Composite, Lung) ---
     logger.info("Generating Global Plots (Shared Layout)...")
 
@@ -765,7 +730,10 @@ def main(
         fig, axes = plt.subplots(
             3,
             1,
-            figsize=(ICML_COLUMN_WIDTH, ICML_COLUMN_HEIGHT),  # <--- WIDER and SHORTER
+            figsize=(
+                ICML_COLUMN_WIDTH,
+                3.5,
+            ),  # Reduced height (was ICML_COLUMN_HEIGHT ~4.2)
             sharey=True,
             sharex=True,  # <--- Critical: Hides inner x-labels to save space
         )
@@ -775,7 +743,7 @@ def main(
         if m == "psnr":
             pretty_name = "PSNR (dB)"
         if m == "rate":
-            pretty_name = r"Crossover Rate (\%)"
+            pretty_name = r"Cross. Rate (\%)"
         if m == "nll":
             pretty_name = "NLL"
         if m == "nll_sum":
@@ -899,7 +867,17 @@ def main(
             if row_idx == 2:
                 ax.set_xlabel("Total Intensity")
 
-            ax.set_title(f"{ds_name.title()} Dataset")
+            # ax.set_title(f"{ds_name.title()} Dataset")
+            ax.text(
+                1.02,
+                0.5,
+                f"{ds_name.title()}",
+                transform=ax.transAxes,
+                rotation=-90,
+                va="center",
+                #         ha="left",
+                fontsize=9,
+            )
             ax.grid(True, which="major", linestyle="--", alpha=0.3)
 
             if m in (
@@ -913,7 +891,10 @@ def main(
             ax.set_ylabel(pretty_name)
 
         handles, labels = axes[-1].get_legend_handles_labels()
-        fig.tight_layout(rect=(0, 0.08, 1, 1))
+        rect = (0, 0.085, 1, 1)
+        if m == "mean_mix_diff":
+            rect = (0, 0.035, 1, 1)
+        fig.tight_layout(rect=rect, h_pad=0.5)
 
         fig.legend(
             handles,
@@ -948,7 +929,148 @@ def main(
         plt.savefig(out_path, dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # --- 3. CSV Tables ---
+    # --- 3. Combined Mix Metrics Plot ---
+    metrics_rows = ["mean_mix_diff", "snll_gt_nll_diff_mix"]
+
+    # Check if metrics exist
+    has_metrics = True
+    for m in metrics_rows:
+        if m not in metric_df.columns:
+            has_metrics = False
+            break
+
+    if has_metrics:
+        datasets_order = ["lamino", "composite", "lung"]
+
+        # Iterate over Sparse/Dense
+        for sparse in [True, False]:
+            suffix = "sparse" if sparse else "dense"
+            subset_df = metric_df[metric_df["sparse"] == sparse]
+
+            if subset_df.empty:
+                continue
+
+            fig, axes = plt.subplots(
+                2, 3, figsize=(ICML_TEXT_WIDTH, 5), sharex=True, sharey="row"
+            )
+
+            # Row 1 Title handling: Dataset Titles
+            for c_idx, ds in enumerate(datasets_order):
+                axes[0, c_idx].set_title(ds.title())
+
+            # Row Labels
+            row_ylabels = [
+                r"$\beta_{t_{\text{final}}}^{\text{mean}} - \beta_{t_{\text{final}}}^{\text{mix}}$",
+                r"$\beta_{t_{\text{final}}} - L_{t_{\text{final}}}(\mathbf{x}^\ast)$",
+            ]
+
+            handles, labels = [], []
+            seen_labels = set()
+
+            for r_idx, metric in enumerate(metrics_rows):
+                axes[r_idx, 0].set_ylabel(row_ylabels[r_idx])
+
+                for c_idx, ds in enumerate(datasets_order):
+                    ax = axes[r_idx, c_idx]
+
+                    ds_group = subset_df[subset_df["dataset"] == ds]
+                    if ds_group.empty:
+                        continue
+
+                    # Aggregate stats for plotting (Mean/SEM over seeds/runs)
+                    # Group by model, intensity
+                    stats = (
+                        ds_group.groupby(["model", "intensity"])[metric]
+                        .agg(mean="mean", std="std", count="count")
+                        .reset_index()
+                    )
+                    stats["sem"] = stats["std"] / np.sqrt(stats["count"])
+
+                    available_models = set(stats["model"].unique())
+                    models = [m for m in MODEL_ORDER if m in available_models]
+                    for m in sorted(available_models):
+                        if m not in models:
+                            models.append(m)
+
+                    for model in models:
+                        # Filter for relevant models only for these metrics?
+                        # mean_mix usually only for ensembles/diffusion?
+                        # plot_scaling_metric had a filter:
+                        # if metric in ("mean_mix_perc_diff", "mean_mix_diff") and model not in ("unet_ensemble", "diffusion") -> continue
+                        if metric == "mean_mix_diff" and model not in (
+                            "unet_ensemble",
+                            "diffusion",
+                        ):
+                            continue
+
+                        sub = stats[stats["model"] == model].sort_values("intensity")
+                        if sub.empty:
+                            continue
+
+                        style = get_style(model)
+                        color = style["color"]
+                        label = style["label"]
+
+                        if label == "Diffusion" or label == "U-Net Ens.":
+                            label = f"{label} (Mix.)"
+
+                        line = ax.plot(
+                            sub["intensity"],
+                            sub["mean"],
+                            label=label,
+                            marker="x",
+                            color=color,
+                            alpha=0.9,
+                        )
+
+                        ax.fill_between(
+                            sub["intensity"],
+                            sub["mean"] - sub["sem"].fillna(0),
+                            sub["mean"] + sub["sem"].fillna(0),
+                            color=color,
+                            alpha=0.2,
+                        )
+
+                        # Collect legend handles
+                        if label not in seen_labels:
+                            handles.extend(line)
+                            labels.append(label)
+                            seen_labels.add(label)
+
+                # Scales
+                for ax in axes[r_idx, :]:
+                    ax.set_xscale("log")
+                    ax.grid(True, which="major", ls="-", alpha=0.4)
+
+                if r_idx == 0:
+                    for ax in axes[r_idx, :]:
+                        ax.set_yscale("log")  # mean_mix_diff log scale
+
+            # Shared Footer
+            for ax in axes[-1, :]:
+                ax.set_xlabel("Total Intensity")
+
+            # Legend
+            if handles:
+                fig.legend(
+                    handles,
+                    labels,
+                    loc="lower center",
+                    bbox_to_anchor=(0.5, -0.05),  # Slightly below
+                    ncol=len(labels),
+                    frameon=False,
+                )
+
+            target_dir = output_dir / "global" / "scaling"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            out_path = target_dir / f"combined_mix_metrics_{suffix}_{range_suffix}.pdf"
+
+            plt.tight_layout(rect=(0, 0.035, 1, 1))  # Space for legend
+            plt.savefig(out_path, dpi=300, bbox_inches="tight")
+            plt.close(fig)
+            logger.info(f"Saved {out_path}")
+
+    # --- 4. CSV Tables ---
     logger.info("Generating CSV Tables...")
 
     # Per Dataset Tables

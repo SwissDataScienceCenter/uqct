@@ -1,5 +1,5 @@
-import torch
 import scipy.stats
+import torch
 
 from uqct.ct import circular_mask
 
@@ -134,7 +134,7 @@ def student_t_bonferroni_ci(
 def student_t_ci(
     samples: torch.Tensor, delta: float = 0.05, bdim: int = 0
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
+    r"""
     Parametric Student's t-interval for unknown population standard deviation.
 
     For a sample vector x \in R^n (along dim `bdim`), this computes:

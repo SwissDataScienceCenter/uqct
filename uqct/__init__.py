@@ -1,8 +1,7 @@
-import os
-import glob
 import ctypes
+import glob
+import os
 import sys
-
 from logging import basicConfig, getLogger
 
 basicConfig(level="INFO")

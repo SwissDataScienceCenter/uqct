@@ -7,8 +7,9 @@ plt.rcParams.update(
         "font.serif": ["Times"],  # Times New Roman usually matches body
         "font.size": 9,  # ICML caption size is usually 9pt
         "axes.labelsize": 9,
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
+        "axes.titlesize": 9,
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
         "legend.fontsize": 8,
         "figure.titlesize": 10,
     }

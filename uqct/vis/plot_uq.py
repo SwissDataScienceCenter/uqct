@@ -1,11 +1,9 @@
+import json
 from collections import defaultdict
+from collections.abc import Callable
 from glob import glob
 from pathlib import Path
-from typing import Callable
-from uqct.debugging import plot_img
-from tqdm.auto import tqdm
 
-import json
 import click
 import h5py
 import matplotlib.pyplot as plt
@@ -13,6 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from tqdm.auto import tqdm
 
 from uqct.uq import (
     basic_ci,
@@ -23,15 +22,20 @@ from uqct.uq import (
     percentile_ci,
     simultaneous_ci,
     sparsification_error,
-    studentized_ci,
-    student_t_ci,
     student_t_bonferroni_ci,
+    student_t_ci,
+    studentized_ci,
 )
-from uqct.vis.style import ICML_COLUMN_WIDTH, MODEL_NAMES, get_model_colors
+from uqct.vis.style import (
+    ICML_COLUMN_WIDTH,
+    ICML_TEXT_WIDTH,
+    MODEL_NAMES,
+    get_model_colors,
+)
 
 # Configuration matching the user's setup
 TOTAL_INTENSITIES = [1e4, 1e5, 1e6, 1e7, 1e8, 1e9]
-DATASETS = ["lung", "composite", "lamino"]
+DATASETS = ["lamino", "composite", "lung"]
 METHODS = ["fbp", "unet", "unet_ensemble", "boundary", "distance_maximization"]
 
 
@@ -52,9 +56,11 @@ def load_h5_data(file_path: str, key: str = "preds") -> np.ndarray:
 
 def get_ground_truth(dataset: str, image_range: tuple[int, int]) -> torch.Tensor:
     """Loads ground truth images for a given dataset and range."""
-    from uqct.datasets.utils import get_dataset
+    from typing import cast
 
-    _, test_set = get_dataset(dataset, True)
+    from uqct.datasets.utils import DatasetName, get_dataset
+
+    _, test_set = get_dataset(cast(DatasetName, dataset), True)
 
     start, end = image_range
     indices = range(start, end)
@@ -107,7 +113,7 @@ def compute_stats_from_samples(
 
         for name, func in ci_methods.items():
             kwargs = {"bdim": 0, "delta": 0.05}
-            lower, upper = func(item_samples, **kwargs)
+            lower, upper = func(item_samples, **kwargs)  # type: ignore
             lower = lower.clamp(0, 1)
             upper = upper.clamp(0, 1)
 
@@ -115,7 +121,8 @@ def compute_stats_from_samples(
             in_bounds = (item_target >= lower) & (item_target <= upper)
             sim_cov = in_bounds.all().float().item()
             ind_cov = in_bounds.float().mean().item()
-            width = (upper - lower).mean().item()
+            width_map = (upper - lower).abs().clamp(0, 1)
+            width = width_map.mean().item()
 
             metrics[f"{name}_sim_cov"].append(sim_cov)
             metrics[f"{name}_ind_cov"].append(ind_cov)
@@ -123,7 +130,6 @@ def compute_stats_from_samples(
 
             # Use Gaussian Width for Correlation/R2 as standard
             if name == "gaussian":
-                width_map = upper - lower
                 # Check for NaNs or Infs
                 if (
                     torch.isfinite(width_map).all()
@@ -274,7 +280,7 @@ def calculate_metrics(
             # Compute per-image statistics (N,)
             sim_cov = in_ci.flatten(1).all(1).float()
             ind_cov = in_ci.float().mean((1, 2))
-            width = (ub - lb).abs().mean((1, 2))
+            width = (ub - lb).abs().clamp(0, 1).mean((1, 2))
 
             all_metrics["distance_maximization_sim_cov"].extend(sim_cov.cpu().tolist())
             all_metrics["distance_maximization_ind_cov"].extend(ind_cov.cpu().tolist())
@@ -300,7 +306,7 @@ def calculate_metrics(
 
         files_to_process = []
 
-        processed_ranges = set()
+        processed_ranges: set[tuple[int, int]] = set()
 
         for f in boot_files:
             parts = Path(f).name.split(":")
@@ -387,7 +393,7 @@ def main(n_bootstraps):
     files_found = False
 
     if Path("results/uq_comparison.json").exists():
-        results = json.load(open("results/uq_comparison.json", "r"))
+        results = json.load(open("results/uq_comparison.json"))
         files_found = True
     else:
         for dataset in tqdm(DATASETS, desc="Datasets", leave=True):
@@ -570,18 +576,18 @@ def main(n_bootstraps):
         handles, labels = [], []
         seen_labels = set()
 
-        def add_handle_label(h, l):
-            if l not in seen_labels and l is not None:
+        def add_handle_label(h, lbl):
+            if lbl not in seen_labels and lbl is not None:
                 handles.append(h)
-                labels.append(l)
-                seen_labels.add(l)
+                labels.append(lbl)
+                seen_labels.add(lbl)
 
-        # Gather from all subplots to be safe
+        # 1) Loop over axes to collect handles/labels
         for ax in axes:
             if ax.lines:
                 h_list, l_list = ax.get_legend_handles_labels()
-                for h, l in zip(h_list, l_list):
-                    add_handle_label(h, l)
+                for h, lbl in zip(h_list, l_list):
+                    add_handle_label(h, lbl)
 
         fig.tight_layout(rect=(0, 0.09, 1, 1))
 
@@ -597,6 +603,158 @@ def main(n_bootstraps):
 
         # Save
         out_path = out_dir / f"sparse_{metric_key}.pdf"
+        plt.savefig(out_path)
+        print(f"Saved plot to {out_path}")
+        plt.close(fig)
+
+    # --- Combined Chosen Metrics Plot ---
+    # Rows: Chosen Coverage, Chosen Width
+    # Cols: Lamino, Composite, Lung
+    combined_metrics = ["chosen_ind_cov", "chosen_width"]
+    combined_titles = [r"Coverage (\%)", "CI Width"]
+
+    # Check if we have data for these
+    has_combined_data = False
+    for d in DATASETS:
+        for m in METHODS:
+            if results[d][m].get("chosen_ind_cov"):
+                has_combined_data = True
+                break
+        if has_combined_data:
+            break
+
+    if has_combined_data:
+        # Compressed height: about half -> 3.0 inches (vs 5 or 6)
+        # Standard column width * 2 approx text width.
+        fig, axes = plt.subplots(
+            2,
+            3,
+            figsize=(ICML_TEXT_WIDTH, 2.5),  # Compact height
+            sharex=True,
+            sharey="row",
+        )
+
+        # Row 1 Titles: Datasets
+        for c_idx, ds in enumerate(DATASETS):
+            axes[0, c_idx].set_title(ds.title())
+
+        handles, labels = [], []
+        seen_labels = set()
+
+        def add_handle_label(h, lbl):
+            if lbl not in seen_labels and lbl is not None:
+                handles.append(h)
+                labels.append(lbl)
+                seen_labels.add(lbl)
+
+        for r_idx, metric_key in enumerate(combined_metrics):
+            axes[r_idx, 0].set_ylabel(combined_titles[r_idx])
+
+            for c_idx, dataset in enumerate(DATASETS):
+                ax = axes[r_idx, c_idx]
+
+                # Plot all methods
+                for method in METHODS:
+                    data = results[dataset][method]
+                    if not data or not data["intensity"]:
+                        continue
+
+                    # Retrieve data logic (similar to above but specific to chosen metrics)
+                    # For distance maximization, we need explicit mapping
+                    if method == "distance_maximization":
+                        if metric_key == "chosen_ind_cov":
+                            vals = np.array(data.get("chosen_ind_cov", []))
+                            std_vals = np.array(data.get("chosen_ind_cov_std", []))
+                        elif metric_key == "chosen_width":
+                            vals = np.array(data.get("chosen_width", []))
+                            std_vals = np.array(data.get("chosen_width_std", []))
+                        else:
+                            continue
+                    else:
+                        # Standard methods
+                        vals = np.array(data.get(metric_key, []))
+                        std_vals = np.array(data.get(f"{metric_key}_std", []))
+
+                    if len(vals) == 0:
+                        continue
+
+                    ints = np.array(data["intensity"])
+                    if len(ints) != len(vals):
+                        continue
+
+                    sort_idx = np.argsort(ints)
+
+                    model_label = MODEL_NAMES.get(method, method)
+                    if model_label in ("FBP", "U-Net"):
+                        label = f"{model_label} Bootstr."
+                    else:
+                        label = f"{model_label}"
+
+                    # Remove "Mix." or similar if it appears (though plot_uq doesn't usually add it)
+                    # User request: "don't write 'Mix' there"
+                    # Just in case, explicit check?
+                    # The labels here are "FBP Bootstr.", "Diffusion", "Worst-Case", etc.
+                    # "Mix" came from plot_scaling.py.
+
+                    color = get_model_colors().get(
+                        method if method != "boundary" else "diffusion"
+                    )
+
+                    if "_cov" in metric_key:
+                        vals_plot = vals[sort_idx] * 100
+                        std_plot = std_vals[sort_idx] * 100
+                    else:
+                        vals_plot = vals[sort_idx]
+                        std_plot = std_vals[sort_idx]
+
+                    line = ax.plot(
+                        ints[sort_idx],
+                        vals_plot,
+                        label=label,
+                        color=color,
+                        marker="x",
+                        markersize=4,
+                        linewidth=1.0,
+                    )
+
+                    ax.fill_between(
+                        ints[sort_idx],
+                        vals_plot - std_plot,
+                        vals_plot + std_plot,
+                        color=color,
+                        alpha=0.2,
+                    )
+
+                    # Collect handles (only need to do this once per method really)
+                    # But doing it per plot ensures we catch all visible methods
+                    # We'll filter duplicates with add_handle_label
+                    add_handle_label(line[0], label)
+
+                ax.set_xscale("log")
+                ax.grid(True, which="both", linestyle="--", alpha=0.3)
+
+        # Shared Footer
+        for ax in axes[-1, :]:
+            ax.set_xlabel("Total Intensity")
+
+        # Legend layout
+        # "Reduce space between legend and lower plot"
+        # Adjust rect or bbox
+        fig.tight_layout(rect=(0, 0.08, 1, 1))
+
+        if handles:
+            fig.legend(
+                handles,
+                labels,
+                loc="lower center",
+                bbox_to_anchor=(0.5, 0.0),
+                ncol=5,
+                frameon=False,
+                borderpad=0.2,
+                labelspacing=0.2,
+            )
+
+        out_path = out_dir / "sparse_combined_chosen_metrics.pdf"
         plt.savefig(out_path)
         print(f"Saved plot to {out_path}")
         plt.close(fig)

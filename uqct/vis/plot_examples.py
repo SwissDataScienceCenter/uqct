@@ -1,10 +1,11 @@
+from pathlib import Path
+
 import click
 import matplotlib.pyplot as plt
 import torch
-import numpy as np
-from pathlib import Path
+
 from uqct.datasets.utils import get_dataset
-from uqct.vis.style import ICML_COLUMN_WIDTH, MODEL_NAMES
+from uqct.vis.style import ICML_COLUMN_WIDTH
 
 DATASETS = ["lamino", "composite", "lung"]
 
@@ -64,7 +65,7 @@ def main(output_dir):
 
             # Titles on top row only
             if row_idx == 0:
-                ax.set_title(ds_name.title(), fontsize=9)
+                ax.set_title(ds_name.title())
 
     # Save
     out_path = output_dir / "dataset_examples.pdf"

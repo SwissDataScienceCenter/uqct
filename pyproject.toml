@@ -1,53 +1,71 @@
+[project]
+name = "uqct"
+version = "0.0.1"
+description = "Uncertainty Quantification for Computed Tomography"
+authors = [{ name = "Matteo Gätzner" }, { name = "Johannes Kirschner" }]
+requires-python = ">=3.12"
+dependencies = [
+  "scikit-image",
+  "h5py",
+  "xarray",
+  "nibabel",
+  "huggingface_hub",
+  "diffusers",
+  "tensorboard",
+  "wandb",
+  "lovely-tensors",
+  "opencv-python",
+  "astra-toolbox==2.4.0",
+  "torchmetrics>=1.8.2",
+  "gitpython>=3.1.45",
+  "einops>=0.8.2",
+  "onnxruntime>=1.23.2",
+  "tensorrt>=10.14.1.48.post1",
+  "pyarrow>=23.0.0",
+]
+
+[tool.uv]
+default-groups = ["base"]
+dependency-metadata = [
+  { name = "astra-toolbox", version = "2.4.0", requires-dist = [
+  ], requires-python = ">=3.6" },
+]
+
+[dependency-groups]
+base = [
+  "torch==2.9.0",
+  "torchvision",
+  "tqdm",
+  "numpy==2.3.3",
+  "pandas",
+  "scipy",
+  "matplotlib",
+  "jupyterlab",
+  "ipywidgets",
+  "notebook",
+]
+
+dev = [
+  "pdbpp>=0.12.0.post1",
+  "ruff>=0.14.4",
+  "mypy",
+  "pre-commit",
+  "types-setuptools",
+]
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[project]
-dependencies = [
-  "astra-toolbox==2.4.0",
-  "diffusers==0.33.1",
-  "einops==0.8.1",
-  "h5py==3.13.0",
-  "jupyterlab==4.4.1",
-  "lovely-tensors==0.1.18",
-  "matplotlib==3.10.1",
-  "nibabel==5.3.2",
-  "onnxruntime-gpu~=1.23.0",
-  "pandas==2.2.3",
-  "pillow==11.1.0",
-  "pyarrow==20.0.0",
-  "scikit-image==0.25.2",
-  "scikit-learn==1.7.2",
-  "scipy==1.15.2",
-  "seaborn==0.13.2",
-  "tensorboard==2.20.0",
-  "tensorrt~=10.9.0",
-  "torch==2.6.0",
-  "torchvision==0.21.0",
-  "tqdm==4.67.1",
-  "pdbpp>=0.11.7",
-  "torchmetrics>=1.8.2",
-]
-name = "uqct"
-version = "0.0.1"
-description = "Uncertainty Quantification for Computed Tomography"
-requires-python = ">=3.11, <3.12"
-
 [tool.setuptools]
 packages = ["uqct"]
 
-[tool.uv]
-override-dependencies = [
-  "astra-toolbox>=2.4.0",
-  "nvidia-cuda-runtime-cu12>=12.0",
-  "nvidia-cublas-cu12>=12.0",
-  "nvidia-cudnn-cu12>=9.0",
-  "nvidia-cufft-cu12>=11.0",
-  "nvidia-curand-cu12>=10.0",
-  "nvidia-cusolver-cu12>=11.0",
-  "nvidia-cusparse-cu12>=12.0",
-  "nvidia-cusparselt-cu12>=0.0",
-  "nvidia-nccl-cu12>=2.0",
-  "nvidia-nvjitlink-cu12>=12.0",
-  "nvidia-nvtx-cu12>=12.0",
-]
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I", "N", "UP"]
+ignore = ["N812", "E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true

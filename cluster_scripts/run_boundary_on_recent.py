@@ -1,3 +1,4 @@
+import os
 import re
 import shlex
 import subprocess
@@ -97,8 +98,6 @@ def check_coverage(runs: list[RunInfo]) -> None:
                 f"WARNING: Missing ranges for {dataset} I={intensity} seed={seed}: "
                 f"Starts {sorted(list(missing))}"
             )
-        # else:
-        # print(f"Coverage OK for {dataset} I={intensity} seed={seed}")
 
 
 def filter_by_slurm_id(runs: list[RunInfo], allowed_ids: list[str]) -> list[RunInfo]:
@@ -109,23 +108,13 @@ def filter_by_slurm_id(runs: list[RunInfo], allowed_ids: list[str]) -> list[RunI
     print(f"Filtering {len(runs)} runs by SLURM Job IDs: {allowed_ids}...")
     for r in runs:
         try:
-            # Read only metadata if possible, but reading parquet is safer
-            # 'slurm_job_id' should be in the columns
-            # We use fastparquet or pyarrow engine.
-            # Just read the file.
             df = pd.read_parquet(r.path)
-            # Check for column presence
             found_id = None
             if "slurm_job_id" in df.columns:
                 found_id = str(df["slurm_job_id"].iloc[0])
-
-            # The user might have it in a different column or format?
-            # Based on previous tasks, it should be 'slurm_job_id'.
-
             if found_id and found_id in allowed_ids:
                 kept.append(r)
         except Exception:
-            # print(f"Error checking SLURM ID for {r.path}: {e}")
             pass
     return kept
 
@@ -170,7 +159,6 @@ def main(
         print(f"Found {len(all_runs)} total parquet files.")
 
     # Filter
-    # method=diffusion, seed=0, 1e6 <= intensity <= 1e9
     filtered_runs = [
         r
         for r in all_runs

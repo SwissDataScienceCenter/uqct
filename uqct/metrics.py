@@ -1,5 +1,5 @@
-from torchmetrics.image import StructuralSimilarityIndexMeasure
 import torch
+from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 from uqct.ct import circular_mask
 
@@ -140,7 +140,7 @@ if __name__ == "__main__":
             print(f"Analyzing metric: {k}")
             print(f"Shape: {v.shape}")
             print(f"Expected shape: {shape[:-2]}")
-            assert v.shape == shape[:-2], (
-                f"Shape mismatch for {k}: {v.shape} != {shape[:-2]}"
-            )
+            assert (
+                v.shape == shape[:-2]
+            ), f"Shape mismatch for {k}: {v.shape} != {shape[:-2]}"
         print("\n")

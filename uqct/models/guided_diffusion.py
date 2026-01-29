@@ -1,9 +1,9 @@
-import click
+from typing import Literal
 
-from typing import Optional, Tuple, Union, Literal
+import click
+import torch
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler, DDPMSchedulerOutput
 from diffusers.utils.torch_utils import randn_tensor
-import torch
 from tqdm.auto import tqdm
 
 
@@ -79,7 +79,7 @@ class GuidedDiffusionPipeline:
     def __call__(
         self,
         batch_size: int = 1,
-        generator: Optional[torch.Generator] = None,
+        generator: torch.Generator | None = None,
         num_inference_steps: int = 1000,
         guidance=None,
         verbose=False,
@@ -130,7 +130,7 @@ class GuidedDiffusionPipeline:
             # 2. compute previous image: x_t -> x_t-1
             image = self.step(
                 model_output, t, image, guidance=guidance, generator=generator
-            ).prev_sample
+            ).prev_sample  # type: ignore
 
         image = (image / 2 + 0.5).clamp(0, 1)
         return image
@@ -140,10 +140,10 @@ class GuidedDiffusionPipeline:
         model_output: torch.Tensor,
         timestep: int,
         sample: torch.Tensor,
-        guidance: Optional[GradientGuidance] = None,
+        guidance: GradientGuidance | None = None,
         generator=None,
         return_dict: bool = True,
-    ) -> Union[DDPMSchedulerOutput, Tuple]:
+    ) -> DDPMSchedulerOutput | tuple:
         """
         This is the DDPM reference implementation of the reverse diffusion step, with an additional guidance step.
 
@@ -171,7 +171,10 @@ class GuidedDiffusionPipeline:
 
         if model_output.shape[1] == sample.shape[
             1
-        ] * 2 and self.scheduler.variance_type in ["learned", "learned_range"]:
+        ] * 2 and self.scheduler.variance_type in [
+            "learned",
+            "learned_range",
+        ]:
             model_output, predicted_variance = torch.split(
                 model_output, sample.shape[1], dim=1
             )
@@ -208,7 +211,7 @@ class GuidedDiffusionPipeline:
 
         # 3. Clip or threshold "predicted x_0"
         if self.scheduler.config.thresholding:
-            pred_original_sample = self._threshold_sample(pred_original_sample)
+            pred_original_sample = self._threshold_sample(pred_original_sample)  # type: ignore
         elif self.scheduler.config.clip_sample:
             pred_original_sample = pred_original_sample.clamp(
                 -self.scheduler.config.clip_sample_range,
@@ -283,10 +286,10 @@ class GuidedDiffusionPipeline:
 def main(dataset: Literal["lung", "composite", "lamino"]):
     import numpy as np
 
-    from uqct.ct import sample_observations, nll
+    from uqct.ct import nll, sample_observations
     from uqct.datasets.utils import get_dataset
-    from uqct.models.diffusion import load_unet, find_ckpt
     from uqct.debugging import plot_img
+    from uqct.models.diffusion import find_ckpt, load_unet
 
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -304,13 +307,13 @@ def main(dataset: Literal["lung", "composite", "lamino"]):
     n_angles = 180
     angles = torch.from_numpy(np.linspace(0, 180, n_angles, endpoint=False)).to(device)
     total_intensity = 1e5
-    n_detectors_hr = gt.shape[-1]
+    # n_detectors_hr = gt.shape[-1]
     intensities = torch.tensor(total_intensity, device=device)
 
     counts = sample_observations(gt, intensities, angles)
     intensities_lr = intensities * 2
 
-    def guidance_loss(counts, intensities, angles, l=5.0, circle=True):
+    def guidance_loss(counts, intensities, angles, length_scale=5.0, circle=True):
         """
         Define a loss function for the diffusion model.
         This can be used to guide the diffusion process.
@@ -336,14 +339,14 @@ def main(dataset: Literal["lung", "composite", "lamino"]):
             image = ((image + 1.0) / 2).clip(0, 1)
             if circle:
                 image = image * circle_mask
-            loss = nll(image, counts, intensities, angles, l=l)
+            loss = nll(image, counts, intensities, angles, length_scale=length_scale)
             return loss.sum()
 
         return loss_fn
 
-    ckpt_path = find_ckpt(dataset)
+    ckpt_path = find_ckpt(dataset, cond=False)
     print(f"Loading unet from {ckpt_path}")
-    unet = load_unet(ckpt_path)
+    unet = load_unet(ckpt_path, cond=False)
 
     scheduler = DDPMScheduler(num_train_timesteps=1000, beta_schedule="linear")
     guided_diffusion = GuidedDiffusionPipeline(unet, scheduler)

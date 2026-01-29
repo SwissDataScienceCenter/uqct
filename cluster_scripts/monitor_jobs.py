@@ -66,9 +66,13 @@ class JobMonitor:
     def __init__(self, job_id: str, log_dir: str):
         self.job_id = job_id
         self.log_dir = log_dir
-        self.cache = {}  # index -> (status, msg, timestamp)
+        self.cache: dict[
+            int, tuple[str, str | None, float | None]
+        ] = {}  # index -> (status, msg, timestamp)
         # index -> {'out': int_offset, 'err': int_offset}
-        self.file_offsets = defaultdict(lambda: {"out": 0, "err": 0})
+        self.file_offsets: dict[int, dict[str, int]] = defaultdict(
+            lambda: {"out": 0, "err": 0}
+        )
 
         # Compile regex once for performance
         # Matches: ..._jobID_INDEX.out or .err
@@ -148,9 +152,9 @@ class JobMonitor:
         out_chunk = ""
         if out_file:
             try:
-                with open(out_file, "r") as f:
+                with open(out_file) as f:
                     out_chunk = f.read()
-                finished_str = f"FINISHED"
+                finished_str = "FINISHED"
                 if finished_str in out_chunk:
                     return "Success", None, timestamp
             except Exception as _:
@@ -160,7 +164,7 @@ class JobMonitor:
         error_msg = None
         if err_file:
             try:
-                with open(err_file, "r") as f:
+                with open(err_file) as f:
                     for line in f:
                         if (
                             "Using an engine plan file across different models of devices"
@@ -334,6 +338,7 @@ def main():
     try:
         import tomllib
         from collections import defaultdict
+
         from uqct.eval.cli import build_grid
         from uqct.utils import get_root_dir
 
@@ -498,7 +503,7 @@ def main():
                 print(
                     f"\n{RED}Saved {len(failed_indices)} failed job indices to {failed_file}{RESET}"
                 )
-            except IOError as e:
+            except OSError as e:
                 print(f"\n{RED}Error writing failed jobs file: {e}{RESET}")
                 return
 

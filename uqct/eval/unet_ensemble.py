@@ -6,7 +6,7 @@ import torch
 from uqct.ct import Experiment
 from uqct.eval.options import common_options
 from uqct.eval.run import run_evaluation
-from uqct.models.unet import FBPUNetEnsemble, DatasetName
+from uqct.models.unet import DatasetName, FBPUNetEnsemble
 
 
 def run_unet_ensemble(

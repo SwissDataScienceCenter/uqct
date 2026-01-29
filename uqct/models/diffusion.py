@@ -1,9 +1,10 @@
 import os
 import warnings
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Literal
-import einops
+from typing import Literal
 
+import einops
 import numpy as np
 import onnxruntime as ort
 import tensorrt
@@ -43,9 +44,9 @@ class Diffusion:
         verbose: bool = False,
         anneal_lr: bool = True,
     ):
-        assert not onnx or cond, (
-            "ONNX-based inference is not supported for unconditional models."
-        )
+        assert (
+            not onnx or cond
+        ), "ONNX-based inference is not supported for unconditional models."
 
         self.verbose = verbose
         self.device = (
@@ -590,9 +591,9 @@ def get_guidance_loss_fn(
             return nlls.sum()
 
     else:
-        assert schedule is None, (
-            "Schedules are currently unsupported for the dense setting."
-        )
+        assert (
+            schedule is None
+        ), "Schedules are currently unsupported for the dense setting."
         counts_csum = experiment.counts.cumsum(-3).unsqueeze(0)
         intensities_csum = experiment.intensities.cumsum(-3).unsqueeze(0)
 

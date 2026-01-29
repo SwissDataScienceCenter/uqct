@@ -1,13 +1,14 @@
-import click
-import matplotlib.pyplot as plt
-import torch
-import numpy as np
-import h5py
 import glob
 from pathlib import Path
-from uqct.eval.run import setup_experiment
+
+import click
+import h5py
+import matplotlib.pyplot as plt
+import numpy as np
+
 from uqct.ct import sinogram_from_counts
-from uqct.vis.style import ICML_TEXT_WIDTH, MODEL_NAMES
+from uqct.eval.run import setup_experiment
+from uqct.vis.style import ICML_TEXT_WIDTH
 
 DATASETS = ["lamino", "composite", "lung"]
 TOTAL_INTENSITY = 1e7
@@ -204,7 +205,7 @@ def main(output_dir):
             ax.set_yticks([])
 
             if col_idx == 0:
-                ax.set_ylabel(dataset.title(), fontsize=11)
+                ax.set_ylabel(dataset.title())
             if row_idx == 0:
                 ax.set_title(labels[col_idx])
 

@@ -1,13 +1,13 @@
-from typing import Literal, Optional
+from typing import Literal
 
 import click
 import einops
+import torch
 
 from uqct.ct import Experiment
-import torch
+from uqct.eval.options import common_options
 from uqct.eval.run import run_evaluation
 from uqct.models.diffusion import Diffusion, get_guidance_loss_fn
-from uqct.eval.options import common_options
 
 DatasetName = Literal["lung", "composite", "lamino"]
 
@@ -79,7 +79,7 @@ def run_diffusion(
     help="Whether to use a conditional diffusion model",
 )
 @click.option(
-    "--guidance-lr", default=None, type=Optional[float], help="Guidance learning rate"
+    "--guidance-lr", default=None, type=float | None, help="Guidance learning rate"
 )
 @click.option(
     "--gradient-steps",
