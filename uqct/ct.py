@@ -1,9 +1,9 @@
 import math
-from typing import Any, Callable, Literal
+from collections.abc import Callable
+from typing import Any, Literal
 
 import astra
 import numpy as np
-import numpy.typing as npt
 import torch
 
 
@@ -49,15 +49,15 @@ def anscombe_transform(x):
     return torch.sqrt(x + 3 / 8)
 
 
-def poisson(input):
+def poisson(input, generator=None):
     """
     Sample from a Poisson distribution with the given input.
     If the input is too large, it will sample on CPU to avoid overflow issues.
     """
     if torch.max(input) > 1e9 and input.device.type != "cpu":
         # https://github.com/pytorch/pytorch/issues/86782
-        return torch.poisson(input.cpu()).to(input.device)
-    return torch.poisson(input)
+        return torch.poisson(input.cpu(), generator=generator).to(input.device)
+    return torch.poisson(input, generator=generator)
 
 
 def nll(
@@ -65,7 +65,8 @@ def nll(
     counts: torch.Tensor,
     intensities: torch.Tensor,
     angles: torch.Tensor,
-    l: int = 5,
+    length_scale: float = 5.0,
+    radon_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Poisson negative log-likelihood.
 
@@ -74,19 +75,44 @@ def nll(
         counts (torch.Tensor): (..., n_angles, n_detectors)
         intensities (torch.Tensor): (..., n_angles, 1)
         angles (torch.Tensor): (n_angles)
-        l (int)
+        length_scale (float)
+        radon_fn (Callable): Optional cached radon function.
     Returns:
         torch.Tensor: (..., n_angles, side_length)
     """
-    assert images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1, (
-        f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
-    )
+    assert (
+        images.ndim >= 2 and counts.ndim >= 2 and angles.ndim == 1
+    ), f"angles ({angles.shape}) must be 1D and predictions ({images.shape}) and counts ({counts.shape}) must be at least two dimensional."
     intensities = intensities.clip(1e-9)
-    sino = radon(images, angles)
-    scale = l / images.shape[-1]
+    if radon_fn is not None:
+        sino = radon_fn(images, angles)
+    else:
+        sino = radon(images, angles)
+    scale = length_scale / images.shape[-1]
     log_lam = torch.log(intensities) - scale * sino
     nll = torch.exp(log_lam) - counts * log_lam + torch.lgamma(counts + 1)
     return nll
+
+
+def get_parallel_beam_op(
+    angles: torch.Tensor, im_size: int, n_slices: int
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """
+    Pre-creates an ASTRA parallel beam operator/layer for fixed geometry.
+    Useful for optimization loops where geometry doesn't change.
+
+    Args:
+        angles: (n_angles,)
+        im_size: image size (H, W common)
+        n_slices: batch size (number of slices flattened)
+
+    Returns:
+        Callable layer that takes (B, H, W) images and returns (B, n_angles, n_det)
+    """
+    proj_geom_3d, vol_geom_3d = get_astra_geometry_3d(angles, im_size, n_slices)
+    op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
+    parallel3d_layer = make_radon_layer(op3d)
+    return parallel3d_layer
 
 
 def nll_mixture(
@@ -94,7 +120,7 @@ def nll_mixture(
     counts: torch.Tensor,
     intensities: torch.Tensor,
     angles: torch.Tensor,
-    l: int = 5,
+    length_scale: float = 5.0,
 ) -> torch.Tensor:
     """
     Arguments:
@@ -102,7 +128,7 @@ def nll_mixture(
         counts (`torch.Tensor`): (..., n_angles, n_detectors)
         intensities (`torch.Tensor`): (..., n_angles, 1)
         angles (`torch.Tensor`): (n_angles,)
-        l: (`int`)
+        length_scale: (`int`)
     Returns:
         `torch.Tensor`: (...)
     """
@@ -111,7 +137,7 @@ def nll_mixture(
 
     # (..., n_pred, n_angles, side_length)
     nlls = -nll(
-        images, counts.unsqueeze(-3), intensities.unsqueeze(-3), angles, l
+        images, counts.unsqueeze(-3), intensities.unsqueeze(-3), angles, length_scale
     ).double()
     nlls = nlls.sum((-1, -2))  # (..., n_pred)
     nlls -= math.log(n_pred)
@@ -125,7 +151,8 @@ def nll_mixture_angle_schedule(
     intensities: torch.Tensor,
     angles: torch.Tensor,
     schedule: torch.Tensor,
-    l: int = 5,
+    reduce: bool = True,
+    length_scale: float = 5.0,
 ) -> torch.Tensor:
     r"""Compute nll only over angle-based partitions of observations.
     E.g. If schedule = [3, 7, 10] and n_angles = 20, then
@@ -133,16 +160,18 @@ def nll_mixture_angle_schedule(
     images[..., 1] for counts[..., 7:10],
     images[..., 2] for counts[..., 10:].
 
-    Arguments:
+    Arguments
         images (`torch.Tensor`): (..., s, n_preds, H, W)
         counts (`torch.Tensor`): (..., n_angles, n_detectors)
         intensities (`torch.Tensor`): (..., n_angles, 1)
         angles (`torch.Tensor`): (n_angles,)
         schedule (`torch.Tensor`): (s,) with s <= n_angles
-        l: (`int`)
-    Returns:
-        `torch.Tensor`: (...). Let (...) = (d_1, ..., d_k),
-        the returned tensor has shape (d_1, ..., d_k, s).
+        length_scale: (`int`)
+
+    Returns
+        `torch.Tensor`: (...). Let (...) = (d_1, ..., d_k).
+        If full == False, then the returned tensor has shape (d_1, ..., d_k, s),
+        otherwise it has shape (d_1, ..., d_k, n_angles - min(schedule) + 1).
 
     Notes: Ignoring batch dimensions, output[i] equals
     $$
@@ -151,10 +180,10 @@ def nll_mixture_angle_schedule(
     $$
     """
 
+    # schedule: [1] -> condition prediction on nlls using data up to time 1
+
     device = images.device
     n_angles = counts.shape[-2]
-    if schedule is None:
-        schedule = torch.arange(1, n_angles + 1, device=device)
 
     # (s, n_angles)
     schedule_lb = schedule.unsqueeze(1)
@@ -170,11 +199,14 @@ def nll_mixture_angle_schedule(
     intensities = intensities.unsqueeze(-3).unsqueeze(-3)
 
     # (..., s, n_pred, n_angles, side_length)
-    nlls = nll(images, counts_expanded, intensities, angles, l).double()
+    nlls = nll(images, counts_expanded, intensities, angles, length_scale).double()
     mix_input = -nlls.sum(-1) - math.log(n_pred)  # (..., s, n_pred, n_angles)
     mix = -torch.logsumexp(mix_input, dim=-2)
     mix[..., ~mask] = 0
-    out = mix.sum(-1)
+    if reduce:
+        out = mix.sum(-1)
+    else:
+        out = mix.sum(-2)[..., schedule.min() :]  # min=2 -> [1:]
     return out.float()
 
 
@@ -190,14 +222,10 @@ def radon(images: torch.Tensor, angles: torch.Tensor):
     batch_dims = images.size()[:-2]
     img_shape = images.size()[-2:]
     images = images.reshape(-1, *img_shape)
-
     proj_geom_3d, vol_geom_3d = get_astra_geometry_from_images(angles, images)
-
     op3d = AstraParallelOp3D(proj_geom_3d, vol_geom_3d)
     parallel3d_layer = make_radon_layer(op3d)
-
     sino = parallel3d_layer(images)
-
     return sino.view(*batch_dims, sino.shape[1], img_shape[0])
 
 
@@ -243,7 +271,7 @@ def fbp(
     # ASTRA expects CPU-linked arrays
     astra_radon_image = astra_radon_image.contiguous()
 
-    B, _, N = astra_radon_image.shape
+    b, _, n = astra_radon_image.shape
 
     # Filter in frequency domain
     sino_filt = _apply_filter_batch(astra_radon_image, filter_name)  # (B, M, N)
@@ -259,7 +287,7 @@ def fbp(
     # Preallocate output and link both
     sino_3d = sino_3d.contiguous()
     vol = torch.zeros(
-        (B, sino_size[-1], sino_size[-1]), dtype=torch.float32, device=out_device
+        (b, sino_size[-1], sino_size[-1]), dtype=torch.float32, device=out_device
     ).contiguous()
     sino_id = astra.data3d.link("-sino", proj_geom_3d, sino_3d)
     vol_id = astra.data3d.link("-vol", vol_geom_3d, vol)
@@ -276,7 +304,7 @@ def fbp(
 
     vol = vol.to(out_device)
     # Scale to match skimage.iradon
-    scale = np.pi / (2.0 * float(N))
+    scale = np.pi / (2.0 * float(n))
     vol.mul_(float(scale))
 
     if circle:
@@ -292,7 +320,8 @@ def sample_observations(
     images: torch.Tensor,
     intensities: torch.Tensor,
     angles: torch.Tensor,
-    l: float = 5.0,
+    length_scale: float = 5.0,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Samples Poisson counts based on high-res images
 
@@ -305,20 +334,20 @@ def sample_observations(
     Returns:
         counts (torch.Tensor): `(..., n_angles, n_detectors)`
     """
-    scale = l / images.shape[-1]
+    scale = length_scale / images.shape[-1]
     sino = radon(images, angles)
-    counts = poisson(intensities * torch.exp(-scale * sino))
+    counts = poisson(intensities * torch.exp(-scale * sino), generator=generator)
     counts_lr = counts.view(*counts.shape[:-1], counts.shape[-1] // 2, 2).sum(-1)
     return counts_lr
 
 
 def sinogram_from_counts(
-    counts: torch.Tensor, intensities: torch.Tensor | float, l=5.0
+    counts: torch.Tensor, intensities: torch.Tensor | float, length_scale=5.0
 ) -> torch.Tensor:
     """
     Computes the sinogram from the measurements.
     """
-    scale = l / counts.shape[-1]  # Normalize by the image size
+    scale = length_scale / counts.shape[-1]  # Normalize by the image size
     sino = -torch.log(counts.clip(1e-9) / intensities) / scale
     return sino
 
@@ -381,10 +410,10 @@ class Experiment:
         self.intensities = intensities
         self.counts = counts
         if sparse:
-            self.total_exposure = intensities.sum((-2, -1)) * self.counts.shape[-1]
+            self.total_intensity = intensities.sum((-2, -1)) * self.counts.shape[-1]
             self.batch_dims = counts.shape[:-2]
         else:
-            self.total_exposure = intensities.sum((-3, -2, -1)) * self.counts.shape[-1]
+            self.total_intensity = intensities.sum((-3, -2, -1)) * self.counts.shape[-1]
             self.batch_dims = counts.shape[:-3]
         self.sparse = sparse
 
@@ -398,7 +427,7 @@ class Experiment:
         self.angles = self.angles.to(device)
         self.intensities = self.intensities.to(device)
         self.counts = self.counts.to(device)
-        self.total_exposure = self.total_exposure.to(device)
+        self.total_intensity = self.total_intensity.to(device)
         return self
 
 
@@ -426,9 +455,9 @@ def get_astra_geometry_from_images(
     angles: torch.Tensor, images: torch.Tensor
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     assert images.ndim == 3, "images must be 3D (n_slices, H, W)"
-    assert images.shape[-1] == images.shape[-2], (
-        f"images must be square (H, W), got images.shape={images.shape}"
-    )
+    assert (
+        images.shape[-1] == images.shape[-2]
+    ), f"images must be square (H, W), got images.shape={images.shape}"
     n_slices, im_size = images.shape[0], images.shape[-2]
     return get_astra_geometry_3d(angles, im_size, n_slices)
 
@@ -438,9 +467,9 @@ def get_astra_geometry_from_sinogram(
 ) -> tuple[dict[str, Any], dict[str, dict]]:
     assert sino.ndim == 3, "sinogram must be 3D (n_angles, n_det_y, n_det_x)"
     n_det_rows, n_angles, n_det_cols = sino.shape
-    assert n_angles == angles.shape[0], (
-        f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sino.shape}"
-    )
+    assert (
+        n_angles == angles.shape[0]
+    ), f"angles must match sinogram shape, got angles.shape={angles.shape}, sinogram.shape={sino.shape}"
     return get_astra_geometry_3d(angles, n_det_cols, n_det_rows)
 
 
@@ -615,24 +644,26 @@ def _apply_filter_batch(
     single = sino.ndim == 2
     if single:
         sino = sino.unsqueeze(0)  # (1, M, N)
-    B, M, N = sino.shape
+    b, m, n = sino.shape
     device = sino.device
     dtype = sino.dtype
 
-    projection_size_padded = max(64, int(2 ** np.ceil(np.log2(2 * M))))
-    P = projection_size_padded
+    projection_size_padded = max(64, int(2 ** np.ceil(np.log2(2 * m))))
+    proj_padded = projection_size_padded
 
     # pad along detector axis (dim=1) at the end
-    sino_padded = torch.zeros((B, P, N), device=device, dtype=dtype)
-    sino_padded[:, :M, :] = sino
+    sino_padded = torch.zeros((b, proj_padded, n), device=device, dtype=dtype)
+    sino_padded[:, :m, :] = sino
 
-    filt = _fourier_filter_1d(P, filter_name, device=device, dtype=dtype)  # (P,1)
-    filt = filt.view(1, P, 1)
+    filt = _fourier_filter_1d(
+        proj_padded, filter_name, device=device, dtype=dtype
+    )  # (P,1)
+    filt = filt.view(1, proj_padded, 1)
 
     proj_fft = torch.fft.fft(sino_padded, dim=1)
     proj_fft = proj_fft * filt
     sino_filt = torch.real(torch.fft.ifft(proj_fft, dim=1)).to(dtype)
-    sino_filt = sino_filt[:, :M, :]
+    sino_filt = sino_filt[:, :m, :]
 
     return sino_filt[0] if single else sino_filt
 
@@ -648,9 +679,13 @@ def circular_mask(
         torch.arange(img_size, device=device),
         indexing="ij",
     )
+    # Note: Is this correct?
     r = img_size // 2
     mask = ((yy - r) ** 2 + (xx - r) ** 2 <= r**2).to(dtype)
-    return mask
+    # Center for ASTRA alignment
+    # center = (img_size - 1) / 2.0
+    # mask = (yy - center) ** 2 + (xx - center) ** 2 <= (img_size / 2.0) ** 2
+    return mask.to(dtype)
 
 
 ##################################################
@@ -686,9 +721,9 @@ def forward_angle_sets_2d(
         ny, nx = img_t.shape
         batch = False
     elif img_t.ndim == 3:
-        B, ny, nx = img_t.shape
+        batch_size, ny, nx = img_t.shape
         batch = True
-        assert len(angle_sets) == B, "len(angle_sets) must match batch size."
+        assert len(angle_sets) == batch_size, "len(angle_sets) must match batch size."
     else:
         raise ValueError("img_t must be (ny, nx) or (B, ny, nx).")
 
@@ -795,7 +830,7 @@ def forward_and_fbp_2d(
         "ramp", "shepp-logan", "cosine", "hamming", "hann", None
     ] = "ramp",
     circle: bool = True,
-    l: int = 5,
+    length_scale: int = 5,
 ) -> torch.Tensor:
     """
     TODO
@@ -810,14 +845,14 @@ def forward_and_fbp_2d(
     for i, radon in enumerate(radons):
         n_angles = len(angle_sets[i])
         intensity = total_intensities[i] / n_angles / n_bins
-        scale = l / n_bins
+        scale = length_scale / n_bins
 
         counts = poisson(intensity * torch.exp(-scale * radon))  # (n_angles, 256)
         counts_lr = counts.view(n_angles, image.shape[-1] // 2, 2).sum(
             -1
         )  # (n_angles, 128)
         intensity_lr = intensity * 2
-        sino = sinogram_from_counts(counts_lr, intensity_lr, l).clamp_min_(
+        sino = sinogram_from_counts(counts_lr, intensity_lr, length_scale).clamp_min_(
             0
         )  # (n_angles, 128)
 
@@ -853,14 +888,12 @@ def fbp_2d(
     for angle_set_i, counts_i, intensity_i in zip(angle_sets, counts, intensities):
         if not isinstance(intensity_i, torch.Tensor):
             intensity_i = torch.tensor(intensity_i)
-        print(f"{intensity_i=}")
         sino = sinogram_from_counts(
             counts_i, intensity_i.clone().to(counts_i.device)
         ).clamp_min(0)
         proj_geom_lr, vol_geom_lr = get_astra_geometry_2d(
             angle_set_i, counts_i.shape[-1]
         )
-        print(f"{sino=}")
         fbp = fbp_single_from_forward(
             vol_geom=vol_geom_lr,
             proj_geom=proj_geom_lr,
@@ -914,22 +947,23 @@ def prepare_inputs_from_experiment(
         )
 
     num_angles = len(experiment.angles)
-    fbps = list()
-    intensities = list()
+    fbps_list = list()
+    intensities_list = list()
     if schedule is None:
         schedule = torch.arange(1, num_angles + 1)
     for i in schedule:
         angles_i = experiment.angles[:i]
         counts_i = experiment.counts[..., :i, :]
         intensities_i = experiment.intensities[..., :i, :]
-        sino_i = sinogram_from_counts(counts_i, intensities_i)
+        sino_i = sinogram_from_counts(counts_i, intensities_i).clamp_min(0.0)
         fbp_i = fbp(sino_i, angles_i)
-        fbps.append(fbp_i)
-        intensities.append(intensities_i.sum((-2, -1)))
-    fbps = torch.stack(fbps, dim=-3).clamp(0, 1)
+        fbps_list.append(fbp_i)
+        intensities_list.append(intensities_i.sum((-2, -1)))
+    fbps = torch.stack(fbps_list, dim=-3).clamp(0, 1)
     fbps.mul_(circular_mask(fbps.shape[-1]).to(fbps.device))
     intensities = (
-        torch.stack(intensities, dim=-1).unsqueeze(-1) * experiment.counts.shape[-1]
+        torch.stack(intensities_list, dim=-1).unsqueeze(-1)
+        * experiment.counts.shape[-1]
     )
     class_labels = (
         (schedule - 1)
@@ -965,12 +999,6 @@ if __name__ == "__main__":
     rates = 100.0
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-    # schedule = torch.tensor([1, 25, 90, n_angles - 1], device=device)
-    # schedule = torch.arange(n_angles, device=device)
-    # preds = torch.ones(b, len(schedule), n_pred, r, r, device=device)
-    # counts = poisson(torch.full((b, n_angles, n_detectors), rates, device=device))
-    # angles = torch.rand(n_angles, device=device) * 180
-
     schedule = torch.tensor([0], device=device)
     preds = torch.ones(b, len(schedule), n_pred, r, r, device=device) * torch.arange(
         1, n_pred + 1, device=device
@@ -1000,7 +1028,7 @@ if __name__ == "__main__":
     diff = nlls_sched - nlls_manual
     print(diff)
 
-    from scipy.special import logsumexp, loggamma
+    from scipy.special import loggamma, logsumexp
 
     def nll_mix(x: float, log_lams: list[float]) -> float:
         def lam2nll(log_lam: float) -> float:

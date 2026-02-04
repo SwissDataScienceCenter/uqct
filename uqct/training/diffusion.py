@@ -18,7 +18,6 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from tqdm.auto import tqdm
 
 from uqct.datasets.utils import get_dataset
-from uqct.debugging import plot_img
 from uqct.training.unet import N_ANGLES, norm_intensities, sample_fbp_sparse
 
 
@@ -78,6 +77,10 @@ class UNet2DModelAux(nn.Module):
         return self.unet.forward(
             x_t_fbp, timestep, encoder_hidden_states=proj, return_dict=False
         )[0]
+
+    @property
+    def config(self):
+        return self.unet.config
 
 
 def save_ckpt(
@@ -229,8 +232,9 @@ def main(**kwargs):
     # Set up directories
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M")  # e.g. 2025-09-13_14-27
 
-    on_cluster = Path("/cluster").exists()
-    root_dir = Path("/cluster/scratch/mgaetzner/uqct") if on_cluster else Path(".")
+    root_dir = Path(os.getenv("UQCT_ROOT_DIR", "."))
+    if not root_dir.exists():
+        root_dir = Path(".")
     run_dir = (
         root_dir
         / "runs"
@@ -272,7 +276,7 @@ def main(**kwargs):
             up_block_types=up_block_types,
         )
     unet = unet.to(device)  # type: ignore
-    if not on_cluster:
+    if not Path("/cluster").exists():
         if isinstance(unet, UNet2DModel):
             unet.enable_gradient_checkpointing()
         else:

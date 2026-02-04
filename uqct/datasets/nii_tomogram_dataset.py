@@ -1,9 +1,9 @@
 import math
 
 import nibabel as nib
+import numpy as np
 import torch
 from PIL import Image
-import numpy as np
 
 from uqct.datasets.base_dataset import BaseImageDataset
 
@@ -112,6 +112,5 @@ if __name__ == "__main__":
         "rotation_angle": 30,
     }
 
-    breakpoint()
     ds = NiiDataset(**kwargs)
     print(ds)

@@ -1,12 +1,9 @@
-from __future__ import annotations
-
 import math
+import pickle
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal, Self
-import pickle
-import tempfile
-
 
 import numpy as np
 import torch
@@ -16,8 +13,8 @@ from tqdm.auto import tqdm
 from uqct.ct import (
     Experiment,
     circular_mask,
-    sample_observations,
     prepare_inputs_from_experiment,
+    sample_observations,
 )
 from uqct.datasets.utils import DatasetName, get_dataset
 from uqct.training.unet import (
@@ -66,7 +63,7 @@ class FBPUNetEnsemble:
             self._device = torch.device("cpu")
 
     def reinit(self, dataset: DatasetName, sparse: bool) -> Self:
-        self.__init__(
+        self.__init__(  # type: ignore[misc]
             dataset, sparse, batch_size=self.batch_size, num_workers=self.num_workers
         )
         return self
@@ -76,10 +73,10 @@ class FBPUNetEnsemble:
         pickle.dump(self.unets, open(self.pickle_path, "wb"))
         del self.unets
 
-    def to(self, device: torch.device | str) -> FBPUNetEnsemble:
+    def to(self, device: torch.device | str) -> "FBPUNetEnsemble":
         target = torch.device(device)
         for unet in self.unets:
-            unet.unet.to(target)
+            unet.unet.to(target)  # type: ignore
         self._device = target
         return self
 
@@ -226,6 +223,7 @@ class FBPUNet:
                 / (MAX_TOTAL_INTENSITY - MIN_TOTAL_INTENSITY)
                 * 999
             )
+            intensity_norm = intensity_norm.clamp(0.0, 999.0)
 
             with torch.inference_mode():
                 with torch.autocast(
@@ -281,7 +279,7 @@ class FBPUNet:
             intensity_lr,
             class_labels,
             out_device=out_device,
-        )
+        ).float()
 
 
 def load_unet_ckpt(unet: UNet2DModel, ckpt_path: Path, verbose: bool = False) -> None:
@@ -304,7 +302,7 @@ if __name__ == "__main__":
         import lovely_tensors as lt
 
         lt.monkey_patch()
-    except Exception as _:
+    except Exception:
         pass
 
     def build_dense_experiment(
@@ -363,7 +361,7 @@ if __name__ == "__main__":
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model_label = "dense"
-    dataset = "lamino"
+    dataset: DatasetName = "lamino"
 
     _, test_set = get_dataset(dataset, True)
     num_examples = min(2, len(test_set))
@@ -411,7 +409,7 @@ if __name__ == "__main__":
     )
 
     # # TODO: Remove
-    model = FBPUNet(dataset, 0, model_label == "sparse")
+    single_model = FBPUNet(dataset, 0, model_label == "sparse")
     assert ckpt_path.exists()
     # ckpt_path = Path(
     #     f"runs/unet_dense/2025-10-23_20-24_lamino_48_500_3e-05_0.37_0.0043_{i}/ckpts/best.pt"

@@ -1,61 +1,116 @@
-from skimage.metrics import structural_similarity as SS
 import torch
+from torchmetrics.image import StructuralSimilarityIndexMeasure
+
+from uqct.ct import circular_mask
 
 
-def apply_circle_mask(img):
-    W, H = img.shape[-2:]
-    cp = torch.cartesian_prod(torch.arange(W, device=img.device), torch.arange(H, device=img.device))
-    circle_mask = (cp[:, 0] - W / 2) ** 2 + (cp[:, 1] - W / 2) ** 2 <= (W / 2) ** 2
-    return img * circle_mask.reshape(img.shape[-2:])
-
-def PSNR(original, compressed, max_pixel=None):
-    if max_pixel is None:
-        max_pixel = torch.max(original)
-    mse = torch.mean((original - compressed) ** 2)
-    psnr = 10 * torch.log10(max_pixel ** 2 / mse)
-    return psnr
-
-def constrained_PSNR(target, pred):
-    """ Computes PSNR for images with a circular mask applied.
-    Assumes target and pred are 3D tensors with shape (B, H, W).
-    The circular mask is applied to the central region of the images.
+def rmse(
+    prediction: torch.Tensor, target: torch.Tensor, circle_mask: bool = True
+) -> torch.Tensor:
     """
-    target = apply_circle_mask(target[..., 20:-20, 20:-20])
-    pred = apply_circle_mask(pred[..., 20:-20, 20:-20])
-    return PSNR(target, pred)
+    Computes the Root Mean Square Error (RMSE) between two images.
+    Args:
+        prediction (torch.Tensor): (..., H, W) Predicted image tensor.
+        target (torch.Tensor): (..., H, W) Target image tensor.
+        circle_mask (bool): If True, applies a circular mask to both images before computing RMSE.
+    Returns:
+        torch.Tensor: RMSE values for each image in the batch. Output shape: (...)
+    """
+    if circle_mask:
+        mask = circular_mask(target.shape[-1], device=target.device)
+        target = target * mask
+        prediction = prediction * mask
+    mse = torch.sqrt(torch.mean((target - prediction) ** 2, dim=(-2, -1)))
+    return mse
 
-def RMSE(original, compressed):
-    mse = torch.mean((original - compressed) ** 2)
-    return torch.sqrt(mse)
 
-def ZeroOne(original, compressed):
-    """ average zero-one loss, clips predictions to {0, 1}"""
-    return torch.sum(torch.abs(original - torch.round(compressed))) / original.numel()
+def psnr(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    data_range: float = 1.0,
+    circle_mask: bool = True,
+) -> torch.Tensor:
+    """
+    Computes the Peak Signal-to-Noise Ratio (PSNR) between two images.
+    Args:
+        prediction (torch.Tensor): (..., H, W) Predicted image tensor.
+        target (torch.Tensor): (..., H, W) Target image tensor.
+        data_range (float): Maximum pixel value.
+        circle_mask (bool): If True, applies a circular mask to both images before computing PSNR.
+    Returns:
+        torch.Tensor: PSNR values for each image in the batch. Output shape: (...)
+    """
+    if circle_mask:
+        mask = circular_mask(target.shape[-1], device=target.device)
+        target = target * mask
+        prediction = prediction * mask
+    mse = torch.mean((target - prediction) ** 2, dim=(-2, -1))
+    psnr = 10 * torch.log10(data_range**2 / mse)  # type: ignore
+    return psnr  # type: ignore
 
 
-b_PSNR = torch.vmap(PSNR)
-b_RMSE = torch.vmap(RMSE)
-b_ZeroOne = torch.vmap(ZeroOne)
+def ssim(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    data_range: float = 1.0,
+    circle_mask: bool = True,
+) -> torch.Tensor:
+    """
+    Computes the Structural Similarity Index (SSIM) between two images.
+    Args:
+        prediction (torch.Tensor): (..., H, W) Predicted image tensor.
+        target (torch.Tensor): (..., H, W) Target image tensor.
+        data_range (float): Data range.
+        circle_mask (bool): If True, applies a circular mask to both images before computing SSIM.
+    Returns:
+        torch.Tensor: SSIM values for each image in the batch. Output shape: (...)
+    """
+    prediction = prediction.unsqueeze(dim=-3)
+    target = target.unsqueeze(dim=-3)
+    if circle_mask:
+        mask = circular_mask(target.shape[-1], device=target.device)
+        target = target * mask
+        prediction = prediction * mask
+    batch_dims = prediction.size()[:-3]
+    img_shape = prediction.shape[-3:]
+    target = target.expand_as(prediction).reshape(-1, *img_shape)
+    prediction = prediction.view(-1, *img_shape)
+    ssim_fct = StructuralSimilarityIndexMeasure(data_range=data_range, reduction=None)
+    return ssim_fct(prediction, target).view(*batch_dims)
 
-def get_metrics(original, compressed, normalize_range=True, constrained=False):
-    
-    original = original.squeeze().detach().to(compressed.device)
-    compressed = compressed.squeeze().detach()
-    
-    if normalize_range:
-        max_value = torch.max(original)
-        original = original / max_value
-        compressed = compressed / max_value
-    
-    psnr_function = PSNR if not constrained else constrained_PSNR
+
+def get_metrics(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    circle_mask: bool = True,
+    data_range: float = 1.0,
+) -> dict[str, torch.Tensor]:
+    """
+    Computes a dictionary of metrics for the given prediction and target.
+    Args:
+        prediction (torch.Tensor): (..., H, W) Predicted image tensor.
+        target (torch.Tensor): (..., H, W) Target image tensor.
+        max_pixel (float | None): Maximum pixel value.
+        circle_mask (bool): Whether to apply a circular mask.
+        data_range (float): Data range.
+    Returns:
+        dict[str, torch.Tensor]: Dictionary of metrics. Each tensor has shape (...,) where ... are the batch dimensions of the input tensors.
+    """
+
+    if prediction.ndim == 2:
+        prediction = prediction.unsqueeze(-3)
+    if target.ndim == 2:
+        target = target.unsqueeze(-3)
 
     return {
-        "PSNR": psnr_function(original, compressed).item(),
-        "RMSE": RMSE(original, compressed).item(),
-        "L1": torch.mean(torch.abs(original - compressed)).item(),
-        "ZeroOne": ZeroOne(original, compressed).item(),
-        "SS": SS(original.cpu().numpy(), compressed.cpu().numpy(), full=True, data_range=1)[0].item()
+        "PSNR": psnr(
+            prediction, target, data_range=data_range, circle_mask=circle_mask
+        ),
+        "RMSE": rmse(prediction, target, circle_mask=circle_mask),
+        "L1": torch.mean(torch.abs(target - prediction), dim=(-2, -1)),
+        "SS": ssim(prediction, target, data_range=data_range, circle_mask=circle_mask),
     }
+
 
 def print_metrics(original, compressed):
     for k, v in get_metrics(original, compressed).items():

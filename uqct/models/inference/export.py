@@ -12,14 +12,14 @@ DEVICE = torch.device("cuda")
 # TensorRT Optimization Profile Config
 # MIN: Smallest batch you'll ever send (1)
 # OPT: The batch size you use most often (32) - TRT optimizes for this!
-# MAX: The absolute largest batch you will ever allow (128)
+# MAX: The absolute largest batch you will ever allow (64)
 MIN_BATCH = 1
 OPT_BATCH = 32
-MAX_BATCH = 128
+MAX_BATCH = 64
 
 N_CHANNELS = 1
 RES = 128
-DTYPE = torch.half  # FP16 weights
+DTYPE = torch.float  # FP32 weights
 
 datasets = ("lung", "composite", "lamino")
 
@@ -35,7 +35,7 @@ if __name__ == "__main__":
             print(f"Exporting to {onnx_file}...")
 
             # Initialize model
-            unet = Diffusion(dataset, cond=True).unet.half().to(DEVICE)  # type: ignore
+            unet = Diffusion(dataset, cond=True).unet.float().to(DEVICE)  # type: ignore
             unet.eval()
 
             # Create Dummy Inputs (using OPT_BATCH size)
