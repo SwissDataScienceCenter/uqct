@@ -2,7 +2,10 @@
 name = "uqct"
 version = "0.0.1"
 description = "Uncertainty Quantification for Computed Tomography"
-authors = [{ name = "Matteo Gätzner" }, { name = "Johannes Kirschner" }]
+authors = [
+  { name = "Matteo Gätzner" },
+  { name = "Johannes Kirschner" },
+]
 requires-python = ">=3.12"
 dependencies = [
   "scikit-image",
