@@ -3,6 +3,10 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+import glob, os
+import xarray as xr
+import pandas as pd
+import numpy as np
 
 import pandas as pd
 import tensorrt
@@ -315,3 +319,83 @@ def load_runs(
         aggregated_runs[cfg] = full_df
 
     return aggregated_runs
+
+
+def load_runs_dense(
+    *paths: str,
+) -> tuple[dict[str, xr.Dataset], pd.DataFrame]:
+    """
+    Reads all netcdf files in the given paths and returns a dictionary of xarray datasets and a dataframe of their attributes.
+    """
+
+    # find all *.nc files in paths
+    nc_files = []
+    for path in paths:
+        nc_files.extend(sorted(glob.glob(f"{path}/**/*.nc", recursive=True)))
+
+    datasets = {}
+    attrs = []
+    for f in nc_files:
+        ds = xr.open_dataset(f)
+
+        attrs.append(ds.attrs)
+        experiment_id = ds.attrs['experiment_id']
+        if not 'beta' in ds:
+            ds['beta'] = ds['seq_nll'].cumsum(dim='step')
+        if 'seq_nll_mix' in ds:
+            if not 'beta_mix' in ds:
+                ds['beta_mix'] = ds['seq_nll_mix'].cumsum(dim='step')
+
+        datasets[experiment_id] = ds
+    df = pd.DataFrame(attrs)
+    df = df.set_index('experiment_id')
+    return datasets, df
+
+
+
+def find_experiment_dense(
+    attrs: pd.DataFrame,
+    datasets: dict[str, xr.Dataset],
+    dataset: str,
+    model: str,
+    samples: bool = False,
+    aggregate_seeds: bool = False,
+    match_attrs: dict[str, Any] | None = None,
+) -> tuple[xr.Dataset, Any]:
+    """
+    Helperfunction to find the experiment matching the given model and dataset.
+    If aggregate_seeds is True, all experiments matching the model and dataset are aggregated along the seed dimension.
+    If match_attrs is given, it is a dictionary of additional attributes to match.
+    If samples is True, the dataset that contains per-sample statistics is loaded.
+    """
+    if 'samples' in attrs.columns:
+        matching_experiments = attrs.loc[(attrs['model'] == model) & (attrs['dataset'] == dataset) & (attrs['samples'] == samples)]
+    else:
+        matching_experiments = attrs.loc[(attrs['model'] == model) & (attrs['dataset'] == dataset)]
+
+    if match_attrs is not None:
+        for key, value in match_attrs.items():
+            matching_experiments = matching_experiments.loc[matching_experiments[key] == str(value)]
+    if len(matching_experiments) == 0:
+        raise ValueError(f"No experiment found for model {model} and dataset {dataset}.")
+    elif aggregate_seeds:
+        if len(matching_experiments) == len(matching_experiments['seeds'].unique()):
+            # print(f"INFO Aggregating {len(matching_experiments)} experiments for model {model} and dataset {dataset}.")
+            # print(f"Aggregation {len(matching_experiments)} experiments for model {model} and dataset {dataset}.")
+
+            all_ds = []
+            for experiment_id in matching_experiments.index:
+                ds = datasets[experiment_id].sel(model=model)
+                all_ds.append(ds)
+            ds = xr.concat(all_ds, dim='seed', data_vars='all')
+            # sort seed dimension
+            ds = ds.sortby('seed')
+            return ds, matching_experiments.index.values
+        else:
+            raise ValueError(f"WARNING Number of matching experiments {len(matching_experiments)} does not match number of unique seeds {len(matching_experiments['seeds'].unique())}. Not aggregating.")
+    elif len(matching_experiments) > 1:
+        raise ValueError(f"WARNING Multiple experiments found for model {model} and dataset {dataset}.")
+
+    experiment_id = matching_experiments.index[0]
+    ds = datasets[experiment_id].sel(model=model)
+    return ds, experiment_id

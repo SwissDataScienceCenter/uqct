@@ -89,8 +89,7 @@ class ObservationDataset(torch.utils.data.Dataset):
         generator = torch.Generator(device=self.device).manual_seed(
             seed + 100000 * int(idx)
         )
-        # TODO: divide by 2 is important!!!
-        # It seems how it currently works
+        # Divide by 2 is important!!!
         # - we sample at half the target intensity
         # - pixels are binned from 256 to 128, but this does not change total intensity
         # - the model computes total intensity by assuming 128 dectector pixels, but intensity per observation is normalized by 256 bins, this is where the factor 2 comes from.
@@ -184,12 +183,6 @@ class IterativeRecon:
             )
 
             optimizer = torch.optim.Adam(tomogram.parameters(), lr=self.lr)
-            # if self.loss == "nll":
-            #     loss_fn = nll
-            # else:
-            #     # mse_ct must be available in scope if using this branch
-            #     loss_fn = lambda recon, meas, angs, alloc: mse_ct(recon, meas, angs, alloc, vst=anscombe_transform)
-
             circle_mask = circular_mask(
                 prior_img.shape[-1], device=tomogram.image.device
             )
@@ -558,36 +551,6 @@ def schedule_exponential(
     return intensities
 
 
-def sample_observations_reproducible(
-    images: torch.Tensor,
-    indices: torch.Tensor,
-    schedule: torch.Tensor,
-    angles: torch.Tensor,
-    seed_offset: int = 0,
-):
-    """
-    Sample Poisson observations from high-res images according to the given schedule and angles.
-    Args:
-        images (torch.Tensor): (B, 1, H, W) High-res image tensor.
-        schedule (torch.Tensor): (T,) Tensor specifying the intensity allocation per step.
-        angles (torch.Tensor): (N,) Tensor of projection angles in degrees.
-        seed_offset (int): Offset to add to the random seed for reproducibility.
-    Returns:
-        torch.Tensor: (B, T, N, W) Tensor of sampled Poisson counts.
-    """
-
-    data = []
-    for idx, image in zip(indices, images):
-        generator = torch.Generator(device=device).manual_seed(
-            seed_offset + 100000 * int(idx)
-        )
-        _data = sample_observations(
-            image.unsqueeze(0), schedule / 2, angles, generator=generator
-        )  # TODO: divide by 2 is important!!!
-        data.append(_data)
-    return torch.cat(data, dim=0)
-
-
 def nll_mixture(
     images: torch.Tensor,
     counts: torch.Tensor,
@@ -614,35 +577,6 @@ def nll_mixture(
     nlls -= math.log(n_pred)
     mix = -torch.logsumexp(nlls, dim=0)  # (...)
     return mix.float()
-
-
-def guidance_loss_beta(
-    counts, intensities, angles, beta, data_steps, schedule_steps, length_scale=5.0
-):
-    """
-    Define a loss function for the diffusion model.
-    This can be used to guide the diffusion process.
-    """
-    data_shape = counts.shape[:-2]
-    circle_mask = circular_mask(counts.shape[-1], device=counts.device)
-
-    def loss_fn(image):
-        img_shape = image.shape[-2:]
-        image = image.view(-1, *data_shape, *img_shape)
-        image = ((image + 1.0) / 2).clip(0, 1)
-        image = image * circle_mask
-        image = image.unsqueeze(-4)  # add step dimension
-
-        step_nll = nll(
-            image, data_steps, schedule_steps, angles, length_scale=length_scale
-        ).sum(dim=[-1, -2, -3])
-        remaining_step_nll = step_nll[..., 1:]
-        beta_loss = remaining_step_nll.sum(dim=-1)
-
-        loss = torch.abs(beta_loss - beta)  # + first_step_nll
-        return loss.sum()  # remaining dimensions (samples, batch, steps)
-
-    return loss_fn
 
 
 def guidance_loss_diverse(
@@ -727,7 +661,6 @@ if __name__ == "__main__":
             "fbp",
             "unet",
             "cond_diffusion",
-            "beta_cond_diffusion",
             "diverse_cond_diffusion",
             "diffusion",
             "gt",
@@ -762,7 +695,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--batch_size", type=int, default=16, help="Batch size for evaluation."
     )
-    # parser.add_argument("--batch_steps", action="store_true", default=True, help="Whether to batch over observation steps.")
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -782,7 +714,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--total_intensity",
         type=float,
-        default=1e8,
+        default=1e9,
         help="Total intensity for observation schedule.",
     )
     parser.add_argument(
@@ -795,7 +727,7 @@ if __name__ == "__main__":
         "--schedule",
         type=str,
         choices=["uniform", "exponential"],
-        default="uniform",
+        default="exponential",
         help="Type of observation schedule.",
     )
     parser.add_argument(
@@ -896,7 +828,6 @@ if __name__ == "__main__":
         "unet_ensemble",
         "fbp_bootstrap",
         "unet_bootstrap",
-        "beta_cond_diffusion",
         "diverse_cond_diffusion",
     ]
     per_sample_models = ["gt", "cond_diffusion", "diffusion", "diverse_cond_diffusion"]
@@ -1079,7 +1010,6 @@ if __name__ == "__main__":
         )
     elif args.model in [
         "cond_diffusion",
-        "beta_cond_diffusion",
         "diverse_cond_diffusion",
     ]:
         ckpt_path = Path(
@@ -1088,7 +1018,7 @@ if __name__ == "__main__":
         unet = load_diffusion_unet(ckpt_path, cond=True)
         scheduler = DDPMScheduler(num_train_timesteps=1000, beta_schedule="linear")
 
-        if args.model in ["beta_cond_diffusion", "diverse_cond_diffusion"]:
+        if args.model in ["diverse_cond_diffusion"]:
             # find beta dataset
             # list all *.nc files in the checkpoint directory
 
@@ -1142,8 +1072,6 @@ if __name__ == "__main__":
             beta_ds["beta_mix"] = beta_ds["seq_nll_mix"].cumsum(dim="step")
             if args.model == "diverse_cond_diffusion":
                 guidance_loss_fn = guidance_loss_diverse  # type: ignore
-            elif args.model == "beta_cond_diffusion":
-                guidance_loss_fn = guidance_loss_beta  # type: ignore
         else:
             guidance_loss_fn = guidance_loss  # type: ignore
         recon = CondDiffusionRecon(
@@ -1213,7 +1141,7 @@ if __name__ == "__main__":
             data_cumsum = data.cumsum(dim=1)
             schedule_cumsum = schedule.unsqueeze(0).cumsum(dim=1)
             with torch.no_grad():
-                if args.model in ["beta_cond_diffusion", "diverse_cond_diffusion"]:
+                if args.model in ["diverse_cond_diffusion"]:
                     # print(indices, seed)
                     indices_np = indices.cpu().numpy()
                     seeds_np = seed.cpu().numpy()
