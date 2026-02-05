@@ -14,6 +14,8 @@ Install `uv` and run
 
 We describe how to reproduce the results from the paper.
 
+
+
 ### Structure of the repository
 
 The repository is structured as follows:
@@ -27,11 +29,18 @@ The repository is structured as follows:
 - `uqct.training`: The training module containing the training functions (U-Nets and Diffusion models).
 - `uqct.eval`: The evaluation module containing the evaluation code (e.g. for computing confidence sequences).
 
+
+### Datasets and Checkpoints
+
+Data is sourced from public datasets. Preprocessed data and checkpoints are currently not included and are available on request. We are working on providing a zenodo link for the data and checkpoints.
+
+---
+
 ### Reproducing the results: Sparse Setting
 
 We focus on how to reproduce the results in the main body of the paper in this text. The results from the dense setting can be reproduced using `uqct.evaluation.eval_dense` and `notebooks/Eval_dense.ipynb`.
 
-To reproduce the results from the main body of the paper, first download the datasets and place them into `data/{lung,lamino_tiff,composite}`.
+
 To train the models, run
 
 ```bash
@@ -61,6 +70,9 @@ uv run -m uqct.vis.plot_examples
 uv run -m uqct.vis.plot_example_reconstructions
 uv run -m uqct.vis.plot_boundary_samples
 ```
+
+
+---
 
 ### Reproducing the results: Dense Setting
 
@@ -107,6 +119,7 @@ python uqct/eval/dense.py --output_dir $OUTPUT_DIR --initial_intensity 1e4  --to
 
 See notebooks/Eval_dense_ICML.ipynb for code to generate plots from the dense evaluation.
 
+---
 
 <!-- ## Citation
 
