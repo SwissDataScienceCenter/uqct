@@ -1,7 +1,10 @@
 # Principled Confidence Estimation for Deep Computed Tomography
 
-This code accompanies the paper *"Principled Confidence Estimation for Deep Computed Tomography"* by Matteo Gätzner and Johannes Kirschner.
+This repository contains the code accompanying the paper  
+*“Principled Confidence Estimation for Deep Computed Tomography”*  
+by Matteo Gätzner and Johannes Kirschner (2026).
 
+ArXiv link: [https://arxiv.org/abs/2602.05812](https://arxiv.org/abs/2602.05812)
 ## Installation
 
 Install `uv` and run
@@ -121,15 +124,15 @@ See notebooks/Eval_dense_ICML.ipynb for code to generate plots from the dense ev
 
 ---
 
-<!-- ## Citation
+## Citation
 
-If you use this code for your research, please cite our paper:
-
+To cite our work, please use the following BibTeX entry:
 ```
 @article{gaetzner2024principled,
-  title={Principled Confidence Estimation for Deep Computed Tomography},
-  author={G{\"a}tzner, Matteo and Kirschner, Johannes},
-  journal={arXiv preprint arXiv},
-  year={2026}
+	title        = {Principled Confidence Estimation for Deep Computed Tomography},
+	author       = {G{\"a}tzner, Matteo and Kirschner, Johannes},
+	year         = 2026,
+	journal      = {arXiv preprint arXiv:2602.05812},
+	url          = {https://arxiv.org/abs/2602.05812}
 }
-``` -->
+```
