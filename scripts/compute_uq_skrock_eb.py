@@ -130,18 +130,28 @@ def process_method(
     glob_pattern: str,
     chosen_ci: str,
     device: torch.device,
+    image_start_min: int = 10,
+    runs_subdir: str = "runs",
+    h5_key: str = "preds",
+    sample_axis_slice: tuple | None = None,
 ) -> pd.DataFrame:
-    """Walk all ``glob_pattern`` files, return one row per (image, ci_method)."""
-    runs_dir = get_results_dir() / "runs"
+    """Walk all ``glob_pattern`` files, return one row per (image, ci_method).
+
+    ``runs_subdir`` defaults to ``results/runs/`` but can be set to e.g.
+    ``boundary_sampling`` for the diffusion-boundary outputs. ``h5_key`` and
+    ``sample_axis_slice`` let callers extract the right tensor shape per method
+    (default = ``preds[:, -1]`` -> ``(N, R, H, W)``).
+    """
+    runs_dir = get_results_dir() / runs_subdir
     files = [Path(p) for p in glob(str(runs_dir / glob_pattern))]
     print(f"{method}: {len(files)} files matched {glob_pattern}")
     parsed = [(f, parse_name(f)) for f in files]
     kept = [
         (f, m)
         for f, m in parsed
-        if m is not None and m["seed"] == 0 and m["start"] >= 10
+        if m is not None and m["seed"] == 0 and m["start"] >= image_start_min
     ]
-    print(f"{method}: {len(kept)} after seed=0 + start>=10")
+    print(f"{method}: {len(kept)} after seed=0 + start>={image_start_min}")
     kept_files = latest_per_cell([f for f, _ in kept])
     print(f"{method}: {len(kept_files)} after dedup")
 
@@ -151,9 +161,15 @@ def process_method(
         assert meta is not None
         t0 = time.time()
         with h5py.File(f, "r") as h:
-            preds = h["preds"]
-            # (N, T, R, H, W) -> last schedule step -> (N, R, H, W).
-            arr = preds[:, -1, :, :, :] if preds.ndim == 5 else preds[:]
+            arr = h[h5_key]
+            if sample_axis_slice is not None:
+                # Used by boundary: (N, S, R, 1, H, W) -> (N, R, H, W).
+                arr = arr[sample_axis_slice]
+            elif arr.ndim == 5:
+                # Default: (N, T, R, H, W) -> last schedule step -> (N, R, H, W).
+                arr = arr[:, -1, :, :, :]
+            else:
+                arr = arr[:]
         samples = torch.from_numpy(arr).to(device).float()
         gt = get_ground_truth(meta["dataset"], (meta["start"], meta["end"]))
         if gt.shape[-2:] != samples.shape[-2:]:
@@ -186,8 +202,21 @@ def main() -> None:
     parser.add_argument(
         "--method",
         required=True,
-        choices=["skrock", "equivariant_bootstrapping_fbp", "equivariant_bootstrapping"],
+        choices=[
+            "skrock",
+            "equivariant_bootstrapping_fbp",
+            "equivariant_bootstrapping",
+            "bootstrapping_fbp",
+            "bootstrapping_unet",
+            "boundary",
+        ],
         help="Which method to process.",
+    )
+    parser.add_argument(
+        "--image-start-min",
+        type=int,
+        default=10,
+        help="Drop cells whose `start` < this. Use 0 to keep the calibration window.",
     )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
@@ -201,6 +230,28 @@ def main() -> None:
             glob_pattern="skrock:*.h5",
             chosen_ci="percentile",  # SK-ROCK posterior samples; percentile is the natural choice.
             device=dev,
+            image_start_min=args.image_start_min,
+        )
+    elif args.method in ("bootstrapping_fbp", "bootstrapping_unet"):
+        df = process_method(
+            method=args.method,
+            glob_pattern=f"{args.method}:*.h5",
+            chosen_ci="percentile",
+            device=dev,
+            image_start_min=args.image_start_min,
+        )
+    elif args.method == "boundary":
+        # Boundary lives under results/boundary_sampling/, with h5 key "sampled_images"
+        # shaped (N, S, R, 1, H, W). We slice the last sampling step + drop the singleton.
+        df = process_method(
+            method="boundary",
+            glob_pattern="boundary_diffusion:*.h5",
+            chosen_ci="student_t",  # 10 replicates is too few for a percentile CI.
+            device=dev,
+            image_start_min=args.image_start_min,
+            runs_subdir="boundary_sampling",
+            h5_key="sampled_images",
+            sample_axis_slice=(slice(None), -1, slice(None), 0, slice(None), slice(None)),
         )
     else:
         # The current code names files `equivariant_bootstrapping:*` (estimator is
@@ -221,6 +272,7 @@ def main() -> None:
             glob_pattern=glob_pattern,
             chosen_ci="percentile",
             device=dev,
+            image_start_min=args.image_start_min,
         )
 
     out = args.out or (
