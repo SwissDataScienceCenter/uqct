@@ -34,4 +34,278 @@ cond = true
 methods = ["fbp", "unet"]
 n_bootstraps = 1000
 intensities = [1e4, 1e5, 1e6, 1e7, 1e8, 1e9]
-seed_range = [0, 1]
+seed_range = [0, 10]
+
+[eval-sparse.equivariant_bootstrapping]
+# Estimator is always FBPUNet (member 0). Defaults follow Tachella & Pereyra
+# (AISTATS 2024) tomography setting: helper_fcns.bootstrap with max_angle=8,
+# max_shift=0, no flips, MC=100.
+n_bootstraps = 100
+intensities = [1e4, 1e5, 1e6, 1e7, 1e8, 1e9]
+seed_range = [0, 10]
+rotation_std_deg = 8.0
+flip = false
+
+[eval-sparse.skrock]
+# SK-ROCK Langevin sampler (Pereyra, Vargas-Mieles & Zygalakis, SIIMS 2020),
+# run via deepinv's SKRockIterator + LogPoissonLikelihood (uqct.other_methods.skrock).
+# Paper hyperparameters (kept for reference): s=10, eta=0.05, dt just below the
+# stability bound l_s / L, single chain x 1e3 post-burn-in samples, Moreau-Yosida
+# envelope of the TV prior with lambda = 1/L_f. The TV weight beta is the log-linear
+# MAP heuristic of uqct.models.iterative; scripts/calibrate_skrock.py (ECE on the
+# first 10 test images, alpha=0.05) found the bare heuristic over-covers
+# (cov@95 ~ 0.99) and that ~2x it minimises ECE (cov@95 ~ 0.93-0.96) -- hence
+# tv_weight_calibration = 2.0. Set tv_weight_calibration = 1.0 for the bare heuristic
+# (paper-spirit beta). Per-cell deviations from 2x go under
+# [[eval-sparse.skrock.calibrated]] (also written by scripts/calibrate_skrock.py;
+# uqct.eval.cli uses those if present, else tv_weight_calibration).
+intensities = [1e4, 1e5, 1e6, 1e7, 1e8, 1e9]
+seed_range = [0, 10]
+n_burnin = 1000
+n_samples = 1000
+n_stages = 10
+eta = 0.05
+dt_perc = 0.95
+prior = "tv"          # "tv" (Moreau-Yosida TV) or "none" (MLE Langevin; not recommended)
+tv_weight = -1.0      # -1 = auto: tv_weight_calibration x heuristic(total_intensity)
+tv_weight_calibration = 2.0   # 2.0 = ECE-calibrated; 1.0 = bare MAP heuristic (paper)
+my_lambda_factor = 1.0
+chambolle_iters = 25
+lipschitz_iters = 40
+sampler_seed = 0
+
+# === Calibrated per-(dataset, intensity) overrides (FBPUNet estimator) ===
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lung"
+intensity = 1.0e+04
+rotation_std_deg = 64.0
+flip = false
+# calibration_error = 0.3131
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lung"
+intensity = 1.0e+05
+rotation_std_deg = 64.0
+flip = true
+# calibration_error = 0.2739
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lung"
+intensity = 1.0e+06
+rotation_std_deg = 64.0
+flip = true
+# calibration_error = 0.2120
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lung"
+intensity = 1.0e+07
+rotation_std_deg = 128.0
+flip = true
+# calibration_error = 0.2667
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lung"
+intensity = 1.0e+08
+rotation_std_deg = 64.0
+flip = true
+# calibration_error = 0.3450
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lung"
+intensity = 1.0e+09
+rotation_std_deg = 64.0
+flip = true
+# calibration_error = 0.4033
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "composite"
+intensity = 1.0e+04
+rotation_std_deg = 64.0
+flip = true
+# calibration_error = 0.3446
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "composite"
+intensity = 1.0e+05
+rotation_std_deg = 64.0
+flip = false
+# calibration_error = 0.3131
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "composite"
+intensity = 1.0e+06
+rotation_std_deg = 16.0
+flip = true
+# calibration_error = 0.3172
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "composite"
+intensity = 1.0e+07
+rotation_std_deg = 4.0
+flip = true
+# calibration_error = 0.2555
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "composite"
+intensity = 1.0e+08
+rotation_std_deg = 8.0
+flip = true
+# calibration_error = 0.2700
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "composite"
+intensity = 1.0e+09
+rotation_std_deg = 16.0
+flip = true
+# calibration_error = 0.3058
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+04
+rotation_std_deg = 2.0
+flip = true
+# calibration_error = 0.6748
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+05
+rotation_std_deg = 2.0
+flip = true
+# calibration_error = 0.4568
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+06
+rotation_std_deg = 2.0
+flip = true
+# calibration_error = 0.1885
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+07
+rotation_std_deg = 2.0
+flip = true
+# calibration_error = 0.1493
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+08
+rotation_std_deg = 8.0
+flip = true
+# calibration_error = 0.1591
+
+[[eval-sparse.equivariant_bootstrapping.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+09
+rotation_std_deg = 8.0
+flip = true
+# calibration_error = 0.1692
+
+# === Calibrated SK-ROCK TV weight per (dataset, intensity) ===
+# Smallest-ECE multiple of the MAP-heuristic beta on the first 10 test images
+# (pure ECE objective, no coverage floor); written by scripts/calibrate_skrock.py.
+# Cells not listed use tv_weight_calibration.
+[[eval-sparse.skrock.calibrated]]
+dataset = "composite"
+intensity = 1.0e+04
+tv_weight = 1.220703e+01
+tv_weight_multiplier = 4.0
+# ECE 0.0714  cov@95 0.978  CIw@95 0.6732  (x2.0 ECE 0.0715)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "composite"
+intensity = 1.0e+05
+tv_weight = 4.836710e+00
+tv_weight_multiplier = 1.0
+# ECE 0.0646  cov@95 0.962  CIw@95 0.4647  (x2.0 ECE 0.1982)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "composite"
+intensity = 1.0e+06
+tv_weight = 7.665669e+00
+tv_weight_multiplier = 1.0
+# ECE 0.0346  cov@95 0.928  CIw@95 0.2919  (x2.0 ECE 0.2014)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "composite"
+intensity = 1.0e+07
+tv_weight = 1.214927e+01
+tv_weight_multiplier = 1.0
+# ECE 0.0506  cov@95 0.912  CIw@95 0.1981  (x2.0 ECE 0.2323)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "composite"
+intensity = 1.0e+08
+tv_weight = 1.203456e+00
+tv_weight_multiplier = 0.0625
+# ECE 0.0476  cov@95 0.934  CIw@95 0.3585  (x2.0 ECE 0.2327)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "composite"
+intensity = 1.0e+09
+tv_weight = 1.525879e+01
+tv_weight_multiplier = 0.5
+# ECE 0.0406  cov@95 0.906  CIw@95 0.0906  (x2.0 ECE 0.2247)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+04
+tv_weight = 7.629395e-01
+tv_weight_multiplier = 0.25
+# ECE 0.1134  cov@95 0.997  CIw@95 0.9881  (x2.0 ECE 0.1478)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+05
+tv_weight = 2.418355e+00
+tv_weight_multiplier = 0.5
+# ECE 0.1054  cov@95 0.996  CIw@95 0.7684  (x2.0 ECE 0.1929)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+06
+tv_weight = 3.832835e+00
+tv_weight_multiplier = 0.5
+# ECE 0.1137  cov@95 0.996  CIw@95 0.5803  (x2.0 ECE 0.2893)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+07
+tv_weight = 1.214927e+01
+tv_weight_multiplier = 1.0
+# ECE 0.1042  cov@95 0.905  CIw@95 0.2127  (x2.0 ECE 0.3081)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+08
+tv_weight = 6.017278e-01
+tv_weight_multiplier = 0.03125
+# ECE 0.0140  cov@95 0.920  CIw@95 0.3696  (x2.0 ECE 0.1562)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "lamino"
+intensity = 1.0e+09
+tv_weight = 3.051758e+01
+tv_weight_multiplier = 1.0
+# ECE 0.0411  cov@95 0.953  CIw@95 0.0745  (x2.0 ECE 0.0576)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "lung"
+intensity = 1.0e+04
+tv_weight = 3.814697e-01
+tv_weight_multiplier = 0.125
+# ECE 0.1156  cov@95 0.988  CIw@95 0.9530  (x2.0 ECE 0.2482)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "lung"
+intensity = 1.0e+08
+tv_weight = 6.017278e-01
+tv_weight_multiplier = 0.03125
+# ECE 0.0667  cov@95 0.961  CIw@95 0.2574  (x2.0 ECE 0.0797)
+
+[[eval-sparse.skrock.calibrated]]
+dataset = "lung"
+intensity = 1.0e+09
+tv_weight = 1.907349e+00
+tv_weight_multiplier = 0.0625
+# ECE 0.0352  cov@95 0.905  CIw@95 0.0999  (x2.0 ECE 0.0740)

@@ -8,10 +8,12 @@ import torch
 from uqct.datasets.utils import DatasetName
 from uqct.eval.bootstrapping import run_bootstrapping
 from uqct.eval.diffusion import run_diffusion
+from uqct.eval.equivariant_bootstrapping import run_equivariant_bootstrapping
 from uqct.eval.fbp import run_fbp
 from uqct.eval.iterative import run_iterative
 from uqct.eval.unet import run_unet
 from uqct.eval.unet_ensemble import run_unet_ensemble
+from uqct.other_methods.skrock import run_skrock
 from uqct.utils import get_root_dir
 
 
@@ -565,59 +567,160 @@ def _dispatch(
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Shared plumbing for the per-method subcommands (bootstrapping / equivariant-
+# bootstrapping / skrock): settings loading, the (dataset x intensity x seed x
+# image-chunk) grid, the --no-duplicate skip check, and calibrated-cell lookup.
+# ---------------------------------------------------------------------------
+def _load_eval_section(
+    sparse: bool, method_key: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load the ``eval-sparse`` / ``eval-dense`` section of ``settings.toml`` and
+    the ``method_key`` sub-table. Echoes and ``sys.exit(1)`` on any missing piece.
+    Returns ``(section_settings, method_cfg)``."""
+    settings_path = get_root_dir() / "uqct" / "settings.toml"
+    if not settings_path.exists():
+        click.echo(f"Settings file not found at {settings_path}")
+        sys.exit(1)
+    section = "eval-sparse" if sparse else "eval-dense"
+    with open(settings_path, "rb") as f:
+        full_config = tomllib.load(f)
+    if section not in full_config:
+        click.echo(f"Section [{section}] not found in settings.toml")
+        sys.exit(1)
+    settings = full_config[section]
+    if method_key not in settings:
+        click.echo(f"No [{method_key}] config found in {section}")
+        sys.exit(1)
+    return settings, settings[method_key]
+
+
+def _build_chunked_grid(
+    settings: dict[str, Any], method_key: str, chunk: int = 10
+) -> list[dict[str, Any]]:
+    """Cartesian grid (dataset x intensity x seed x image-chunk) for the methods
+    that chunk the image range into blocks of ``chunk`` images (equivariant
+    bootstrapping, SK-ROCK). ``settings[method_key]`` may override ``intensities``
+    (default ``total_intensity_values``) and ``seed_range`` (default ``[0, 1]``)."""
+    cfg = settings.get(method_key, {})
+    intensities = cfg.get("intensities", settings["total_intensity_values"])
+    seed_lo, seed_hi = cfg.get("seed_range", [0, 1])
+    start, end = settings["image_range"]
+    chunks = [(i, min(i + chunk, end)) for i in range(start, end, chunk)]
+    return [
+        {"dataset": d, "intensity": i_lvl, "seed": s, "image_range": r}
+        for d in settings["datasets"]
+        for i_lvl in intensities
+        for s in range(seed_lo, seed_hi)
+        for r in chunks
+    ]
+
+
+def _run_exists(
+    model: str,
+    dataset: str,
+    intensity: float,
+    sparse: bool,
+    image_range: tuple[int, int],
+    seed: int,
+) -> bool:
+    """Whether a results parquet already exists for this cell (same prefix the
+    ``run`` command's ``--no-duplicate`` check uses: ``model:dataset:intensity:
+    sparse:start-end:seed:timestamp.parquet``)."""
+    from uqct.utils import get_results_dir
+
+    prefix = f"{model}:{dataset}:{intensity}:{sparse}:{image_range[0]}-{image_range[1]}:{seed}:"
+    return bool(list((get_results_dir() / "runs").glob(f"{prefix}*.parquet")))
+
+
+def _skip_if_done(
+    model: str, task: dict[str, Any], sparse: bool, duplicate: bool
+) -> bool:
+    """``True`` (and logs a "Skipping ..." line) when ``--no-duplicate`` is in
+    effect and a result for this cell already exists; ``False`` otherwise."""
+    if duplicate or not _run_exists(
+        model,
+        task["dataset"],
+        task["intensity"],
+        sparse,
+        task["image_range"],
+        task["seed"],
+    ):
+        return False
+    click.echo(
+        f"Skipping {model} {task['dataset']} I={task['intensity']:.0e} "
+        f"{task['image_range']} seed={task['seed']} (results already exist)."
+    )
+    return True
+
+
+def _find_calibrated(
+    cfg: dict[str, Any], task: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The ``[[...method....calibrated]]`` entry matching this task's
+    ``(dataset, intensity)``, if one was recorded; else ``None``."""
+    for entry in cfg.get("calibrated", []):
+        if entry.get("dataset") == task["dataset"] and float(
+            entry.get("intensity", -1)
+        ) == float(task["intensity"]):
+            return entry
+    return None
+
+
+def _dispatch_jobs(
+    grid: list[dict[str, Any]], job_id: int | None, label: str, run_one
+) -> None:
+    """Run ``run_one(task)`` for one selected ``job_id`` (a SLURM array element) or,
+    if ``job_id is None``, every task in ``grid``. Echoes progress; exits on a bad id."""
+    if job_id is not None:
+        if not (0 <= job_id < len(grid)):
+            click.echo(f"Job ID {job_id} out of range (0-{len(grid) - 1})")
+            sys.exit(1)
+        click.echo(f"Running {label} job {job_id}/{len(grid) - 1}.")
+        run_one(grid[job_id])
+        return
+    click.echo(f"Running {len(grid)} {label} jobs locally...")
+    for i, task in enumerate(grid):
+        click.echo(f"\n--- Job {i + 1}/{len(grid)} ---")
+        run_one(task)
+
+
 @cli.command(name="bootstrapping")
 @click.option(
     "--job-id", type=int, default=None, help="SLURM array job ID to select config"
 )
 @click.option("--sparse", is_flag=True, default=True, help="Use sparse setting")
-def bootstrapping(job_id: int | None, sparse: bool):
+@click.option(
+    "--duplicate/--no-duplicate",
+    default=False,
+    show_default=True,
+    help="Allow duplicate runs. If False (default), skips cells whose results already exist.",
+)
+def bootstrapping(job_id: int | None, sparse: bool, duplicate: bool):
     """Run bootstrapping evaluation."""
-    root = get_root_dir()
-    settings_path = root / "uqct" / "settings.toml"
-
-    if not settings_path.exists():
-        click.echo(f"Settings file not found at {settings_path}")
-        sys.exit(1)
-
-    section = "eval-sparse" if sparse else "eval-dense"
-    with open(settings_path, "rb") as f:
-        full_config = tomllib.load(f)
-        if section not in full_config:
-            click.echo(f"Section [{section}] not found in settings.toml")
-            sys.exit(1)
-        settings = full_config[section]
-
-    # Check if bootstrapping config exists
-    if "bootstrapping" not in settings:
-        click.echo(f"No [bootstrapping] config found in {section}")
-        sys.exit(1)
-
-    bs_cfg = settings["bootstrapping"]
+    settings, bs_cfg = _load_eval_section(sparse, "bootstrapping")
     n_bootstraps = bs_cfg.get("n_bootstraps", 1000)
-
-    # Build Grid
     grid = build_bootstrapping_grid(settings)
 
-    # Execution
     if job_id is not None:
-        if job_id < 0 or job_id >= len(grid):
+        if not (0 <= job_id < len(grid)):
             click.echo(f"Job ID {job_id} out of range (0-{len(grid) - 1})")
             sys.exit(1)
-
         task = grid[job_id]
         click.echo(f"Running Bootstrapping Job ID {job_id} (Method: {task['method']})")
-        execute_bootstrapping_task(task, sparse, settings, n_bootstraps)
+        execute_bootstrapping_task(task, sparse, settings, n_bootstraps, duplicate)
     else:
         click.echo(f"Running {len(grid)} bootstrapping jobs locally...")
         for i, task in enumerate(grid):
             click.echo(f"\n--- Job {i + 1}/{len(grid)}: {task['method']} ---")
-            execute_bootstrapping_task(task, sparse, settings, n_bootstraps)
+            execute_bootstrapping_task(task, sparse, settings, n_bootstraps, duplicate)
 
 
-def execute_bootstrapping_task(task, sparse, settings, n_bootstraps):
-    # Common parameters
-    n_angles = settings.get("n_angles", 200)
-    max_angle = settings.get("max_angle", 180)
+def execute_bootstrapping_task(
+    task, sparse, settings, n_bootstraps, duplicate: bool = False
+):
+    if _skip_if_done(f"bootstrapping_{task['method']}", task, sparse, duplicate):
+        return
 
     run_bootstrapping(
         dataset=task["dataset"],
@@ -625,11 +728,108 @@ def execute_bootstrapping_task(task, sparse, settings, n_bootstraps):
         total_intensity=task["intensity"],
         image_range=task["image_range"],
         seed=task["seed"],
-        n_angles=n_angles,
-        max_angle=max_angle,
+        n_angles=settings.get("n_angles", 200),
+        max_angle=settings.get("max_angle", 180),
         n_bootstraps=n_bootstraps,
         method=task["method"],
     )
+
+
+@cli.command(name="equivariant-bootstrapping")
+@click.option(
+    "--job-id", type=int, default=None, help="SLURM array job ID to select config"
+)
+@click.option("--sparse", is_flag=True, default=True, help="Use sparse setting")
+@click.option(
+    "--duplicate/--no-duplicate",
+    default=False,
+    show_default=True,
+    help="Allow duplicate runs. If False (default), skips cells whose results already exist.",
+)
+def equivariant_bootstrapping(job_id: int | None, sparse: bool, duplicate: bool):
+    """Run equivariant bootstrapping evaluation (estimator: FBPUNet)."""
+    settings, eb_cfg = _load_eval_section(sparse, "equivariant_bootstrapping")
+    grid = _build_chunked_grid(settings, "equivariant_bootstrapping")
+    n_angles = settings.get("n_angles", 200)
+    max_angle = settings.get("max_angle", 180)
+    n_bootstraps = eb_cfg.get("n_bootstraps", 100)
+
+    def run_one(task: dict[str, Any]) -> None:
+        if _skip_if_done("equivariant_bootstrapping", task, sparse, duplicate):
+            return
+        entry = _find_calibrated(eb_cfg, task)
+        rotation_std_deg = (
+            float(entry["rotation_std_deg"])
+            if entry
+            else float(eb_cfg.get("rotation_std_deg", 8.0))
+        )
+        flip = bool(entry["flip"]) if entry else bool(eb_cfg.get("flip", False))
+        run_equivariant_bootstrapping(
+            dataset=task["dataset"],
+            sparse=sparse,
+            total_intensity=task["intensity"],
+            image_range=task["image_range"],
+            seed=task["seed"],
+            n_angles=n_angles,
+            max_angle=max_angle,
+            n_bootstraps=n_bootstraps,
+            rotation_std_deg=rotation_std_deg,
+            flip=flip,
+        )
+
+    _dispatch_jobs(grid, job_id, "equivariant bootstrapping", run_one)
+
+
+@cli.command(name="skrock")
+@click.option(
+    "--job-id", type=int, default=None, help="SLURM array job ID to select config"
+)
+@click.option("--sparse", is_flag=True, default=True, help="Use sparse setting")
+@click.option(
+    "--duplicate/--no-duplicate",
+    default=False,
+    show_default=True,
+    help="Allow duplicate runs. If False (default), skips cells whose results already exist.",
+)
+def skrock(job_id: int | None, sparse: bool, duplicate: bool):
+    """Run SK-ROCK Langevin sampler evaluation."""
+    settings, sk_cfg = _load_eval_section(sparse, "skrock")
+    grid = _build_chunked_grid(settings, "skrock")
+    n_angles = settings.get("n_angles", 200)
+    max_angle = settings.get("max_angle", 180)
+
+    def run_one(task: dict[str, Any]) -> None:
+        if _skip_if_done("skrock", task, sparse, duplicate):
+            return
+        entry = _find_calibrated(sk_cfg, task)
+        # ECE-calibrated TV weight for this (dataset, intensity) if one was recorded
+        # (scripts/calibrate_skrock.py), else sk_cfg["tv_weight"] (normally -1 = auto).
+        tv_weight = (
+            float(entry["tv_weight"]) if entry else float(sk_cfg.get("tv_weight", -1.0))
+        )
+        run_skrock(
+            dataset=task["dataset"],
+            sparse=sparse,
+            total_intensity=task["intensity"],
+            image_range=task["image_range"],
+            seed=task["seed"],
+            n_angles=n_angles,
+            max_angle=max_angle,
+            n_burnin=sk_cfg.get("n_burnin", 1000),
+            n_samples=sk_cfg.get("n_samples", 1000),
+            n_stages=sk_cfg.get("n_stages", 10),
+            eta=sk_cfg.get("eta", 0.05),
+            dt_perc=sk_cfg.get("dt_perc", 0.95),
+            prior=sk_cfg.get("prior", "tv"),
+            tv_weight=tv_weight,
+            tv_weight_calibration=sk_cfg.get("tv_weight_calibration", 2.0),
+            my_lambda_factor=sk_cfg.get("my_lambda_factor", 1.0),
+            chambolle_iters=sk_cfg.get("chambolle_iters", 25),
+            lipschitz_iters=sk_cfg.get("lipschitz_iters", 40),
+            sampler_seed=sk_cfg.get("sampler_seed", 0),
+        )
+
+    _dispatch_jobs(grid, job_id, "SK-ROCK", run_one)
 
 
 if __name__ == "__main__":

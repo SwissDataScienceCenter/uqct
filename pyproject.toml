@@ -25,6 +25,7 @@ dependencies = [
   "onnxruntime-gpu>=1.23",
   "tensorrt>=10.14.1.48.post1",
   "pyarrow>=23.0.0",
+  "deepinv>=0.4.0",
 ]
 
 [tool.uv]

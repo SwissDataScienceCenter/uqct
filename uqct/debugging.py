@@ -11,7 +11,7 @@ def _to_numpy(img: torch.Tensor | np.ndarray) -> np.ndarray:
     return img
 
 
-def plot_img(*images, name=None, max_cols=5, share_range=False):
+def plot_img(*images, name=None, max_cols=5):
     n = len(images)
     if n == 0:
         return
@@ -22,10 +22,7 @@ def plot_img(*images, name=None, max_cols=5, share_range=False):
     axes = np.atleast_1d(axes).ravel()
 
     for i, img in enumerate(images):
-        vmin, vmax = 0, 1
-        if share_range:
-            vmin, vmax = 0, 1
-        axes[i].imshow(_to_numpy(img), cmap="gray", vmin=vmin, vmax=vmax)
+        axes[i].imshow(_to_numpy(img), cmap="gray", vmin=0, vmax=1)
         axes[i].axis("off")
 
     # hide unused axes

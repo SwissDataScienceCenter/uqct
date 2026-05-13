@@ -224,3 +224,9 @@ scratch/
 results
 plots/
 .trash
+Claude.md
+new_baseline/
+rebuttal/
+*.pdf
+CLAUDE.md
+/rotation_results.parquet
