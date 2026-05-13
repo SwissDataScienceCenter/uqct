@@ -186,7 +186,7 @@ def main() -> None:
     parser.add_argument(
         "--method",
         required=True,
-        choices=["skrock", "equivariant_bootstrapping_fbp"],
+        choices=["skrock", "equivariant_bootstrapping_fbp", "equivariant_bootstrapping"],
         help="Which method to process.",
     )
     parser.add_argument("--out", type=Path, default=None)
@@ -203,9 +203,22 @@ def main() -> None:
             device=dev,
         )
     else:
+        # The current code names files `equivariant_bootstrapping:*` (estimator is
+        # always FBPUNet now). We keep the *parquet label* as
+        # `equivariant_bootstrapping_fbp` so the plot script and the cached
+        # uq_comparison.json stay aligned -- but read whichever prefix is on disk.
+        glob_pattern = "equivariant_bootstrapping:*.h5"
+        if args.method == "equivariant_bootstrapping_fbp":
+            # Back-compat: also accept the old _fbp suffix on disk.
+            from glob import glob
+            runs_dir = get_results_dir() / "runs"
+            if not glob(str(runs_dir / glob_pattern)) and glob(
+                str(runs_dir / "equivariant_bootstrapping_fbp:*.h5")
+            ):
+                glob_pattern = "equivariant_bootstrapping_fbp:*.h5"
         df = process_method(
             method="equivariant_bootstrapping_fbp",
-            glob_pattern="equivariant_bootstrapping_fbp:*.h5",
+            glob_pattern=glob_pattern,
             chosen_ci="percentile",
             device=dev,
         )
