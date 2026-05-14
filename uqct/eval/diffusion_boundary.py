@@ -562,12 +562,17 @@ def main(
             time_step = 0
     conf_coefs = nll_pred_cum_full[:, time_step]
 
+    # ONNX/TensorRT is sufficient: both backend paths set requires_grad=False on
+    # the U-Net, and the boundary guidance loop only takes gradients w.r.t. x_t
+    # (the current sample), not the model parameters. Using onnx=True lets us
+    # run on clusters that only ship the .onnx artifacts.
     diffusion = Diffusion(
         dataset=dataset,
         num_steps=100,
         gradient_steps=50,
         lr=1e-2,
         cond=True,
+        onnx=True,
         verbose=verbose,
         anneal_lr=anneal_lr,
     )
