@@ -46,7 +46,7 @@ MODEL_NAMES = {
     "bootstrapping_fbp": "FBP (Boot.)",
     "bootstrapping_unet": "U-Net (Boot.)",
     "bootstrapping_unet_ensemble": "U-Net Ens. (Boot.)",
-    "equivariant_bootstrapping_fbp": "FBP (Equiv. Boot.)",
+    "equivariant_bootstrapping_fbp": "Equiv. Bootstr.",
     "boundary": "Boundary",
     "skrock": "SK-ROCK",
     "distance_maximization": "Worst-Case",
