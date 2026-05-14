@@ -39,8 +39,10 @@ seed_range = [0, 10]
 [eval-sparse.equivariant_bootstrapping]
 # Estimator is always FBPUNet (member 0). Defaults follow Tachella & Pereyra
 # (AISTATS 2024) tomography setting: helper_fcns.bootstrap with max_angle=8,
-# max_shift=0, no flips, MC=100.
-n_bootstraps = 100
+# max_shift=0, no flips, but raised to MC=1000 to match the bootstrap baselines'
+# n_bootstraps=1000 (so percentile CI tails are estimated from the same number
+# of samples across all bootstrap-style baselines).
+n_bootstraps = 1000
 intensities = [1e4, 1e5, 1e6, 1e7, 1e8, 1e9]
 seed_range = [0, 10]
 rotation_std_deg = 8.0
