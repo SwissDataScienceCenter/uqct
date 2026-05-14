@@ -241,11 +241,25 @@ def _load_precomputed_metrics(method: str) -> pd.DataFrame | None:
     return pd.read_parquet(parquet)
 
 
+# Method -> CI variant exposed as the 'chosen_*' alias by calculate_metrics.
+# Matches the chosen_ci_fn branching in the h5-sample path further below.
+CHOSEN_CI_BY_METHOD = {
+    "boundary": "student_t",
+    "unet_ensemble": "student_t",
+    "skrock": "percentile",
+    "equivariant_bootstrapping_fbp": "percentile",
+    "bootstrapping_fbp": "percentile",
+    "bootstrapping_unet": "percentile",
+    # default below: "percentile"
+}
+
+
 def _metrics_from_precomputed(
-    df: pd.DataFrame, dataset: str, intensity: float
+    df: pd.DataFrame, dataset: str, intensity: float, method: str
 ) -> dict[str, float]:
     """Aggregate per-image rows (already computed elsewhere) to mean+std at a
-    given (dataset, intensity). Returns the same keys ``calculate_metrics`` does."""
+    given (dataset, intensity). Returns the same keys ``calculate_metrics`` does,
+    including method-appropriate ``chosen_*`` aliases."""
     sub = df[(df["dataset"] == dataset) & (np.isclose(df["intensity"], intensity))]
     if len(sub) == 0:
         return {}
@@ -258,6 +272,15 @@ def _metrics_from_precomputed(
         vals = sub[c].to_numpy()
         ret[c] = float(np.nanmean(vals))
         ret[f"{c}_std"] = float(np.nanstd(vals))
+    # Alias the method-appropriate CI variant as 'chosen_*' so the combined
+    # plot (which only renders entries that have 'chosen_ind_cov') picks this
+    # method up.
+    chosen_ci = CHOSEN_CI_BY_METHOD.get(method, "percentile")
+    for metric in ("width", "ind_cov", "sim_cov"):
+        src = f"{chosen_ci}_{metric}"
+        if src in ret:
+            ret[f"chosen_{metric}"] = ret[src]
+            ret[f"chosen_{metric}_std"] = ret[f"{src}_std"]
     return ret
 
 
@@ -270,7 +293,7 @@ def calculate_metrics(
     # methods). Aggregates without re-reading h5 samples.
     precomp = _load_precomputed_metrics(method)
     if precomp is not None:
-        m = _metrics_from_precomputed(precomp, dataset, intensity)
+        m = _metrics_from_precomputed(precomp, dataset, intensity, method)
         if m:
             return m
 
