@@ -134,14 +134,18 @@ def process_method(
     runs_subdir: str = "runs",
     h5_key: str = "preds",
     sample_axis_slice: tuple | None = None,
+    seeds: list[int] | None = None,
 ) -> pd.DataFrame:
     """Walk all ``glob_pattern`` files, return one row per (image, ci_method).
 
     ``runs_subdir`` defaults to ``results/runs/`` but can be set to e.g.
     ``boundary_sampling`` for the diffusion-boundary outputs. ``h5_key`` and
     ``sample_axis_slice`` let callers extract the right tensor shape per method
-    (default = ``preds[:, -1]`` -> ``(N, R, H, W)``).
+    (default = ``preds[:, -1]`` -> ``(N, R, H, W)``). ``seeds`` filters to a
+    specific seed list; ``None`` means seed=0 only (back-compat).
     """
+    if seeds is None:
+        seeds = [0]
     runs_dir = get_results_dir() / runs_subdir
     files = [Path(p) for p in glob(str(runs_dir / glob_pattern))]
     print(f"{method}: {len(files)} files matched {glob_pattern}")
@@ -149,9 +153,9 @@ def process_method(
     kept = [
         (f, m)
         for f, m in parsed
-        if m is not None and m["seed"] == 0 and m["start"] >= image_start_min
+        if m is not None and m["seed"] in seeds and m["start"] >= image_start_min
     ]
-    print(f"{method}: {len(kept)} after seed=0 + start>={image_start_min}")
+    print(f"{method}: {len(kept)} after seeds={seeds} + start>={image_start_min}")
     kept_files = latest_per_cell([f for f, _ in kept])
     print(f"{method}: {len(kept_files)} after dedup")
 
@@ -218,6 +222,12 @@ def main() -> None:
         default=10,
         help="Drop cells whose `start` < this. Use 0 to keep the calibration window.",
     )
+    parser.add_argument(
+        "--seeds",
+        type=lambda s: [int(x) for x in s.split(",")],
+        default=[0],
+        help="Comma-separated seed list (default: 0). Use 0,1,2,...,9 for all.",
+    )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
@@ -231,6 +241,7 @@ def main() -> None:
             chosen_ci="percentile",  # SK-ROCK posterior samples; percentile is the natural choice.
             device=dev,
             image_start_min=args.image_start_min,
+            seeds=args.seeds,
         )
     elif args.method in ("bootstrapping_fbp", "bootstrapping_unet"):
         df = process_method(
@@ -239,6 +250,7 @@ def main() -> None:
             chosen_ci="percentile",
             device=dev,
             image_start_min=args.image_start_min,
+            seeds=args.seeds,
         )
     elif args.method == "boundary":
         # Boundary lives under results/boundary_sampling/, with h5 key "sampled_images"
@@ -252,6 +264,7 @@ def main() -> None:
             runs_subdir="boundary_sampling",
             h5_key="sampled_images",
             sample_axis_slice=(slice(None), -1, slice(None), 0, slice(None), slice(None)),
+            seeds=args.seeds,
         )
     else:
         # The current code names files `equivariant_bootstrapping:*` (estimator is
@@ -273,6 +286,7 @@ def main() -> None:
             chosen_ci="percentile",
             device=dev,
             image_start_min=args.image_start_min,
+            seeds=args.seeds,
         )
 
     out = args.out or (
