@@ -95,7 +95,10 @@ def main() -> None:
         ("width",   "Mean 95% CI width",      None,         True,
          "uq_methods_alpha_calibrated_ci_width"),
     ]:
-        fig, axes = plt.subplots(1, 3, figsize=(12, 3.8), sharey=True)
+        # Single-line plot per method (calibrated values only). Same layout
+        # as plots/uq_comparsion/sparse_combined_chosen_metrics so the reader
+        # can place this side-by-side with the paper baseline.
+        fig, axes = plt.subplots(1, 3, figsize=(11.5, 3.6), sharey=True)
         for col, ds in enumerate(DATASETS):
             ax = axes[col]
             for m in METHODS:
@@ -105,13 +108,10 @@ def main() -> None:
                 color = MODEL_COLORS.get(m, "gray")
                 label = MODEL_NAMES.get(m, m)
                 x = sub.intensity.to_numpy()
-                # raw = solid, calibrated = dashed (paired by color so each method
-                # has the same hue across raw/calibrated).
-                ax.plot(x, sub[f"{metric}_raw"].to_numpy(), marker="o", ms=4,
-                        lw=1.4, color=color, label=f"{label}  (hyper-param only)")
-                ax.plot(x, sub[f"{metric}_cal"].to_numpy(), marker="x", ms=5,
-                        lw=1.2, color=color, ls="--", alpha=0.9,
-                        label=f"{label}  (+ $\\alpha$-cal)")
+                y = sub[f"{metric}_cal"].to_numpy()
+                yerr = sub[f"{metric}_cal_std"].to_numpy() / np.sqrt(100)  # SEM over 100 imgs
+                ax.errorbar(x, y, yerr=yerr, marker="x", ms=5, lw=1.4,
+                            capsize=2, color=color, label=label)
             ax.set_xscale("log")
             if log_y:
                 ax.set_yscale("log")
@@ -124,22 +124,17 @@ def main() -> None:
             ax.set_xlabel("Total intensity $N_0$")
             ax.grid(alpha=0.3, which="both")
         axes[0].set_ylabel(ylabel)
-        # Two-row legend: solid=raw, dashed=alpha-cal. Show only once.
         handles, labels = axes[0].get_legend_handles_labels()
-        # Dedup
-        seen = set()
-        dedup = []
-        for h, l in zip(handles, labels):
-            if l not in seen:
-                dedup.append((h, l))
-                seen.add(l)
-        fig.legend(*zip(*dedup), loc="lower center",
-                   bbox_to_anchor=(0.5, -0.10), ncol=4, frameon=False, fontsize=7)
+        fig.legend(handles, labels, loc="lower center",
+                   bbox_to_anchor=(0.5, -0.02),
+                   ncol=max(len(handles), 5), frameon=False, fontsize=8,
+                   columnspacing=1.2)
         fig.suptitle(
-            f"$\\alpha$-calibration vs hyperparam-only ({metric}, post-hoc, NOT the paper protocol)",
+            f"$\\alpha$-calibration applied (seed 0, post-hoc, NOT the paper protocol) "
+            f"-- {metric}",
             y=1.03,
         )
-        fig.tight_layout(rect=(0, 0.14, 1, 1))
+        fig.tight_layout(rect=(0, 0.06, 1, 1))
         for ext in ("pdf", "png"):
             fig.savefig(plots_dir / f"{fname}.{ext}", dpi=150, bbox_inches="tight")
             print(f"wrote {plots_dir / f'{fname}.{ext}'}")
