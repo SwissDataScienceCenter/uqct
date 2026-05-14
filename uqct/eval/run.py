@@ -168,7 +168,15 @@ class Run:
         df.to_parquet(fp_parquet, index=False)
 
         with h5py.File(fp_preds, "w") as f:
-            f.create_dataset("preds", data=self.preds, dtype="float32")
+            # Store as float16 + gzip-4. Image samples are in [0, 1] so the
+            # ~3-4 decimals of float16 precision are sufficient for downstream
+            # percentile/coverage statistics; gzip-4 brings the file to ~32% of
+            # the float32 + no-compression baseline (e.g. K=1000 bootstrap cell:
+            # 626 MB -> 199 MB).
+            f.create_dataset(
+                "preds", data=self.preds, dtype="float16",
+                compression="gzip", compression_opts=4,
+            )
 
         logger.info(f"Saved run data at \n- {fp_parquet}\n- {fp_preds}")
 
