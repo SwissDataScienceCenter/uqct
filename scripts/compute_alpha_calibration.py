@@ -79,8 +79,16 @@ METHOD_CFG = {
 }
 
 # Sweep grids. ALPHA_GRID is what enters ECE; C_GRID is the width-scale sweep.
+# C_GRID spans 0.1..50 -- the previous 0.1..4 cap clipped cells whose raw CI is
+# so tight that 4x expansion still doesn't reach nominal coverage (notably
+# bootstrap_unet at 1e4 and bootstrap_fbp at 1e4). Finer resolution near 1
+# (where most methods sit), coarser further out.
 ALPHA_GRID = [0.01, 0.05, 0.10, 0.20, 0.50]
-C_GRID = np.r_[np.linspace(0.1, 1.0, 19), np.linspace(1.1, 4.0, 30)]
+C_GRID = np.unique(np.concatenate([
+    np.linspace(0.05, 1.0, 20),       # shrinkage candidates (0.05 step)
+    np.linspace(1.05, 5.0, 80),       # near 1 (0.05 step)
+    np.geomspace(5.0, 50.0, 25)[1:],  # log-spaced expansion up to 50
+]))
 
 NAME_RE = re.compile(
     r"^[\w_]+:(?P<ds>[a-z]+):(?P<intensity>[\d.eE+-]+):"
