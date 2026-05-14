@@ -36,7 +36,27 @@ from uqct.vis.style import (
 # Configuration matching the user's setup
 TOTAL_INTENSITIES = [1e4, 1e5, 1e6, 1e7, 1e8, 1e9]
 DATASETS = ["lamino", "composite", "lung"]
-METHODS = ["fbp", "unet", "unet_ensemble", "boundary", "distance_maximization"]
+# SK-ROCK + equivariant bootstrap are sample-based posterior methods like the
+# unet_ensemble path -- treated as `is_bootstrapping=False` with percentile CI.
+METHODS = [
+    "fbp",
+    "unet",
+    "unet_ensemble",
+    "boundary",
+    "distance_maximization",
+    "skrock",
+    "equivariant_bootstrapping_fbp",
+]
+# Methods that live in results/runs/ but aren't bootstrap-style file naming.
+SAMPLE_BASED_METHODS = {
+    "unet_ensemble",
+    "skrock",
+    "equivariant_bootstrapping_fbp",
+}
+# Map analysis-level method name -> on-disk file prefix.
+DISK_PREFIX = {
+    "equivariant_bootstrapping_fbp": "equivariant_bootstrapping",
+}
 
 
 def load_h5_data(file_path: str, key: str = "preds") -> np.ndarray:
@@ -172,7 +192,12 @@ def find_files(
         files = glob(pattern)
         return sorted(files)
 
-    search_model = f"bootstrapping_{model}" if is_bootstrapping else model
+    if is_bootstrapping:
+        search_model = f"bootstrapping_{model}"
+    else:
+        # Allow analysis-level names to differ from on-disk prefixes (e.g.
+        # equivariant_bootstrapping_fbp -> equivariant_bootstrapping).
+        search_model = DISK_PREFIX.get(model, model)
     pattern = f"results/runs/{search_model}:{dataset}:{intensity}:True:*.parquet"
     files = glob(pattern)
     valid_files = []
@@ -203,10 +228,51 @@ def find_files(
     return valid_files
 
 
+def _load_precomputed_metrics(method: str) -> pd.DataFrame | None:
+    """Look up the per-image UQ parquet a previous ``compute_uq_skrock_eb.py``
+    run produced. Returns ``None`` if absent.
+
+    Mapping is by the analysis-level method name (``method`` here matches
+    METHODS). Per-image rows carry every CI variant's width/coverage already.
+    """
+    parquet = Path("results/plots") / f"uq_widths_coverage_{method}.parquet"
+    if not parquet.exists():
+        return None
+    return pd.read_parquet(parquet)
+
+
+def _metrics_from_precomputed(
+    df: pd.DataFrame, dataset: str, intensity: float
+) -> dict[str, float]:
+    """Aggregate per-image rows (already computed elsewhere) to mean+std at a
+    given (dataset, intensity). Returns the same keys ``calculate_metrics`` does."""
+    sub = df[(df["dataset"] == dataset) & (np.isclose(df["intensity"], intensity))]
+    if len(sub) == 0:
+        return {}
+    ret: dict[str, float] = {}
+    metric_cols = [
+        c for c in sub.columns
+        if c.endswith(("_width", "_ind_cov", "_sim_cov"))
+    ]
+    for c in metric_cols:
+        vals = sub[c].to_numpy()
+        ret[c] = float(np.nanmean(vals))
+        ret[f"{c}_std"] = float(np.nanstd(vals))
+    return ret
+
+
 def calculate_metrics(
     dataset: str, intensity: float, method: str, n_bootstraps: int | None = None
 ) -> dict[str, float]:
     """Computes all UQ statistics for a given setting."""
+
+    # Fast path: per-image parquet already computed (multi-seed for the newer
+    # methods). Aggregates without re-reading h5 samples.
+    precomp = _load_precomputed_metrics(method)
+    if precomp is not None:
+        m = _metrics_from_precomputed(precomp, dataset, intensity)
+        if m:
+            return m
 
     # helper to aggregate results
     all_metrics = defaultdict(list)
@@ -289,8 +355,10 @@ def calculate_metrics(
             all_metrics["chosen_ind_cov"].extend(ind_cov.cpu().tolist())
             all_metrics["chosen_width"].extend(width.cpu().tolist())
     else:
-        # Bootstrapping / Ensemble
-        if method == "unet_ensemble":
+        # Bootstrapping / Ensemble / posterior-sampler methods.
+        # Sample-based methods (unet_ensemble, skrock, equivariant_bootstrapping_fbp)
+        # use is_bootstrapping=False and look up the on-disk prefix via DISK_PREFIX.
+        if method in SAMPLE_BASED_METHODS:
             boot_files = find_files(dataset, intensity, method, is_bootstrapping=False)
         else:
             boot_files = find_files(
@@ -351,6 +419,17 @@ def calculate_metrics(
                 chosen_ci_fn = student_t_ci
                 if preds_boot.ndim == 5:
                     preds_boot = preds_boot[:, -1, ...]
+            elif method == "skrock":
+                # SK-ROCK posterior samples; many samples -> percentile is OK.
+                # Shape is (N, T=1, R, H, W) -> last (only) schedule step.
+                chosen_ci_fn = percentile_ci
+                if preds_boot.ndim == 5:
+                    preds_boot = preds_boot[:, -1, ...]
+            elif method == "equivariant_bootstrapping_fbp":
+                # Equivariant bootstrap also uses sample-based percentile CI.
+                chosen_ci_fn = percentile_ci
+                if preds_boot.ndim == 5:
+                    preds_boot = preds_boot[:, -1, ...]
             else:
                 chosen_ci_fn = percentile_ci
                 if preds_boot.ndim == 5:
@@ -386,31 +465,74 @@ def calculate_metrics(
 @click.option(
     "--n-bootstraps", type=int, default=None, help="Filter by number of bootstraps"
 )
-def main(n_bootstraps):
+@click.option(
+    "--cache",
+    type=click.Path(),
+    default="results/uq_comparison.json",
+    show_default=True,
+    help="Path to read cached results from. Original 'uq_comparison.json' is "
+    "treated as read-only -- missing-method entries are computed fresh and the "
+    "combined result is written to --out instead.",
+)
+@click.option(
+    "--out",
+    type=click.Path(),
+    default="results/uq_comparison_merged.json",
+    show_default=True,
+    help="Where to write the merged results JSON. Defaults to a NEW file so the "
+    "paper-canonical uq_comparison.json is never overwritten.",
+)
+def main(n_bootstraps, cache, out):
     # Gather Data
     results = {d: {m: defaultdict(list) for m in METHODS} for d in DATASETS}
 
     files_found = False
 
-    if Path("results/uq_comparison.json").exists():
-        results = json.load(open("results/uq_comparison.json"))
-        files_found = True
-    else:
-        for dataset in tqdm(DATASETS, desc="Datasets", leave=True):
-            for intensity in tqdm(TOTAL_INTENSITIES, desc="Intensities", leave=False):
-                for method in tqdm(METHODS, desc="Methods", leave=False):
-                    metrics = calculate_metrics(
-                        dataset, intensity, method, n_bootstraps=n_bootstraps
-                    )
-                    if metrics:
-                        for k, v in metrics.items():
-                            results[dataset][method][k].append(v)
-                        results[dataset][method]["intensity"].append(intensity)
-                        files_found = True
-                    else:
-                        # print(f"  Missing data for {dataset} {method} {intensity}")
-                        pass
-        json.dump(results, open("results/uq_comparison.json", "w"))
+    # Load cached results if present and reuse per-method entries. Missing
+    # methods are computed and added; the cache file itself is never written.
+    cache_data = {}
+    if Path(cache).exists():
+        cache_data = json.load(open(cache))
+        print(f"Loaded cached results from {cache}")
+
+    # Determine which (dataset, method) pairs still need computation.
+    todo: list[tuple[str, str]] = []
+    for d in DATASETS:
+        for m in METHODS:
+            cached_entry = cache_data.get(d, {}).get(m, {})
+            if cached_entry and cached_entry.get("intensity"):
+                # Reuse cache.
+                results[d][m] = cached_entry
+                files_found = True
+            else:
+                todo.append((d, m))
+
+    if todo:
+        print(f"Computing {len(todo)} missing (dataset, method) cells...")
+        for dataset, method in tqdm(todo, desc="Missing cells", leave=True):
+            # Single fresh accumulator for this (dataset, method) -- do not reset
+            # on each intensity.
+            acc: dict = defaultdict(list)
+            for intensity in tqdm(TOTAL_INTENSITIES, desc=f"{dataset}/{method}", leave=False):
+                metrics = calculate_metrics(
+                    dataset, intensity, method, n_bootstraps=n_bootstraps
+                )
+                if metrics:
+                    for k, v in metrics.items():
+                        acc[k].append(v)
+                    acc["intensity"].append(intensity)
+                    files_found = True
+            results[dataset][method] = dict(acc)
+
+    # Convert defaultdicts to plain dicts for JSON.
+    serializable = {
+        d: {m: dict(results[d][m]) if not isinstance(results[d][m], dict) else results[d][m]
+            for m in results[d]}
+        for d in results
+    }
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    json.dump(serializable, open(out, "w"))
+    print(f"Wrote merged results to {out}")
 
     if not files_found:
         print("No valid data found to plot.")
