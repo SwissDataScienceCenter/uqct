@@ -83,7 +83,14 @@ METHOD_CFG = {
 # so tight that 4x expansion still doesn't reach nominal coverage (notably
 # bootstrap_unet at 1e4 and bootstrap_fbp at 1e4). Finer resolution near 1
 # (where most methods sit), coarser further out.
-ALPHA_GRID = [0.01, 0.05, 0.10, 0.20, 0.50]
+#
+# ALPHA_GRID was originally [0.01, 0.05, 0.1, 0.2, 0.5] (multi-alpha ECE), but
+# the multi-alpha objective over-fits cal for already-near-nominal methods
+# (e.g. boundary) since the small 10-image cal set drives c < 1 to chase ECE
+# at multiple alphas simultaneously, then the resulting CI undercovers at the
+# single 95% target on test. Single-alpha=0.05 coverage matching is robust:
+# objective is exactly |emp_cov(c, 0.05) - 0.95| on the cal images.
+ALPHA_GRID = [0.05]
 C_GRID = np.unique(np.concatenate([
     np.linspace(0.05, 1.0, 20),       # shrinkage candidates (0.05 step)
     np.linspace(1.05, 5.0, 80),       # near 1 (0.05 step)
