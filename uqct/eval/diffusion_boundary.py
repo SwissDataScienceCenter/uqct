@@ -640,9 +640,6 @@ def main(
         # We assume the prefix handles unique identification
         fname = f"{output_prefix}.h5"
     else:
-        # Legacy "boundary_diffusion:" pattern, matching the SK-ROCK / EB / bootstrap
-        # naming convention so downstream globs and parsers are uniform.
-        # If idx_range is None we use the full image range from the parquet.
         seed = int(config_row["seed"])
         from datetime import datetime
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
