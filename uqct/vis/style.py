@@ -66,21 +66,28 @@ MODEL_NAMES = {
 # Order in the dict matches MODEL_ORDER for cleanliness; the dict itself is
 # what get_model_colors() returns.
 _MODEL_COLORS_EXPLICIT: dict[str, str] = {
-    "fbp":                           "#1f77b4",  # tab:blue   (paper)
-    "mle":                           "#ff7f0e",  # tab:orange (paper)
-    "unet":                          "#2ca02c",  # tab:green  (paper)
-    "unet_ensemble":                 "#D55E00",  # Okabe-Ito vermillion (was tab:red)
-    "diffusion":                     "#9467bd",  # tab:purple (paper)
-    "bootstrapping_fbp":             "#8c564b",  # tab:brown  (paper)
-    "bootstrapping_unet":            "#e377c2",  # tab:pink   (paper)
-    "bootstrapping_unet_ensemble":   "#7f7f7f",  # tab:gray   (paper)
-    "equivariant_bootstrapping_fbp": "#bcbd22",  # tab:olive  (new method, was the
-                                                 # next free tab10 color)
-    "boundary":                      "#17becf",  # tab:cyan   (paper)
-    "skrock":                        "#000000",  # black (new method, colorblind-distinct)
-    "distance_maximization":         "#F0E442",  # Okabe-Ito yellow (paper position
-                                                 # collided when new methods were
-                                                 # added; this is colorblind-safe)
+    # Paper analysis-level method names -> paper colors (faithfully restored).
+    # In uqct.vis.plot_uq.METHODS, 'fbp' and 'unet' represent the BOOTSTRAP
+    # variants (displayed as 'FBP Bootstr.' / 'U-Net Bootstr.'), so they get
+    # the paper's bootstrap colors.
+    "fbp":                           "#1f77b4",  # tab:blue   -> 'FBP Bootstr.'
+    "unet":                          "#2ca02c",  # tab:green  -> 'U-Net Bootstr.'
+    "unet_ensemble":                 "#D55E00",  # Okabe-Ito vermillion (paper:
+                                                 # tab:red; this is the one
+                                                 # minimal change for colorblind
+                                                 # red/blue distinguishability).
+    "boundary":                      "#9467bd",  # tab:purple
+    "distance_maximization":         "#17becf",  # tab:cyan   -> 'Worst-Case'
+    # Other paper methods (not currently in METHODS but used elsewhere).
+    "mle":                           "#ff7f0e",  # tab:orange
+    "diffusion":                     "#9467bd",  # tab:purple (same hue as boundary;
+                                                 # never co-plotted with boundary)
+    "bootstrapping_fbp":             "#1f77b4",  # same as 'fbp' alias
+    "bootstrapping_unet":            "#2ca02c",  # same as 'unet' alias
+    "bootstrapping_unet_ensemble":   "#7f7f7f",  # tab:gray
+    # NEW methods, chosen to be distinct from paper hues + colorblind-friendly.
+    "equivariant_bootstrapping_fbp": "#8c564b",  # tab:brown
+    "skrock":                        "#000000",  # black
 }
 
 

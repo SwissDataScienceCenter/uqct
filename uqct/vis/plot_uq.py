@@ -888,15 +888,19 @@ def main(n_bootstraps, cache, out):
         fig.tight_layout(rect=(0, 0.08, 1, 1))
 
         if handles:
+            # ncol=len(handles) -> single row of methods, matching the paper
+            # layout. With 7 methods (paper 5 + SK-ROCK + Equiv. Bootstr.) this
+            # stays compact.
             fig.legend(
                 handles,
                 labels,
                 loc="lower center",
                 bbox_to_anchor=(0.5, 0.0),
-                ncol=5,
+                ncol=max(len(handles), 5),
                 frameon=False,
                 borderpad=0.2,
                 labelspacing=0.2,
+                columnspacing=1.2,
             )
 
         out_path = out_dir / "sparse_combined_chosen_metrics.pdf"
