@@ -635,16 +635,21 @@ def main(
     output_dir = get_results_dir() / "boundary_sampling"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    run_id = config_row.get("run_id", "unknown")
-    # Include range in filename if subset
-    range_str = f"_{start_idx}-{end_idx}" if idx_range is not None else ""
-
     if output_prefix:
         # If output prefix is provided, use it directly (append .h5)
         # We assume the prefix handles unique identification
         fname = f"{output_prefix}.h5"
     else:
-        fname = f"{dataset}_{total_intensity}_{run_id}{range_str}_boundary.h5"
+        # Legacy "boundary_diffusion:" pattern, matching the SK-ROCK / EB / bootstrap
+        # naming convention so downstream globs and parsers are uniform.
+        # If idx_range is None we use the full image range from the parquet.
+        seed = int(config_row["seed"])
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+        fname = (
+            f"boundary_diffusion:{dataset}:{total_intensity}:True:"
+            f"{start_idx}-{end_idx}:{seed}:{ts}.h5"
+        )
 
     out_path = output_dir / fname
 
