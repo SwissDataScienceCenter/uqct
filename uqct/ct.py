@@ -178,36 +178,51 @@ def nll_mixture_angle_schedule(
         -\sum_{s=schedule[i]}^{schedule[i+1] if i < len(schedule) else n_angles}
             \log(\frac{1}{n_pred} \sum_{j=1}^{n_pred} p_s(y_s | images[i, j]))
     $$
+
+    Implementation: the ``schedule`` partitions the angle axis into ``s`` consecutive
+    blocks and the i-th prediction set ``images[..., i, :, :, :]`` is only used for
+    block ``i``'s angles, so we walk the blocks and only forward-project each prediction
+    set against the angles it needs -- bit-identical to the obvious "project everything
+    against all angles, then mask" version (ASTRA's FP at one angle is independent of the
+    others) but with much lower peak memory and FP cost (see ``scripts/opt_nll_mixture.py``
+    for the equivalence fuzz test). Assumes a non-decreasing ``schedule`` (what
+    ``setup_experiment`` always produces).
     """
-
-    # schedule: [1] -> condition prediction on nlls using data up to time 1
-
-    device = images.device
     n_angles = counts.shape[-2]
-
-    # (s, n_angles)
-    schedule_lb = schedule.unsqueeze(1)
-    schedule_ub = torch.cat(
-        [schedule[1:], torch.tensor((n_angles,), device=device)]
-    ).unsqueeze(1)
-    angular_range = torch.arange(n_angles, device=device).expand(len(schedule), -1)
-    mask = angular_range >= schedule_lb
-    mask &= angular_range < schedule_ub
-
     n_pred = images.shape[-3]
-    counts_expanded = counts.unsqueeze(-3).unsqueeze(-3)
-    intensities = intensities.unsqueeze(-3).unsqueeze(-3)
+    sched = schedule.tolist()
+    ubs = sched[1:] + [n_angles]  # block i covers angles [sched[i], ubs[i])
+    log_npred = math.log(n_pred)
+    batch_shape = images.shape[:-4]  # the leading "(...)" dims of the output
 
-    # (..., s, n_pred, n_angles, side_length)
-    nlls = nll(images, counts_expanded, intensities, angles, length_scale).double()
-    mix_input = -nlls.sum(-1) - math.log(n_pred)  # (..., s, n_pred, n_angles)
-    mix = -torch.logsumexp(mix_input, dim=-2)
-    mix[..., ~mask] = 0
+    seg_outs: list[
+        torch.Tensor
+    ] = []  # per-block (..., block_size) mixture-NLL over angles (f64)
+    for i, (lb, ub) in enumerate(zip(sched, ubs)):
+        if (
+            ub <= lb
+        ):  # empty block (only possible for a degenerate schedule) -> contributes nothing
+            seg_outs.append(images.new_zeros((*batch_shape, 0), dtype=torch.float64))
+            continue
+        # .contiguous(): a single s-slice of a contiguous `images` is strided, and when
+        # n_pred == 1 `radon`'s internal reshape collapses that size-1 dim into a
+        # *non*-contiguous view (which ASTRA rejects). For s == 1 this is a no-op.
+        imgs_i = images[..., i, :, :, :].contiguous()  # (..., n_pred, H, W)
+        cnt_i = counts[..., lb:ub, :].unsqueeze(-3)  # (..., 1, block, n_det)
+        int_i = intensities[..., lb:ub, :].unsqueeze(-3)  # (..., 1, block, 1)
+        nll_i = nll(
+            imgs_i, cnt_i, int_i, angles[lb:ub], length_scale
+        )  # (..., n_pred, block, H)
+        si = -nll_i.double().sum(-1) - log_npred  # (..., n_pred, block)
+        mix_i = -torch.logsumexp(si, dim=-2)  # (..., block) f64
+        seg_outs.append(mix_i)
+        del imgs_i, cnt_i, int_i, nll_i, si
+
     if reduce:
-        out = mix.sum(-1)
-    else:
-        out = mix.sum(-2)[..., schedule.min() :]  # min=2 -> [1:]
-    return out.float()
+        # (..., s): per block, the mixture-NLL summed over that block's angles.
+        return torch.stack([m.sum(-1) for m in seg_outs], dim=-1).float()
+    # (..., n_angles - min(schedule)): per-angle mixture-NLL for angles [schedule[0], n_angles).
+    return torch.cat(seg_outs, dim=-1).float()
 
 
 def radon(images: torch.Tensor, angles: torch.Tensor):
